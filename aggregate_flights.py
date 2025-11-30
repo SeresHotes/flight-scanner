@@ -1,0 +1,574 @@
+#!/usr/bin/env python3
+"""
+Скрипт для агрегации и анализа собранных данных о перелетах.
+Находит оптимальные комбинации перелетов с учетом стоимости и времени пребывания.
+"""
+
+import json
+import argparse
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Tuple
+from pathlib import Path
+from collections import defaultdict
+
+
+def load_data(file_path: str) -> Dict[str, Any]:
+    """
+    Загружает данные из JSON файла.
+
+    Args:
+        file_path: Путь к файлу с данными
+
+    Returns:
+        Словарь с данными о перелетах
+    """
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def parse_datetime(date_str: str) -> datetime:
+    """
+    Парсит дату и время из ISO формата.
+
+    Args:
+        date_str: Строка с датой в ISO формате
+
+    Returns:
+        Объект datetime
+    """
+    # Обрабатываем разные форматы дат
+    for fmt in ["%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
+        try:
+            # Убираем timezone для простоты
+            date_clean = date_str.split('+')[0].split('-', 3)
+            if len(date_clean) == 4:
+                date_clean = '-'.join(date_clean[:3])
+            else:
+                date_clean = date_str.split('+')[0]
+            return datetime.strptime(date_clean, fmt)
+        except (ValueError, IndexError):
+            continue
+    raise ValueError(f"Не удалось распарсить дату: {date_str}")
+
+
+def calculate_arrival(departure_at: str, duration: int) -> str:
+    """
+    Вычисляет время прибытия на основе времени вылета и длительности.
+
+    Args:
+        departure_at: Дата/время вылета в ISO формате
+        duration: Длительность полета в минутах
+
+    Returns:
+        Дата/время прибытия в ISO формате
+    """
+    try:
+        departure = parse_datetime(departure_at)
+        arrival = departure + timedelta(minutes=duration)
+        return arrival.isoformat()
+    except Exception as e:
+        print(f"Ошибка вычисления прибытия: {e}")
+        return departure_at
+
+
+def calculate_stay_duration(leg1_arrival: str, leg2_departure: str) -> int:
+    """
+    Вычисляет длительность пребывания в днях между двумя рейсами.
+
+    Args:
+        leg1_arrival: Дата/время прибытия первого рейса
+        leg2_departure: Дата/время отправления второго рейса
+
+    Returns:
+        Количество дней пребывания
+    """
+    try:
+        arrival = parse_datetime(leg1_arrival)
+        departure = parse_datetime(leg2_departure)
+        delta = departure - arrival
+        return delta.days
+    except Exception:
+        # Если не можем распарсить время, считаем по датам
+        try:
+            arrival_date = leg1_arrival.split('T')[0] if 'T' in leg1_arrival else leg1_arrival
+            departure_date = leg2_departure.split('T')[0] if 'T' in leg2_departure else leg2_departure
+
+            arrival = datetime.strptime(arrival_date, "%Y-%m-%d")
+            departure = datetime.strptime(departure_date, "%Y-%m-%d")
+            return (departure - arrival).days
+        except Exception:
+            return 0
+
+
+def find_combinations(data: Dict[str, Any], min_stay: int = 1,
+                     max_stay: int = 30,
+                     leg1_depart_from: str = None, leg1_depart_to: str = None,
+                     leg2_depart_from: str = None, leg2_depart_to: str = None) -> List[Dict[str, Any]]:
+    """
+    Находит все возможные комбинации перелетов.
+
+    Args:
+        data: Данные о перелетах
+        min_stay: Минимальная длительность пребывания в днях
+        max_stay: Максимальная длительность пребывания в днях
+        leg1_depart_from: Минимальная дата вылета первого рейса (YYYY-MM-DD)
+        leg1_depart_to: Максимальная дата вылета первого рейса (YYYY-MM-DD)
+        leg2_depart_from: Минимальная дата вылета второго рейса (YYYY-MM-DD)
+        leg2_depart_to: Максимальная дата вылета второго рейса (YYYY-MM-DD)
+
+    Returns:
+        Список комбинаций перелетов
+    """
+    leg1_flights = data.get("leg1_flights", [])
+    leg2_flights = data.get("leg2_flights", [])
+
+    # Фильтруем первые рейсы по дате вылета, если указано
+    if leg1_depart_from or leg1_depart_to:
+        filtered_leg1 = []
+        for flight in leg1_flights:
+            if not flight.get("departure_at"):
+                continue
+            try:
+                # Извлекаем дату вылета
+                depart_date = flight["departure_at"].split("T")[0]
+
+                # Проверяем диапазон
+                if leg1_depart_from and depart_date < leg1_depart_from:
+                    continue
+                if leg1_depart_to and depart_date > leg1_depart_to:
+                    continue
+
+                filtered_leg1.append(flight)
+            except Exception:
+                continue
+
+        leg1_flights = filtered_leg1
+
+    # Фильтруем вторые рейсы по дате вылета, если указано
+    if leg2_depart_from or leg2_depart_to:
+        filtered_leg2 = []
+        for flight in leg2_flights:
+            if not flight.get("departure_at"):
+                continue
+            try:
+                # Извлекаем дату вылета
+                depart_date = flight["departure_at"].split("T")[0]
+
+                # Проверяем диапазон
+                if leg2_depart_from and depart_date < leg2_depart_from:
+                    continue
+                if leg2_depart_to and depart_date > leg2_depart_to:
+                    continue
+
+                filtered_leg2.append(flight)
+            except Exception:
+                continue
+
+        leg2_flights = filtered_leg2
+
+    combinations = []
+
+    # Формируем информацию о фильтрах
+    leg1_filter = ""
+    if leg1_depart_from and leg1_depart_to:
+        leg1_filter = f" (вылет: {leg1_depart_from} - {leg1_depart_to})"
+    elif leg1_depart_from:
+        leg1_filter = f" (вылет: от {leg1_depart_from})"
+    elif leg1_depart_to:
+        leg1_filter = f" (вылет: до {leg1_depart_to})"
+
+    leg2_filter = ""
+    if leg2_depart_from and leg2_depart_to:
+        leg2_filter = f" (вылет: {leg2_depart_from} - {leg2_depart_to})"
+    elif leg2_depart_from:
+        leg2_filter = f" (вылет: от {leg2_depart_from})"
+    elif leg2_depart_to:
+        leg2_filter = f" (вылет: до {leg2_depart_to})"
+
+    print(f"\nАнализ {len(leg1_flights)} рейсов первого этапа{leg1_filter} и {len(leg2_flights)} рейсов второго этапа{leg2_filter}...")
+
+    for flight1 in leg1_flights:
+        # Получаем город прибытия первого рейса
+        intermediate_city = flight1.get("destination") or flight1.get("search_destination")
+
+        # Вычисляем дату/время прибытия первого рейса
+        if flight1.get("arrival_at"):
+            arrival_at = flight1["arrival_at"]
+        elif flight1.get("departure_at") and flight1.get("duration"):
+            # Вычисляем на основе departure_at + duration
+            arrival_at = calculate_arrival(flight1["departure_at"], flight1["duration"])
+        else:
+            # Если нет данных, пропускаем этот рейс
+            continue
+
+        for flight2 in leg2_flights:
+            # Проверяем, что второй рейс начинается из того же промежуточного города
+            leg2_origin = flight2.get("origin") or flight2.get("search_origin")
+
+            if leg2_origin != intermediate_city:
+                continue
+
+            # Получаем дату/время отправления второго рейса
+            if not flight2.get("departure_at"):
+                continue
+            departure_at = flight2["departure_at"]
+
+            # Вычисляем длительность пребывания
+            stay_days = calculate_stay_duration(arrival_at, departure_at)
+
+            # Проверяем, что пребывание в допустимых пределах
+            if stay_days < min_stay or stay_days > max_stay:
+                continue
+
+            # Вычисляем общую стоимость
+            price1 = flight1.get("price") or flight1.get("value", 0)
+            price2 = flight2.get("price") or flight2.get("value", 0)
+            total_price = price1 + price2
+
+            # Вычисляем время прибытия второго рейса
+            if flight2.get("arrival_at"):
+                leg2_arrival = flight2["arrival_at"]
+            elif flight2.get("departure_at") and flight2.get("duration"):
+                leg2_arrival = calculate_arrival(flight2["departure_at"], flight2["duration"])
+            else:
+                leg2_arrival = departure_at
+
+            # Формируем комбинацию
+            combination = {
+                "total_price": total_price,
+                "stay_days": stay_days,
+                "intermediate_city": intermediate_city,
+                "leg1": {
+                    "origin": flight1.get("origin") or flight1.get("search_origin"),
+                    "destination": intermediate_city,
+                    "departure_at": flight1.get("departure_at"),
+                    "arrival_at": arrival_at,
+                    "price": price1,
+                    "airline": flight1.get("airline"),
+                    "flight_number": flight1.get("flight_number"),
+                    "link": flight1.get("link"),
+                    "duration": flight1.get("duration")
+                },
+                "leg2": {
+                    "origin": intermediate_city,
+                    "destination": flight2.get("destination") or flight2.get("search_destination"),
+                    "departure_at": departure_at,
+                    "arrival_at": leg2_arrival,
+                    "price": price2,
+                    "airline": flight2.get("airline"),
+                    "flight_number": flight2.get("flight_number"),
+                    "link": flight2.get("link"),
+                    "duration": flight2.get("duration")
+                }
+            }
+
+            combinations.append(combination)
+
+    return combinations
+
+
+def get_statistics(combinations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Вычисляет статистику по найденным комбинациям.
+
+    Args:
+        combinations: Список комбинаций перелетов
+
+    Returns:
+        Словарь со статистикой
+    """
+    if not combinations:
+        return {
+            "total_combinations": 0,
+            "min_price": 0,
+            "max_price": 0,
+            "avg_price": 0,
+            "median_price": 0
+        }
+
+    prices = [c["total_price"] for c in combinations]
+    prices.sort()
+
+    # Статистика по промежуточным городам
+    cities_stats = defaultdict(lambda: {"count": 0, "min_price": float('inf'), "avg_prices": []})
+
+    for combo in combinations:
+        city = combo["intermediate_city"]
+        price = combo["total_price"]
+        cities_stats[city]["count"] += 1
+        cities_stats[city]["min_price"] = min(cities_stats[city]["min_price"], price)
+        cities_stats[city]["avg_prices"].append(price)
+
+    # Вычисляем средние цены
+    for city in cities_stats:
+        avg_price = sum(cities_stats[city]["avg_prices"]) / len(cities_stats[city]["avg_prices"])
+        cities_stats[city]["avg_price"] = round(avg_price, 2)
+        del cities_stats[city]["avg_prices"]
+
+    return {
+        "total_combinations": len(combinations),
+        "min_price": min(prices),
+        "max_price": max(prices),
+        "avg_price": round(sum(prices) / len(prices), 2),
+        "median_price": prices[len(prices) // 2],
+        "by_intermediate_city": dict(cities_stats)
+    }
+
+
+def print_summary(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
+                 top_n: int = 10):
+    """
+    Выводит сводку по найденным комбинациям.
+
+    Args:
+        combinations: Список комбинаций перелетов
+        stats: Статистика
+        top_n: Количество лучших вариантов для отображения
+    """
+    print(f"\n{'='*80}")
+    print("РЕЗУЛЬТАТЫ АНАЛИЗА")
+    print(f"{'='*80}\n")
+
+    if not combinations:
+        print("❌ Не найдено подходящих комбинаций перелетов")
+        return
+
+    print(f"✓ Найдено комбинаций: {stats['total_combinations']}")
+    print(f"\nСтатистика по ценам:")
+    print(f"  Минимальная: {stats['min_price']:,.0f}")
+    print(f"  Средняя:     {stats['avg_price']:,.0f}")
+    print(f"  Медианная:   {stats['median_price']:,.0f}")
+    print(f"  Максимальная: {stats['max_price']:,.0f}")
+
+    if stats.get("by_intermediate_city"):
+        print(f"\nСтатистика по промежуточным городам:")
+        for city, city_stats in sorted(stats["by_intermediate_city"].items(),
+                                      key=lambda x: x[1]["min_price"]):
+            print(f"  {city}:")
+            print(f"    - Комбинаций: {city_stats['count']}")
+            print(f"    - Мин. цена: {city_stats['min_price']:,.0f}")
+            print(f"    - Сред. цена: {city_stats['avg_price']:,.0f}")
+
+    # Сортируем по цене
+    sorted_combinations = sorted(combinations, key=lambda x: x["total_price"])
+
+    print(f"\n{'='*80}")
+    print(f"ТОП-{min(top_n, len(sorted_combinations))} САМЫХ ДЕШЕВЫХ ВАРИАНТОВ")
+    print(f"{'='*80}\n")
+
+    for i, combo in enumerate(sorted_combinations[:top_n], 1):
+        print(f"#{i}. Общая стоимость: {combo['total_price']:,.0f} RUB | "
+              f"Пребывание: {combo['stay_days']} дней")
+        print(f"    Промежуточный город: {combo['intermediate_city']}")
+
+        leg1 = combo["leg1"]
+        duration1_str = f"{leg1.get('duration', 0) // 60}ч {leg1.get('duration', 0) % 60}м" if leg1.get('duration') else ""
+        print(f"\n    ✈️  Этап 1: {leg1['origin']} → {leg1['destination']}")
+        print(f"        Вылет:       {leg1['departure_at']}")
+        print(f"        Прибытие:    {leg1['arrival_at']}")
+        if duration1_str:
+            print(f"        Длительность: {duration1_str}")
+        print(f"        Цена:        {leg1['price']:,.0f} RUB")
+        if leg1.get('airline'):
+            print(f"        Авиакомпания: {leg1['airline']}")
+        if leg1.get('flight_number'):
+            print(f"        Рейс: {leg1['airline']} {leg1['flight_number']}")
+
+        leg2 = combo["leg2"]
+        duration2_str = f"{leg2.get('duration', 0) // 60}ч {leg2.get('duration', 0) % 60}м" if leg2.get('duration') else ""
+        print(f"\n    ✈️  Этап 2: {leg2['origin']} → {leg2['destination']}")
+        print(f"        Вылет:       {leg2['departure_at']}")
+        print(f"        Прибытие:    {leg2['arrival_at']}")
+        if duration2_str:
+            print(f"        Длительность: {duration2_str}")
+        print(f"        Цена:        {leg2['price']:,.0f} RUB")
+        if leg2.get('airline'):
+            print(f"        Авиакомпания: {leg2['airline']}")
+        if leg2.get('flight_number'):
+            print(f"        Рейс: {leg2['airline']} {leg2['flight_number']}")
+
+        print()
+
+
+def save_results(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
+                output_file: str):
+    """
+    Сохраняет результаты анализа в JSON файл.
+
+    Args:
+        combinations: Список комбинаций
+        stats: Статистика
+        output_file: Путь к выходному файлу
+    """
+    # Сортируем по цене
+    sorted_combinations = sorted(combinations, key=lambda x: x["total_price"])
+
+    result = {
+        "generated_at": datetime.now().isoformat(),
+        "statistics": stats,
+        "combinations": sorted_combinations
+    }
+
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    print(f"\n✓ Результаты сохранены в {output_file}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Агрегация и анализ данных о перелетах",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Примеры использования:
+
+  # Базовый анализ
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json
+
+  # С ограничениями на длительность пребывания
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
+    --min-stay 3 --max-stay 7
+
+  # Вывод топ-20 вариантов
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
+    --top 20
+
+  # Фильтрация по дате вылета первого этапа
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
+    --leg1-date 2026-02-19
+
+  # Фильтрация по дате вылета второго этапа
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
+    --leg2-date 2026-02-25
+
+  # Диапазон дат для обоих этапов
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
+    --leg1-from 2026-02-18 --leg1-to 2026-02-20 \\
+    --leg2-from 2026-02-25 --leg2-to 2026-02-28
+
+  # Сохранение результатов в файл
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
+    --output results/best_combinations.json
+        """
+    )
+
+    parser.add_argument("input_file", help="Путь к файлу с собранными данными о перелетах")
+
+    parser.add_argument("--min-stay", type=int, default=1,
+                       help="Минимальная длительность пребывания в днях (по умолчанию 1)")
+
+    parser.add_argument("--max-stay", type=int, default=30,
+                       help="Максимальная длительность пребывания в днях (по умолчанию 30)")
+
+    # Фильтры для первого этапа
+    parser.add_argument("--leg1-date", type=str, default=None,
+                       help="Конкретная дата вылета первого рейса (YYYY-MM-DD)")
+
+    parser.add_argument("--leg1-from", type=str, default=None,
+                       help="Минимальная дата вылета первого рейса (YYYY-MM-DD)")
+
+    parser.add_argument("--leg1-to", type=str, default=None,
+                       help="Максимальная дата вылета первого рейса (YYYY-MM-DD)")
+
+    # Фильтры для второго этапа
+    parser.add_argument("--leg2-date", type=str, default=None,
+                       help="Конкретная дата вылета второго рейса (YYYY-MM-DD)")
+
+    parser.add_argument("--leg2-from", type=str, default=None,
+                       help="Минимальная дата вылета второго рейса (YYYY-MM-DD)")
+
+    parser.add_argument("--leg2-to", type=str, default=None,
+                       help="Максимальная дата вылета второго рейса (YYYY-MM-DD)")
+
+    # Устаревшие параметры для обратной совместимости
+    parser.add_argument("--depart-date", type=str, default=None,
+                       help="(устарело, используйте --leg1-date) Дата вылета первого рейса")
+
+    parser.add_argument("--depart-from", type=str, default=None,
+                       help="(устарело, используйте --leg1-from) Мин. дата вылета первого рейса")
+
+    parser.add_argument("--depart-to", type=str, default=None,
+                       help="(устарело, используйте --leg1-to) Макс. дата вылета первого рейса")
+
+    parser.add_argument("--top", type=int, default=10,
+                       help="Количество лучших вариантов для отображения (по умолчанию 10)")
+
+    parser.add_argument("--output", default=None,
+                       help="Путь к файлу для сохранения результатов (опционально)")
+
+    args = parser.parse_args()
+
+    # Проверяем существование входного файла
+    if not Path(args.input_file).exists():
+        print(f"❌ Ошибка: файл {args.input_file} не найден")
+        return
+
+    # Обрабатываем параметры дат вылета для первого этапа
+    leg1_from = args.leg1_from or args.depart_from
+    leg1_to = args.leg1_to or args.depart_to
+
+    # Если указана конкретная дата для leg1, используем её как диапазон из одного дня
+    if args.leg1_date or args.depart_date:
+        leg1_date = args.leg1_date or args.depart_date
+        leg1_from = leg1_date
+        leg1_to = leg1_date
+
+    # Обрабатываем параметры дат вылета для второго этапа
+    leg2_from = args.leg2_from
+    leg2_to = args.leg2_to
+
+    # Если указана конкретная дата для leg2, используем её как диапазон из одного дня
+    if args.leg2_date:
+        leg2_from = args.leg2_date
+        leg2_to = args.leg2_date
+
+    print(f"\n{'#'*80}")
+    print("АНАЛИЗ ДАННЫХ О ПЕРЕЛЕТАХ")
+    print(f"{'#'*80}")
+    print(f"Входной файл: {args.input_file}")
+    print(f"Диапазон пребывания: {args.min_stay}-{args.max_stay} дней")
+
+    # Выводим информацию о фильтрах дат
+    if leg1_from and leg1_to and leg1_from == leg1_to:
+        print(f"Дата вылета (этап 1): {leg1_from}")
+    elif leg1_from or leg1_to:
+        date_range = f"{leg1_from or 'любая'} - {leg1_to or 'любая'}"
+        print(f"Диапазон дат вылета (этап 1): {date_range}")
+
+    if leg2_from and leg2_to and leg2_from == leg2_to:
+        print(f"Дата вылета (этап 2): {leg2_from}")
+    elif leg2_from or leg2_to:
+        date_range = f"{leg2_from or 'любая'} - {leg2_to or 'любая'}"
+        print(f"Диапазон дат вылета (этап 2): {date_range}")
+
+    # Загружаем данные
+    data = load_data(args.input_file)
+
+    # Выводим метаданные
+    metadata = data.get("metadata", {})
+    if metadata:
+        print(f"\nМаршрут: {metadata.get('origin')} → "
+              f"[{', '.join(metadata.get('intermediate_airports', []))}] → "
+              f"{metadata.get('destination')}")
+        print(f"Собрано рейсов: {metadata.get('total_flights')}")
+
+    # Находим комбинации
+    combinations = find_combinations(data, args.min_stay, args.max_stay,
+                                    leg1_from, leg1_to, leg2_from, leg2_to)
+
+    # Вычисляем статистику
+    stats = get_statistics(combinations)
+
+    # Выводим результаты
+    print_summary(combinations, stats, args.top)
+
+    # Сохраняем результаты, если указан выходной файл
+    if args.output:
+        save_results(combinations, stats, args.output)
+
+
+if __name__ == "__main__":
+    main()
