@@ -92,7 +92,7 @@ def fetch_airports_from_huggingface() -> List[Dict]:
         raise
 
 
-def build_airport_network(airports: List[Dict], max_distance_km: float = 100) -> Dict[str, List[Dict]]:
+def build_airport_network(airports: List[Dict], max_distance_km: float = 100) -> Dict[str, Dict]:
     """
     Строит сеть аэропортов, определяя для каждого аэропорта близлежащие аэропорты.
 
@@ -101,11 +101,12 @@ def build_airport_network(airports: List[Dict], max_distance_km: float = 100) ->
         max_distance_km: Максимальное расстояние для считывания аэропортов близлежащими (в км)
 
     Returns:
-        Словарь {IATA_код: [{"iata": код, "name": название, "distance_km": расстояние}, ...]}
+        Словарь {IATA_код: {"name": название, "municipality": город, "country": страна,
+                           "coordinates": "lat, lon", "nearby_airports": [список IATA кодов]}}
     """
     print(f"\nСтроим сеть аэропортов (макс. расстояние: {max_distance_km} км)...")
 
-    # Создаем словарь аэропортов с координатами
+    # Создаем словарь аэропортов с координатами и информацией
     airport_coords = {}
     airport_info = {}
 
@@ -114,13 +115,15 @@ def build_airport_network(airports: List[Dict], max_distance_km: float = 100) ->
         if not iata:
             continue
 
-        lat, lon = parse_coordinates(airport.get("coordinates", ""))
+        coords_str = airport.get("coordinates", "")
+        lat, lon = parse_coordinates(coords_str)
         if lat is not None and lon is not None:
             airport_coords[iata] = (lat, lon)
             airport_info[iata] = {
                 "name": airport.get("name", ""),
                 "municipality": airport.get("municipality", ""),
-                "country": airport.get("iso_country", "")
+                "country": airport.get("iso_country", ""),
+                "coordinates": coords_str
             }
 
     print(f"Обрабатываем {len(airport_coords)} аэропортов с корректными координатами...")
@@ -130,7 +133,7 @@ def build_airport_network(airports: List[Dict], max_distance_km: float = 100) ->
     processed = 0
 
     for iata1, (lat1, lon1) in airport_coords.items():
-        nearby = []
+        nearby_with_distances = []
 
         for iata2, (lat2, lon2) in airport_coords.items():
             if iata1 == iata2:
@@ -139,25 +142,28 @@ def build_airport_network(airports: List[Dict], max_distance_km: float = 100) ->
             distance = haversine_distance(lat1, lon1, lat2, lon2)
 
             if distance <= max_distance_km:
-                nearby.append({
+                nearby_with_distances.append({
                     "iata": iata2,
-                    "name": airport_info[iata2]["name"],
-                    "municipality": airport_info[iata2]["municipality"],
-                    "country": airport_info[iata2]["country"],
                     "distance_km": round(distance, 2)
                 })
 
         # Сортируем по расстоянию
-        nearby.sort(key=lambda x: x["distance_km"])
+        nearby_with_distances.sort(key=lambda x: x["distance_km"])
 
-        if nearby:
-            network[iata1] = nearby
+        # Создаем запись для этого аэропорта
+        network[iata1] = {
+            "name": airport_info[iata1]["name"],
+            "municipality": airport_info[iata1]["municipality"],
+            "country": airport_info[iata1]["country"],
+            "coordinates": airport_info[iata1]["coordinates"],
+            "nearby_airports": nearby_with_distances
+        }
 
         processed += 1
         if processed % 100 == 0:
             print(f"Обработано {processed}/{len(airport_coords)} аэропортов...")
 
-    print(f"Найдено {len(network)} аэропортов с близлежащими соседями")
+    print(f"Обработано {len(network)} аэропортов")
     return network
 
 
@@ -178,7 +184,7 @@ def save_network(network: Dict, output_file: str = "data/airport_network.json"):
     print(f"\nСеть аэропортов сохранена в {output_file}")
 
     # Выводим статистику
-    total_connections = sum(len(nearby) for nearby in network.values())
+    total_connections = sum(len(info.get("nearby_airports", [])) for info in network.values())
     avg_connections = total_connections / len(network) if network else 0
 
     print(f"\nСтатистика:")
@@ -188,11 +194,16 @@ def save_network(network: Dict, output_file: str = "data/airport_network.json"):
 
     # Примеры
     print(f"\nПримеры близких аэропортов:")
-    for i, (iata, nearby) in enumerate(list(network.items())[:5]):
-        if nearby:
-            print(f"  {iata}:")
-            for neighbor in nearby[:3]:
-                print(f"    - {neighbor['iata']} ({neighbor['name']}, {neighbor['municipality']}): {neighbor['distance_km']} км")
+    for i, (iata, info) in enumerate(list(network.items())[:5]):
+        nearby_list = info.get("nearby_airports", [])
+        if nearby_list:
+            print(f"  {iata} ({info['municipality']}, {info['country']}):")
+            for neighbor_item in nearby_list[:3]:
+                neighbor_iata = neighbor_item.get("iata")
+                neighbor_distance = neighbor_item.get("distance_km")
+                if neighbor_iata in network:
+                    neighbor_info = network[neighbor_iata]
+                    print(f"    - {neighbor_iata} ({neighbor_info['municipality']}, {neighbor_info['country']}): {neighbor_distance} км")
 
 
 def main():

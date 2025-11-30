@@ -27,7 +27,7 @@ def load_data(file_path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def load_airport_network(network_file: str = "data/airport_network.json") -> Dict[str, List[Dict]]:
+def load_airport_network(network_file: str = "data/airport_network.json") -> Dict[str, Dict]:
     """
     Загружает сеть аэропортов. Если файл не существует, запускает скрипт для его создания.
 
@@ -35,7 +35,7 @@ def load_airport_network(network_file: str = "data/airport_network.json") -> Dic
         network_file: Путь к файлу с сетью аэропортов
 
     Returns:
-        Словарь с сетью аэропортов {IATA: [{"iata": ..., "distance_km": ...}, ...]}
+        Словарь с сетью аэропортов {IATA: {"name": ..., "municipality": ..., "nearby_airports": [...]}}
     """
     network_path = Path(network_file)
 
@@ -72,8 +72,24 @@ def load_airport_network(network_file: str = "data/airport_network.json") -> Dic
         return {}
 
 
-def get_nearby_airports(airport_iata: str, network: Dict[str, List[Dict]],
-                       max_distance_km: float = 100) -> Set[str]:
+def get_airport_city_name(iata: str, network: Dict[str, Dict]) -> str:
+    """
+    Возвращает название города аэропорта.
+
+    Args:
+        iata: IATA код аэропорта
+        network: Сеть аэропортов
+
+    Returns:
+        Название города или пустую строку
+    """
+    if network and iata in network:
+        return network[iata].get("municipality", "")
+    return ""
+
+
+def get_nearby_airports(airport_iata: str, network: Dict[str, Dict],
+                       max_distance_km: float = 100, same_country_only: bool = True) -> Set[str]:
     """
     Возвращает набор IATA кодов аэропортов, близких к указанному аэропорту.
 
@@ -81,6 +97,7 @@ def get_nearby_airports(airport_iata: str, network: Dict[str, List[Dict]],
         airport_iata: IATA код аэропорта
         network: Сеть аэропортов
         max_distance_km: Максимальное расстояние для учета аэропорта
+        same_country_only: Если True, возвращает только аэропорты из той же страны
 
     Returns:
         Набор IATA кодов близких аэропортов (включая сам аэропорт)
@@ -88,9 +105,42 @@ def get_nearby_airports(airport_iata: str, network: Dict[str, List[Dict]],
     nearby = {airport_iata}  # Включаем сам аэропорт
 
     if airport_iata in network:
-        for neighbor in network[airport_iata]:
-            if neighbor.get("distance_km", float('inf')) <= max_distance_km:
-                nearby.add(neighbor["iata"])
+        airport_info = network[airport_iata]
+        nearby_list = airport_info.get("nearby_airports", [])
+
+        # Если требуется фильтрация по стране
+        if same_country_only:
+            airport_country = airport_info.get("country")
+            if airport_country:
+                # Фильтруем только аэропорты из той же страны и с подходящим расстоянием
+                for nearby_item in nearby_list:
+                    nearby_iata = nearby_item.get("iata") if isinstance(nearby_item, dict) else nearby_item
+                    distance = nearby_item.get("distance_km", 0) if isinstance(nearby_item, dict) else 0
+
+                    # Проверяем расстояние
+                    if distance > max_distance_km:
+                        continue
+
+                    if nearby_iata in network:
+                        nearby_country = network[nearby_iata].get("country")
+                        if nearby_country == airport_country:
+                            nearby.add(nearby_iata)
+            else:
+                # Если нет информации о стране, добавляем все с подходящим расстоянием
+                for nearby_item in nearby_list:
+                    nearby_iata = nearby_item.get("iata") if isinstance(nearby_item, dict) else nearby_item
+                    distance = nearby_item.get("distance_km", 0) if isinstance(nearby_item, dict) else 0
+
+                    if distance <= max_distance_km:
+                        nearby.add(nearby_iata)
+        else:
+            # Без фильтрации по стране - добавляем все с подходящим расстоянием
+            for nearby_item in nearby_list:
+                nearby_iata = nearby_item.get("iata") if isinstance(nearby_item, dict) else nearby_item
+                distance = nearby_item.get("distance_km", 0) if isinstance(nearby_item, dict) else 0
+
+                if distance <= max_distance_km:
+                    nearby.add(nearby_iata)
 
     return nearby
 
@@ -175,7 +225,8 @@ def find_combinations(data: Dict[str, Any], min_stay: int = 1,
                      leg2_depart_from: str = None, leg2_depart_to: str = None,
                      via_city: str = None,
                      airport_network: Dict[str, List[Dict]] = None,
-                     max_airport_distance: float = 100) -> List[Dict[str, Any]]:
+                     max_airport_distance: float = 100,
+                     same_country_only: bool = True) -> List[Dict[str, Any]]:
     """
     Находит все возможные комбинации перелетов.
 
@@ -190,6 +241,7 @@ def find_combinations(data: Dict[str, Any], min_stay: int = 1,
         via_city: Фильтр по конкретному промежуточному городу (IATA код)
         airport_network: Сеть аэропортов для учета переходов между близкими аэропортами
         max_airport_distance: Максимальное расстояние между аэропортами (км)
+        same_country_only: Если True, переходы только между аэропортами одной страны
 
     Returns:
         Список комбинаций перелетов
@@ -277,7 +329,8 @@ def find_combinations(data: Dict[str, Any], min_stay: int = 1,
         # Определяем набор допустимых аэропортов для второго рейса
         # (либо тот же аэропорт, либо близлежащие, если включена сеть)
         if airport_network and intermediate_city:
-            allowed_airports = get_nearby_airports(intermediate_city, airport_network, max_airport_distance)
+            allowed_airports = get_nearby_airports(intermediate_city, airport_network,
+                                                  max_airport_distance, same_country_only)
         else:
             allowed_airports = {intermediate_city} if intermediate_city else set()
 
@@ -357,17 +410,30 @@ def find_combinations(data: Dict[str, Any], min_stay: int = 1,
 
             # Добавляем информацию о переходе между аэропортами, если применимо
             if is_airport_transfer and airport_network:
-                # Находим расстояние между аэропортами
+                # Получаем расстояние из сети аэропортов
                 transfer_distance = None
-                if intermediate_city in airport_network:
-                    for neighbor in airport_network[intermediate_city]:
-                        if neighbor["iata"] == leg2_origin:
-                            transfer_distance = neighbor.get("distance_km")
+                from_city_name = None
+                to_city_name = None
+
+                if intermediate_city in airport_network and leg2_origin in airport_network:
+                    from_info = airport_network[intermediate_city]
+                    to_info = airport_network[leg2_origin]
+
+                    from_city_name = from_info.get("municipality", "")
+                    to_city_name = to_info.get("municipality", "")
+
+                    # Получаем расстояние из nearby_airports
+                    nearby_airports = from_info.get("nearby_airports", [])
+                    for nearby_item in nearby_airports:
+                        if isinstance(nearby_item, dict) and nearby_item.get("iata") == leg2_origin:
+                            transfer_distance = nearby_item.get("distance_km")
                             break
 
                 combination["airport_transfer"] = {
                     "from_airport": intermediate_city,
+                    "from_city": from_city_name,
                     "to_airport": leg2_origin,
+                    "to_city": to_city_name,
                     "distance_km": transfer_distance
                 }
 
@@ -425,7 +491,8 @@ def get_statistics(combinations: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def print_summary(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
-                 top_n: int = 10, unique_cities: bool = False):
+                 top_n: int = 10, unique_cities: bool = False,
+                 airport_network: Dict[str, Dict] = None):
     """
     Выводит сводку по найденным комбинациям.
 
@@ -434,6 +501,7 @@ def print_summary(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
         stats: Статистика
         top_n: Количество лучших вариантов для отображения
         unique_cities: Если True, показывает только уникальные промежуточные города (самые дешевые)
+        airport_network: Сеть аэропортов для получения информации о городах
     """
     print(f"\n{'='*80}")
     print("РЕЗУЛЬТАТЫ АНАЛИЗА")
@@ -483,11 +551,32 @@ def print_summary(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
     for i, combo in enumerate(sorted_combinations[:top_n], 1):
         print(f"#{i}. Общая стоимость: {combo['total_price']:,.0f} RUB | "
               f"Пребывание: {combo['stay_days']} дней")
-        print(f"    Промежуточный город: {combo['intermediate_city']}")
+
+        # Получаем название промежуточного города
+        intermediate_city = combo['intermediate_city']
+        city_name = get_airport_city_name(intermediate_city, airport_network)
+        if city_name:
+            print(f"    Промежуточный город: {intermediate_city} ({city_name})")
+        else:
+            print(f"    Промежуточный город: {intermediate_city}")
 
         leg1 = combo["leg1"]
         duration1_str = f"{leg1.get('duration', 0) // 60}ч {leg1.get('duration', 0) % 60}м" if leg1.get('duration') else ""
-        print(f"\n    ✈️  Этап 1: {leg1['origin']} → {leg1['destination']}")
+
+        # Форматируем маршрут с названиями городов
+        origin1 = leg1['origin']
+        dest1 = leg1['destination']
+        origin1_city = get_airport_city_name(origin1, airport_network)
+        dest1_city = get_airport_city_name(dest1, airport_network)
+
+        route1 = f"{origin1}"
+        if origin1_city:
+            route1 += f" ({origin1_city})"
+        route1 += f" → {dest1}"
+        if dest1_city:
+            route1 += f" ({dest1_city})"
+
+        print(f"\n    ✈️  Этап 1: {route1}")
         print(f"        Вылет:       {leg1['departure_at']}")
         print(f"        Прибытие:    {leg1['arrival_at']}")
         if duration1_str:
@@ -502,14 +591,34 @@ def print_summary(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
         if combo.get("airport_transfer"):
             transfer = combo["airport_transfer"]
             print(f"\n    🚌 Переход между аэропортами:")
-            print(f"        Из: {transfer['from_airport']}")
-            print(f"        В:  {transfer['to_airport']}")
+            from_str = transfer['from_airport']
+            if transfer.get('from_city'):
+                from_str += f" ({transfer['from_city']})"
+            to_str = transfer['to_airport']
+            if transfer.get('to_city'):
+                to_str += f" ({transfer['to_city']})"
+            print(f"        Из: {from_str}")
+            print(f"        В:  {to_str}")
             if transfer.get('distance_km'):
                 print(f"        Расстояние: {transfer['distance_km']:.2f} км")
 
         leg2 = combo["leg2"]
         duration2_str = f"{leg2.get('duration', 0) // 60}ч {leg2.get('duration', 0) % 60}м" if leg2.get('duration') else ""
-        print(f"\n    ✈️  Этап 2: {leg2['origin']} → {leg2['destination']}")
+
+        # Форматируем маршрут с названиями городов
+        origin2 = leg2['origin']
+        dest2 = leg2['destination']
+        origin2_city = get_airport_city_name(origin2, airport_network)
+        dest2_city = get_airport_city_name(dest2, airport_network)
+
+        route2 = f"{origin2}"
+        if origin2_city:
+            route2 += f" ({origin2_city})"
+        route2 += f" → {dest2}"
+        if dest2_city:
+            route2 += f" ({dest2_city})"
+
+        print(f"\n    ✈️  Этап 2: {route2}")
         print(f"        Вылет:       {leg2['departure_at']}")
         print(f"        Прибытие:    {leg2['arrival_at']}")
         if duration2_str:
@@ -606,9 +715,13 @@ def main():
   python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
     --output results/best_combinations.json
 
-  # Поиск с учетом переходов между аэропортами (например, прилет в SVO, вылет из DME)
+  # Отключение переходов между аэропортами (по умолчанию включены)
   python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
-    --enable-airport-transfers --airport-distance 100
+    --disable-airport-transfers
+
+  # Разрешить переходы между аэропортами разных стран
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
+    --allow-cross-country-transfers
         """
     )
 
@@ -659,8 +772,11 @@ def main():
     parser.add_argument("--via", type=str, default=None,
                        help="Фильтр по конкретному промежуточному городу (IATA код, например IST или DXB)")
 
-    parser.add_argument("--enable-airport-transfers", action="store_true",
-                       help="Включить поиск с учетом переходов между близкими аэропортами (например, SVO-DME)")
+    parser.add_argument("--disable-airport-transfers", action="store_true",
+                       help="Отключить поиск с учетом переходов между близкими аэропортами (по умолчанию переходы включены)")
+
+    parser.add_argument("--allow-cross-country-transfers", action="store_true",
+                       help="Разрешить переходы между аэропортами разных стран (по умолчанию только внутри одной страны)")
 
     parser.add_argument("--airport-distance", type=float, default=100,
                        help="Максимальное расстояние между аэропортами для переходов в км (по умолчанию 100)")
@@ -729,28 +845,37 @@ def main():
               f"{metadata.get('destination')}")
         print(f"Собрано рейсов: {metadata.get('total_flights')}")
 
-    # Загружаем сеть аэропортов, если включены переходы между аэропортами
+    # Загружаем сеть аэропортов (по умолчанию переходы между аэропортами включены)
     airport_network = None
-    if args.enable_airport_transfers:
+    if not args.disable_airport_transfers:
         print(f"\n{'#'*80}")
         print("ЗАГРУЗКА СЕТИ АЭРОПОРТОВ")
         print(f"{'#'*80}")
         airport_network = load_airport_network(args.airport_network)
         if airport_network:
             print(f"✓ Сеть аэропортов загружена: {len(airport_network)} аэропортов")
+            country_filter = "только внутри одной страны" if not args.allow_cross_country_transfers else "включая разные страны"
+            print(f"  Переходы между аэропортами: {country_filter}")
         else:
             print("⚠ Сеть аэропортов не загружена, продолжаем без переходов между аэропортами")
+    else:
+        print(f"\n{'#'*80}")
+        print("Переходы между аэропортами отключены")
+        print(f"{'#'*80}")
+
+    # Определяем, разрешены ли переходы между странами
+    same_country_only = not args.allow_cross_country_transfers
 
     # Находим комбинации
     combinations = find_combinations(data, args.min_stay, args.max_stay,
                                     leg1_from, leg1_to, leg2_from, leg2_to, args.via,
-                                    airport_network, args.airport_distance)
+                                    airport_network, args.airport_distance, same_country_only)
 
     # Вычисляем статистику
     stats = get_statistics(combinations)
 
     # Выводим результаты
-    print_summary(combinations, stats, args.top, args.unique_cities)
+    print_summary(combinations, stats, args.top, args.unique_cities, airport_network)
 
     # Сохраняем результаты, если указан выходной файл
     if args.output:
