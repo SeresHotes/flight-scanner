@@ -103,7 +103,8 @@ def calculate_stay_duration(leg1_arrival: str, leg2_departure: str) -> int:
 def find_combinations(data: Dict[str, Any], min_stay: int = 1,
                      max_stay: int = 30,
                      leg1_depart_from: str = None, leg1_depart_to: str = None,
-                     leg2_depart_from: str = None, leg2_depart_to: str = None) -> List[Dict[str, Any]]:
+                     leg2_depart_from: str = None, leg2_depart_to: str = None,
+                     via_city: str = None) -> List[Dict[str, Any]]:
     """
     Находит все возможные комбинации перелетов.
 
@@ -115,6 +116,7 @@ def find_combinations(data: Dict[str, Any], min_stay: int = 1,
         leg1_depart_to: Максимальная дата вылета первого рейса (YYYY-MM-DD)
         leg2_depart_from: Минимальная дата вылета второго рейса (YYYY-MM-DD)
         leg2_depart_to: Максимальная дата вылета второго рейса (YYYY-MM-DD)
+        via_city: Фильтр по конкретному промежуточному городу (IATA код)
 
     Returns:
         Список комбинаций перелетов
@@ -185,11 +187,16 @@ def find_combinations(data: Dict[str, Any], min_stay: int = 1,
     elif leg2_depart_to:
         leg2_filter = f" (вылет: до {leg2_depart_to})"
 
-    print(f"\nАнализ {len(leg1_flights)} рейсов первого этапа{leg1_filter} и {len(leg2_flights)} рейсов второго этапа{leg2_filter}...")
+    via_filter = f" через {via_city}" if via_city else ""
+    print(f"\nАнализ {len(leg1_flights)} рейсов первого этапа{leg1_filter} и {len(leg2_flights)} рейсов второго этапа{leg2_filter}{via_filter}...")
 
     for flight1 in leg1_flights:
         # Получаем город прибытия первого рейса
         intermediate_city = flight1.get("destination") or flight1.get("search_destination")
+
+        # Фильтруем по конкретному промежуточному городу, если указано
+        if via_city and intermediate_city != via_city:
+            continue
 
         # Вычисляем дату/время прибытия первого рейса
         if flight1.get("arrival_at"):
@@ -316,7 +323,7 @@ def get_statistics(combinations: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def print_summary(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
-                 top_n: int = 10):
+                 top_n: int = 10, unique_cities: bool = False):
     """
     Выводит сводку по найденным комбинациям.
 
@@ -324,6 +331,7 @@ def print_summary(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
         combinations: Список комбинаций перелетов
         stats: Статистика
         top_n: Количество лучших вариантов для отображения
+        unique_cities: Если True, показывает только уникальные промежуточные города (самые дешевые)
     """
     print(f"\n{'='*80}")
     print("РЕЗУЛЬТАТЫ АНАЛИЗА")
@@ -352,8 +360,22 @@ def print_summary(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
     # Сортируем по цене
     sorted_combinations = sorted(combinations, key=lambda x: x["total_price"])
 
+    # Фильтруем по уникальным городам, если требуется
+    if unique_cities:
+        seen_cities = set()
+        filtered_combinations = []
+        for combo in sorted_combinations:
+            city = combo["intermediate_city"]
+            if city not in seen_cities:
+                seen_cities.add(city)
+                filtered_combinations.append(combo)
+        sorted_combinations = filtered_combinations
+
     print(f"\n{'='*80}")
-    print(f"ТОП-{min(top_n, len(sorted_combinations))} САМЫХ ДЕШЕВЫХ ВАРИАНТОВ")
+    title = f"ТОП-{min(top_n, len(sorted_combinations))} САМЫХ ДЕШЕВЫХ ВАРИАНТОВ"
+    if unique_cities:
+        title += " (уникальные города)"
+    print(title)
     print(f"{'='*80}\n")
 
     for i, combo in enumerate(sorted_combinations[:top_n], 1):
@@ -391,7 +413,7 @@ def print_summary(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
 
 
 def save_results(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
-                output_file: str):
+                output_file: str, unique_cities: bool = False):
     """
     Сохраняет результаты анализа в JSON файл.
 
@@ -399,9 +421,21 @@ def save_results(combinations: List[Dict[str, Any]], stats: Dict[str, Any],
         combinations: Список комбинаций
         stats: Статистика
         output_file: Путь к выходному файлу
+        unique_cities: Если True, сохраняет только уникальные промежуточные города (самые дешевые)
     """
     # Сортируем по цене
     sorted_combinations = sorted(combinations, key=lambda x: x["total_price"])
+
+    # Фильтруем по уникальным городам, если требуется
+    if unique_cities:
+        seen_cities = set()
+        filtered_combinations = []
+        for combo in sorted_combinations:
+            city = combo["intermediate_city"]
+            if city not in seen_cities:
+                seen_cities.add(city)
+                filtered_combinations.append(combo)
+        sorted_combinations = filtered_combinations
 
     result = {
         "generated_at": datetime.now().isoformat(),
@@ -435,6 +469,14 @@ def main():
   # Вывод топ-20 вариантов
   python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
     --top 20
+
+  # Показать только уникальные города (по одному самому дешевому варианту на город)
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
+    --unique-cities
+
+  # Фильтрация по конкретному промежуточному городу
+  python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
+    --via IST
 
   # Фильтрация по дате вылета первого этапа
   python aggregate_flights.py data/flights_MOW_BKK_20260215_120000.json \\
@@ -496,6 +538,12 @@ def main():
     parser.add_argument("--top", type=int, default=10,
                        help="Количество лучших вариантов для отображения (по умолчанию 10)")
 
+    parser.add_argument("--unique-cities", action="store_true",
+                       help="Показывать только уникальные промежуточные города (самый дешевый вариант для каждого города)")
+
+    parser.add_argument("--via", type=str, default=None,
+                       help="Фильтр по конкретному промежуточному городу (IATA код, например IST или DXB)")
+
     parser.add_argument("--output", default=None,
                        help="Путь к файлу для сохранения результатов (опционально)")
 
@@ -530,6 +578,8 @@ def main():
     print(f"{'#'*80}")
     print(f"Входной файл: {args.input_file}")
     print(f"Диапазон пребывания: {args.min_stay}-{args.max_stay} дней")
+    if args.via:
+        print(f"Фильтр по промежуточному городу: {args.via}")
 
     # Выводим информацию о фильтрах дат
     if leg1_from and leg1_to and leg1_from == leg1_to:
@@ -557,17 +607,17 @@ def main():
 
     # Находим комбинации
     combinations = find_combinations(data, args.min_stay, args.max_stay,
-                                    leg1_from, leg1_to, leg2_from, leg2_to)
+                                    leg1_from, leg1_to, leg2_from, leg2_to, args.via)
 
     # Вычисляем статистику
     stats = get_statistics(combinations)
 
     # Выводим результаты
-    print_summary(combinations, stats, args.top)
+    print_summary(combinations, stats, args.top, args.unique_cities)
 
     # Сохраняем результаты, если указан выходной файл
     if args.output:
-        save_results(combinations, stats, args.output)
+        save_results(combinations, stats, args.output, args.unique_cities)
 
 
 if __name__ == "__main__":

@@ -50,47 +50,63 @@ def get_date_range(start_date: str, end_date: str) -> List[str]:
     return dates
 
 
-def fetch_flights(origin: str, destination: str, depart_date: str,
-                  currency: str = "RUB") -> Dict[str, Any]:
+def fetch_flights(origin: str = None, destination: str = None, departure_at: str = None,
+                  currency: str = "RUB", unique: bool = True, limit: int = 1000) -> Dict[str, Any]:
     """
     Получает данные о перелетах из API.
 
     Args:
-        origin: Код города отправления (IATA)
-        destination: Код города назначения (IATA)
-        depart_date: Дата вылета в формате YYYY-MM-DD
+        origin: Код города отправления (IATA), опционально
+        destination: Код города назначения (IATA), опционально
+        departure_at: Дата вылета в формате YYYY-MM-DD
         currency: Валюта цен (по умолчанию RUB)
+        unique: Уникальные направления (по умолчанию True)
+        limit: Лимит результатов (по умолчанию 1000)
 
     Returns:
         Словарь с данными о перелетах
     """
     params = {
-        "origin": origin,
-        "destination": destination,
-        "departure_at": depart_date,
         "currency": currency,
         "token": API_TOKEN,
         "direct": "true",
-        "one_way": "true"
+        "one_way": "true",
+        "limit": limit
     }
+
+    # Добавляем unique только если True
+    if unique:
+        params["unique"] = "true"
+
+    # Добавляем origin и destination только если они указаны
+    if origin:
+        params["origin"] = origin
+    if destination:
+        params["destination"] = destination
+    if departure_at:
+        params["departure_at"] = departure_at
 
     try:
         response = requests.get(API_BASE_URL, params=params, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"Ошибка при запросе {origin} -> {destination} на {depart_date}: {e}")
+        origin_str = origin or "ANY"
+        dest_str = destination or "ANY"
+        print(f"Ошибка при запросе {origin_str} -> {dest_str} на {departure_at}: {e}")
         return {"data": []}
 
 
-def collect_leg_data(origins: List[str], destinations: List[str],
-                     date_range: List[str], leg_name: str) -> List[Dict[str, Any]]:
+def collect_leg_data(origin: str = None, destination: str = None,
+                     date_range: List[str] = None, leg_name: str = "") -> List[Dict[str, Any]]:
     """
     Собирает данные о перелетах для одного этапа маршрута.
+    Если origin указан, а destination нет - получает все направления из origin.
+    Если destination указан, а origin нет - получает все направления в destination.
 
     Args:
-        origins: Список кодов городов отправления (или один город в списке)
-        destinations: Список кодов городов назначения (или один город в списке)
+        origin: Код города отправления (IATA), опционально
+        destination: Код города назначения (IATA), опционально
         date_range: Список дат для проверки
         leg_name: Название этапа (для логирования)
 
@@ -98,40 +114,59 @@ def collect_leg_data(origins: List[str], destinations: List[str],
         Список всех найденных перелетов
     """
     all_flights = []
-    total_requests = len(origins) * len(destinations) * len(date_range)
+    total_requests = len(date_range) if date_range else 1
     current_request = 0
+
+    origin_str = origin or "ANY"
+    dest_str = destination or "ANY"
 
     print(f"\n{'='*60}")
     print(f"Сбор данных для этапа: {leg_name}")
-    print(f"Маршрут: {', '.join(origins)} -> {', '.join(destinations)}")
-    print(f"Диапазон дат: {date_range[0]} - {date_range[-1]}")
+    print(f"Маршрут: {origin_str} -> {dest_str}")
+    if date_range:
+        print(f"Диапазон дат: {date_range[0]} - {date_range[-1]}")
     print(f"Всего запросов: {total_requests}")
     print(f"{'='*60}\n")
 
-    for origin in origins:
-        for destination in destinations:
-            for date in date_range:
-                current_request += 1
-                print(f"[{current_request}/{total_requests}] Запрос: {origin} -> {destination} на {date}...", end=" ")
+    if date_range:
+        for date in date_range:
+            current_request += 1
+            print(f"[{current_request}/{total_requests}] Запрос: {origin_str} -> {dest_str} на {date}...", end=" ")
 
-                result = fetch_flights(origin, destination, date)
+            result = fetch_flights(origin, destination, date)
 
-                if result.get("data"):
-                    flight_count = len(result["data"])
-                    print(f"✓ Найдено {flight_count} рейс(ов)")
+            if result.get("data"):
+                flight_count = len(result["data"])
+                print(f"✓ Найдено {flight_count} рейс(ов)")
 
-                    # Добавляем метаданные к каждому рейсу
-                    for flight in result["data"]:
-                        flight["leg"] = leg_name
-                        flight["search_origin"] = origin
-                        flight["search_destination"] = destination
-                        flight["search_date"] = date
-                        all_flights.append(flight)
-                else:
-                    print("✗ Рейсов не найдено")
+                # Добавляем метаданные к каждому рейсу
+                for flight in result["data"]:
+                    flight["leg"] = leg_name
+                    flight["search_origin"] = origin
+                    flight["search_destination"] = destination
+                    flight["search_date"] = date
+                    all_flights.append(flight)
+            else:
+                print("✗ Рейсов не найдено")
 
-                # Небольшая задержка для избежания rate limiting
-                time.sleep(0.5)
+            # Небольшая задержка для избежания rate limiting
+            time.sleep(0.5)
+    else:
+        # Запрос без указания конкретной даты
+        print(f"Запрос: {origin_str} -> {dest_str}...", end=" ")
+        result = fetch_flights(origin, destination)
+
+        if result.get("data"):
+            flight_count = len(result["data"])
+            print(f"✓ Найдено {flight_count} рейс(ов)")
+
+            for flight in result["data"]:
+                flight["leg"] = leg_name
+                flight["search_origin"] = origin
+                flight["search_destination"] = destination
+                all_flights.append(flight)
+        else:
+            print("✗ Рейсов не найдено")
 
     print(f"\nИтого найдено {len(all_flights)} рейс(ов) для этапа {leg_name}\n")
     return all_flights
@@ -161,33 +196,36 @@ def main():
         epilog="""
 Примеры использования:
 
-  # Перелет Москва -> Стамбул/Дубай -> Бангкок
+  # НОВЫЙ СПОСОБ: Автоматический поиск всех направлений (рекомендуется)
+  python collect_flights.py MOW BKK \\
+    --leg1-dates 2026-02-15 2026-02-20 \\
+    --leg2-dates 2026-02-25 2026-03-05
+
+  # Старый способ: Перелет через конкретные промежуточные города
   python collect_flights.py MOW BKK \\
     --leg1-dates 2026-02-15 2026-02-20 \\
     --leg2-dates 2026-02-25 2026-03-05 \\
     --intermediate IST DXB
 
-  # Перелет с одним промежуточным городом
-  python collect_flights.py LED BCN \\
-    --leg1-dates 2026-03-01 2026-03-03 \\
-    --leg2-dates 2026-03-10 2026-03-15 \\
-    --intermediate IST
+  # Только сбор вылетов из города (все направления)
+  python collect_flights.py MOW --leg1-dates 2026-02-15 2026-02-20
         """
     )
 
     parser.add_argument("origin", help="Код города отправления (IATA), например MOW для Москвы")
-    parser.add_argument("destination", help="Код конечного города (IATA), например BKK для Бангкока")
+    parser.add_argument("destination", nargs="?", default=None,
+                       help="Код конечного города (IATA), например BKK для Бангкока (опционально)")
 
     parser.add_argument("--leg1-dates", nargs=2, required=True,
                        metavar=("START", "END"),
-                       help="Диапазон дат для первого этапа (из origin в промежуточные города)")
+                       help="Диапазон дат для первого этапа (из origin)")
 
-    parser.add_argument("--leg2-dates", nargs=2, required=True,
+    parser.add_argument("--leg2-dates", nargs=2, required=False,
                        metavar=("START", "END"),
-                       help="Диапазон дат для второго этапа (из промежуточных городов в destination)")
+                       help="Диапазон дат для второго этапа (в destination)")
 
-    parser.add_argument("--intermediate", nargs="+", required=True,
-                       help="Список промежуточных городов (IATA коды)")
+    parser.add_argument("--intermediate", nargs="+", required=False,
+                       help="Список промежуточных городов (IATA коды). Если не указано, API вернёт все доступные направления")
 
     parser.add_argument("--currency", default="RUB",
                        help="Валюта для цен (по умолчанию RUB)")
@@ -199,45 +237,86 @@ def main():
 
     # Генерируем диапазоны дат
     leg1_dates = get_date_range(args.leg1_dates[0], args.leg1_dates[1])
-    leg2_dates = get_date_range(args.leg2_dates[0], args.leg2_dates[1])
+    leg2_dates = get_date_range(args.leg2_dates[0], args.leg2_dates[1]) if args.leg2_dates else None
 
     print(f"\n{'#'*60}")
     print("СБОР ДАННЫХ О ПЕРЕЛЕТАХ")
     print(f"{'#'*60}")
-    print(f"Маршрут: {args.origin} -> [{', '.join(args.intermediate)}] -> {args.destination}")
+
+    if args.intermediate:
+        # Старый способ с указанными промежуточными городами
+        print(f"Маршрут: {args.origin} -> [{', '.join(args.intermediate)}] -> {args.destination}")
+    elif args.destination:
+        # Новый способ - автоматический поиск всех направлений
+        print(f"Маршрут: {args.origin} -> [ВСЕ НАПРАВЛЕНИЯ] -> {args.destination}")
+    else:
+        # Только первый этап - все направления из origin
+        print(f"Направления из: {args.origin}")
+
     print(f"Первый этап: {len(leg1_dates)} дней ({leg1_dates[0]} - {leg1_dates[-1]})")
-    print(f"Второй этап: {len(leg2_dates)} дней ({leg2_dates[0]} - {leg2_dates[-1]})")
+    if leg2_dates:
+        print(f"Второй этап: {len(leg2_dates)} дней ({leg2_dates[0]} - {leg2_dates[-1]})")
     print(f"Валюта: {args.currency}")
 
-    # Сбор данных для первого этапа (origin -> intermediate)
-    leg1_flights = collect_leg_data(
-        [args.origin],
-        args.intermediate,
-        leg1_dates,
-        "leg1"
-    )
+    # Сбор данных для первого этапа
+    if args.intermediate:
+        # Старый способ: перебираем указанные промежуточные города
+        leg1_flights = []
+        for intermediate in args.intermediate:
+            flights = collect_leg_data(
+                origin=args.origin,
+                destination=intermediate,
+                date_range=leg1_dates,
+                leg_name="leg1"
+            )
+            leg1_flights.extend(flights)
+    else:
+        # Новый способ: получаем все направления из origin
+        leg1_flights = collect_leg_data(
+            origin=args.origin,
+            destination=None,  # Не указываем destination - получим все направления
+            date_range=leg1_dates,
+            leg_name="leg1"
+        )
 
-    # Сбор данных для второго этапа (intermediate -> destination)
-    leg2_flights = collect_leg_data(
-        args.intermediate,
-        [args.destination],
-        leg2_dates,
-        "leg2"
-    )
+    # Сбор данных для второго этапа (если нужен)
+    leg2_flights = []
+    if args.destination and leg2_dates:
+        if args.intermediate:
+            # Старый способ: из указанных промежуточных городов в destination
+            for intermediate in args.intermediate:
+                flights = collect_leg_data(
+                    origin=intermediate,
+                    destination=args.destination,
+                    date_range=leg2_dates,
+                    leg_name="leg2"
+                )
+                leg2_flights.extend(flights)
+        else:
+            # Новый способ: все направления в destination
+            leg2_flights = collect_leg_data(
+                origin=None,  # Не указываем origin - получим все направления
+                destination=args.destination,
+                date_range=leg2_dates,
+                leg_name="leg2"
+            )
+
+    # Извлекаем уникальные промежуточные аэропорты из собранных данных
+    discovered_airports = set()
+    for flight in leg1_flights:
+        dest = flight.get("destination")
+        if dest:
+            discovered_airports.add(dest)
 
     # Формируем итоговые данные
     result = {
         "metadata": {
             "origin": args.origin,
             "destination": args.destination,
-            "intermediate_airports": args.intermediate,
+            "intermediate_airports": args.intermediate or sorted(list(discovered_airports)),
             "leg1_date_range": {
                 "start": leg1_dates[0],
                 "end": leg1_dates[-1]
-            },
-            "leg2_date_range": {
-                "start": leg2_dates[0],
-                "end": leg2_dates[-1]
             },
             "currency": args.currency,
             "collected_at": datetime.now().isoformat(),
@@ -247,12 +326,19 @@ def main():
         "leg2_flights": leg2_flights
     }
 
+    if leg2_dates:
+        result["metadata"]["leg2_date_range"] = {
+            "start": leg2_dates[0],
+            "end": leg2_dates[-1]
+        }
+
     # Определяем имя выходного файла
     if args.output:
         output_file = args.output
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"data/flights_{args.origin}_{args.destination}_{timestamp}.json"
+        dest_str = args.destination if args.destination else "ALL"
+        output_file = f"data/flights_{args.origin}_{dest_str}_{timestamp}.json"
 
     # Сохраняем данные
     save_data(result, output_file)
@@ -261,8 +347,11 @@ def main():
     print("СБОР ДАННЫХ ЗАВЕРШЕН")
     print(f"{'='*60}")
     print(f"Первый этап: {len(leg1_flights)} рейсов")
-    print(f"Второй этап: {len(leg2_flights)} рейсов")
+    if leg2_flights:
+        print(f"Второй этап: {len(leg2_flights)} рейсов")
     print(f"Всего: {len(leg1_flights) + len(leg2_flights)} рейсов")
+    if discovered_airports:
+        print(f"Найдено направлений: {len(discovered_airports)}")
     print(f"Файл: {output_file}")
 
 
