@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title id="pageTitle">Планировщик перелётов ✈️</title>
+<style>
+  :root{
+    --bg:#0d0f14; --panel:#161a22; --panel2:#1e2430; --line:#2a3140;
+    --txt:#e8ecf3; --muted:#8b95a7; --accent:#e5484d; --accent2:#c026d3;
+    --ok:#3fb950; --gold:#f0b429; --warn:#f78166; --chip:#232a37;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.45;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1100px;margin:0 auto;padding:24px 18px 80px}
+
+  header.hero{
+    background:linear-gradient(135deg,#1a0f14 0%,#161a22 55%,#12141c 100%);
+    border:1px solid var(--line);border-radius:18px;padding:26px 28px;margin-bottom:22px;
+    position:relative;overflow:hidden}
+  header.hero::after{content:"";position:absolute;right:-40px;top:-40px;width:220px;height:220px;
+    background:radial-gradient(circle,rgba(229,72,77,.25),transparent 70%)}
+  .hero h1{margin:0 0 4px;font-size:24px;letter-spacing:.2px}
+  .hero .sub{color:var(--muted);font-size:14px}
+  .hero .concert{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+  .badge{background:var(--chip);border:1px solid var(--line);border-radius:999px;
+    padding:6px 12px;font-size:13px;display:inline-flex;align-items:center;gap:6px}
+  .badge b{color:var(--gold)}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0 22px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+  .stat .n{font-size:22px;font-weight:700}
+  .stat .l{color:var(--muted);font-size:12px;margin-top:2px}
+
+  .filterbar{display:grid;grid-template-columns:1fr;gap:14px;margin-bottom:14px;
+    background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px 18px}
+  .fgroup .flabel{font-size:12px;color:var(--muted);margin-bottom:8px}
+  .legpanels{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.legpanels{grid-template-columns:1fr}}
+  .legpanel{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px 15px}
+  .legpanel.disabled{opacity:.35;pointer-events:none}
+  .legtitle{font-size:13.5px;font-weight:700;margin-bottom:12px}
+  .fsub{margin-bottom:11px}
+  .fsub>span{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  .fsub .rangeval{color:var(--txt);font-weight:600}
+  .dualrange{display:flex;flex-direction:column;gap:4px}
+  .dualrange input[type=range]{width:100%}
+  .daterow{display:flex;align-items:center;gap:8px}
+  .daterow input[type=date]{flex:1;min-width:0;background:var(--panel);color:var(--txt);
+    border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-size:12.5px;color-scheme:dark}
+  .daterow span{color:var(--muted)}
+  .segbtns.big button{padding:10px 14px;font-size:13.5px;flex:0 1 auto}
+  .segbtns.big button .cnt{display:inline-block;margin-left:7px;padding:1px 7px;border-radius:999px;
+    font-size:11.5px;font-weight:700;background:rgba(255,255,255,.08);color:var(--muted)}
+  .segbtns.big button.active .cnt{background:rgba(255,255,255,.22);color:#fff}
+  .segbtns.big button.zero{opacity:.4}
+  .segbtns.big button.zero:not(.active){pointer-events:none}
+  .segbtns.disabled{opacity:.4;pointer-events:none}
+
+  .controls{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    padding:16px 18px;margin-bottom:8px;display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px 18px;align-items:end}
+  .ctl label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  select,input[type=range]{width:100%}
+  select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
+    border-radius:10px;padding:9px 10px;font-size:14px}
+  select:disabled{opacity:.4}
+  .rangeval{font-variant-numeric:tabular-nums;color:var(--txt);font-weight:600}
+  .segbtns{display:flex;gap:6px;flex-wrap:wrap}
+  .segbtns button{flex:1;min-width:70px;background:var(--panel2);color:var(--muted);
+    border:1px solid var(--line);border-radius:10px;padding:9px 8px;font-size:13px;cursor:pointer;transition:.15s}
+  .segbtns button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .segbtns button:hover{color:var(--txt)}
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin:0 2px 14px;align-items:center}
+  .legend .tbadge{cursor:default}
+
+  .count{color:var(--muted);font-size:14px;margin:6px 2px 14px}
+  .count b{color:var(--txt)}
+
+  .cards{display:flex;flex-direction:column;gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden;transition:.15s}
+  .card:hover{border-color:#3a4356}
+  .card .top{display:flex;justify-content:space-between;align-items:center;gap:14px;
+    padding:15px 18px;background:var(--panel2);border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .route{font-size:16px;font-weight:600;letter-spacing:.3px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .type-pill{font-size:11px;padding:3px 9px;border-radius:999px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+  .t-direct{background:rgba(63,185,80,.15);color:var(--ok);border:1px solid rgba(63,185,80,.35)}
+  .t-there{background:rgba(240,180,41,.13);color:var(--gold);border:1px solid rgba(240,180,41,.35)}
+  .t-back{background:rgba(192,38,211,.15);color:#e879f9;border:1px solid rgba(192,38,211,.4)}
+  .t-both{background:rgba(56,189,248,.14);color:#38bdf8;border:1px solid rgba(56,189,248,.4)}
+  .t-two{background:rgba(251,146,60,.14);color:#fb923c;border:1px solid rgba(251,146,60,.4)}
+  .price{font-size:22px;font-weight:800;white-space:nowrap}
+  .price small{font-size:12px;color:var(--muted);font-weight:600}
+
+  .meta-row{display:flex;gap:8px;flex-wrap:wrap;padding:12px 18px 4px}
+  .mchip{background:var(--chip);border:1px solid var(--line);border-radius:8px;
+    padding:5px 10px;font-size:12.5px;color:var(--muted)}
+  .mchip b{color:var(--txt)}
+  .mchip.korea b{color:var(--ok)}
+  .mchip.stay b{color:var(--gold)}
+  .mchip.tr b{color:var(--warn)}
+
+  /* бейдж пересадок */
+  .tbadge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;
+    padding:3px 9px;border-radius:999px;white-space:nowrap}
+  .tbadge.direct{background:rgba(63,185,80,.15);color:var(--ok);border:1px solid rgba(63,185,80,.4)}
+  .tbadge.conn{background:rgba(247,129,102,.14);color:var(--warn);border:1px solid rgba(247,129,102,.4)}
+  .tbadge.conn.hi{background:rgba(229,72,77,.16);color:#ff6b6f;border-color:rgba(229,72,77,.5)}
+
+  .legs{padding:8px 18px 18px;display:flex;flex-direction:column;gap:2px}
+  .leg{display:grid;grid-template-columns:118px 1fr auto;gap:12px;align-items:center;
+    padding:12px 0;border-top:1px dashed var(--line)}
+  .leg:first-child{border-top:none}
+  .leg .pt .code{font-weight:700;font-size:15px}
+  .leg .pt .cty{font-size:11.5px;color:var(--muted)}
+  .leg .pt .when{margin-top:6px;font-size:11.5px;color:var(--muted)}
+  .leg .pt .clock{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums}
+  .leg .mid{min-width:0}
+  .leg .mid .line{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+  .leg .mid .line .track{flex:1;height:1px;background:linear-gradient(90deg,#4b5468,#4b5468);position:relative;min-width:30px}
+  .leg .mid .dest{margin-top:6px;font-size:13px}
+  .leg .mid .dest b{color:var(--txt)}
+  .leg .mid .info2{margin-top:5px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .leg .mid .info2 span.i{color:var(--muted);font-size:12px}
+  .leg .buy{white-space:nowrap;text-align:right}
+  .leg .buy a{display:inline-block;background:var(--panel2);border:1px solid var(--line);
+    border-radius:8px;padding:7px 12px;font-size:12.5px;text-decoration:none;color:var(--txt);transition:.15s}
+  .leg .buy a:hover{border-color:var(--accent);color:#fff}
+  .leg .buy .p{font-weight:700}
+
+  .stopstay{display:flex;align-items:center;gap:8px;justify-content:center;flex-wrap:wrap;
+    color:var(--gold);font-size:12.5px;padding:8px 10px;margin:2px 0;
+    background:rgba(240,180,41,.07);border:1px dashed rgba(240,180,41,.3);border-radius:10px}
+  .stopstay.region{color:var(--ok);background:rgba(63,185,80,.07);border-color:rgba(63,185,80,.3)}
+  .stopstay .xfer{width:100%;margin-top:6px;font-size:11.5px;color:#38bdf8;
+    background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.25);border-radius:8px;padding:5px 9px}
+
+  .footer{color:var(--muted);font-size:12px;margin-top:30px;text-align:center}
+  .empty{text-align:center;color:var(--muted);padding:50px 0}
+  @media(max-width:620px){
+    .leg{grid-template-columns:96px 1fr;grid-template-rows:auto auto}
+    .leg .buy{grid-column:1/3;text-align:right;margin-top:-4px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <h1 id="h1"></h1>
+    <div class="sub" id="sub"></div>
+    <div class="concert" id="concert"></div>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="filterbar">
+    <div class="fgroup">
+      <div class="flabel">Направление (что смотрим)</div>
+      <div class="segbtns big" id="dirBtns"></div>
+    </div>
+    <div class="legpanels">
+      <div class="legpanel" id="panelThere">
+        <div class="legtitle">🛫 Плечо ТУДА — Москва → Корея</div>
+        <div class="fsub"><span>Остановка</span><div class="segbtns big" id="thereStop"></div></div>
+        <div class="fsub"><span>Город остановки</span><select id="thereCity"><option value="all">Любой</option></select></div>
+        <div class="fsub"><span>Пересадки</span><div class="segbtns big" id="thereTr"></div></div>
+        <div class="fsub"><span>Время в пути: <span class="rangeval" id="thereTravVal"></span></span><input type="range" id="thereTravel"></div>
+        <div class="fsub"><span>Дней в городе остановки: <span class="rangeval" id="thereSdaysVal"></span></span><div class="dualrange"><input type="range" id="thereSdaysMin"><input type="range" id="thereSdaysMax"></div></div>
+        <div class="fsub"><span>Дата вылета плеча</span><div class="daterow"><input type="date" id="thereDepFrom"><span>–</span><input type="date" id="thereDepTo"></div></div>
+      </div>
+      <div class="legpanel" id="panelBack">
+        <div class="legtitle">🛬 Плечо ОБРАТНО — Корея → Москва</div>
+        <div class="fsub"><span>Остановка</span><div class="segbtns big" id="backStop"></div></div>
+        <div class="fsub"><span>Город остановки</span><select id="backCity"><option value="all">Любой</option></select></div>
+        <div class="fsub"><span>Пересадки</span><div class="segbtns big" id="backTr"></div></div>
+        <div class="fsub"><span>Время в пути: <span class="rangeval" id="backTravVal"></span></span><input type="range" id="backTravel"></div>
+        <div class="fsub"><span>Дней в городе остановки: <span class="rangeval" id="backSdaysVal"></span></span><div class="dualrange"><input type="range" id="backSdaysMin"><input type="range" id="backSdaysMax"></div></div>
+        <div class="fsub"><span>Дата вылета плеча</span><div class="daterow"><input type="date" id="backDepFrom"><span>–</span><input type="date" id="backDepTo"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div class="ctl">
+      <label>Макс. цена: <span class="rangeval" id="priceVal"></span></label>
+      <input type="range" id="priceRange">
+    </div>
+    <div class="ctl">
+      <label>Дней на месте: <span class="rangeval" id="stayVal"></span></label>
+      <div class="dualrange"><input type="range" id="stayMin"><input type="range" id="stayMax"></div>
+    </div>
+    <div class="ctl">
+      <label>Сортировка</label>
+      <select id="sortSel">
+        <option value="price">Сначала дешёвые</option>
+        <option value="stay_desc">Дольше на месте</option>
+        <option value="stopdays_desc">Дольше остановка</option>
+        <option value="transfers">Меньше пересадок</option>
+        <option value="travel">Быстрее в пути</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="legend">
+    Пересадки:
+    <span class="tbadge direct">● прямой рейс</span>
+    <span class="tbadge conn">✈ 1 пересадка</span>
+    <span class="tbadge conn hi">✈ 2+ пересадок</span>
+    <span style="margin-left:auto"></span>
+    <span class="tbadge" style="background:rgba(240,180,41,.07);border:1px dashed rgba(240,180,41,.3);color:var(--gold)">🏙 длительная остановка в городе</span>
+  </div>
+
+  <div class="count" id="count"></div>
+  <div class="cards" id="cards"></div>
+  <div class="footer" id="foot"></div>
+</div>
+
+<script src="data.js"></script>
+<script>
+const D = window.TRIP_DATA;
+const M = D.meta, TRIPS = D.trips;
+const CUR = M.currency === 'RUB' ? '₽' : M.currency;
+
+const money = n => n.toLocaleString('ru-RU') + ' ' + CUR;
+const TYPE_LABEL = {direct:'Без остановки', stopover_there:'Остановка туда', stopover_back:'Остановка обратно', stopover_both:'Остановка в обе стороны (1 город)', stopover_two:'Остановки в 2 городах'};
+const TYPE_CLASS = {direct:'t-direct', stopover_there:'t-there', stopover_back:'t-back', stopover_both:'t-both', stopover_two:'t-two'};
+const WD = ['вс','пн','вт','ср','чт','пт','сб'];
+const MON = ['янв','фев','мар','апр','мая','июн','июл','авг','сен','окт','ноя','дек'];
+const REGION = (M.region_flag ? M.region_flag + ' ' : '') + (M.region_label || M.destination_code);
+
+function plural(n, one, few, many){
+  const m10 = n % 10, m100 = n % 100;
+  if(m10 === 1 && m100 !== 11) return one;
+  if(m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+}
+function fmtDT(iso){
+  if(!iso) return {t:'—', d:''};
+  const m = iso.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if(!m) return {t:iso, d:''};
+  const [,Y,Mo,Da,H,Mi] = m;
+  const dObj = new Date(Y, Mo-1, Da);
+  return {t:`${H}:${Mi}`, d:`${+Da} ${MON[Mo-1]}, ${WD[dObj.getDay()]}`};
+}
+function durFmt(min){ if(!min) return ''; const h=Math.floor(min/60), m=min%60; return `${h}ч${m?(' '+m+'м'):''}`; }
+function transferBadge(seg){
+  const n = seg.transfers||0;
+  if(!n) return `<span class="tbadge direct">● прямой рейс</span>`;
+  const word = plural(n,'пересадка','пересадки','пересадок');
+  const pts = seg.transfer_points||[];
+  const via = pts.length ? ` в ${pts.map(p=>p.city).join(' → ')}` : ' (город — на Aviasales)';
+  return `<span class="tbadge conn ${n>=2?'hi':''}">✈ ${n} ${word}${via}</span>`;
+}
+
+// ---------------- header ----------------
+document.getElementById('pageTitle').textContent = M.title + ' ✈️';
+document.getElementById('h1').textContent = '✈️ ' + M.title;
+document.getElementById('sub').textContent =
+  `${M.origin} ⇄ ${M.destination} · минимум ${M.min_stay} дн. на месте · валюта: ${M.currency}`;
+
+const badges = [];
+if(M.event){
+  badges.push(`<span class="badge">🎫 <b>${M.event.name}</b></span>`);
+  if(M.event.date) badges.push(`<span class="badge">📅 ${fmtDT(M.event.date+'T20:00').d}</span>`);
+  if(M.event.venue) badges.push(`<span class="badge">📍 ${M.event.venue}</span>`);
+}
+document.getElementById('concert').innerHTML = badges.join('');
+
+document.getElementById('stats').innerHTML = [
+  [M.counts.there, 'плеч «туда»'],
+  [M.counts.back, 'плеч «обратно»'],
+  [M.there_cities.length, 'городов остановки туда'],
+  [M.back_cities.length, 'городов остановки обратно'],
+  [money(M.there_price_range[0]+M.back_price_range[0]), 'round-trip от'],
+].map(([n,l])=>`<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+
+// ---------------- данные: односторонние плечи, round собирается на лету ----------------
+const THERE = TRIPS.filter(t=>t.direction==='there');
+const BACK  = TRIPS.filter(t=>t.direction==='back');
+const CONCERT = M.event ? M.event.date : null;
+
+// фильтр одного плеча (опции)
+function matchOpt(o, f){
+  if(f.stop==='no'  &&  o.stop) return false;
+  if(f.stop==='yes' && !o.stop) return false;
+  if(f.tr==='no'  && o.tr>0)  return false;
+  if(f.tr==='yes' && o.tr===0) return false;
+  if(o.travel > f.maxTravel*60) return false;
+  if(o.sdays>0 && (o.sdays<f.sMin || o.sdays>f.sMax)) return false;   // дни в городе (диапазон)
+  if(f.city && f.city!=='all' && o.city!==f.city) return false;
+  if(f.depFrom && o.dep_date < f.depFrom) return false;
+  if(f.depTo   && o.dep_date > f.depTo)   return false;
+  return true;
+}
+
+const DIR_OPTS  = [{v:'round',l:'Туда-обратно'},{v:'there',l:'Только туда'},{v:'back',l:'Только обратно'}];
+const STOP_OPTS = [{v:'all',l:'Все'},{v:'no',l:'Без остановки'},{v:'yes',l:'С остановкой'}];
+const TR_OPTS   = [{v:'all',l:'Все'},{v:'no',l:'Без пересадок'},{v:'yes',l:'С пересадками'}];
+
+// ---------------- controls ----------------
+const thereCitySel = document.getElementById('thereCity');
+const backCitySel = document.getElementById('backCity');
+M.there_cities.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; thereCitySel.appendChild(o); });
+M.back_cities.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; backCitySel.appendChild(o); });
+
+// границы цены зависят от направления
+const priceBounds = {
+  round:[M.there_price_range[0]+M.back_price_range[0], M.there_price_range[1]+M.back_price_range[1]],
+  there:M.there_price_range, back:M.back_price_range,
+};
+const priceRange = document.getElementById('priceRange');
+function setPriceBounds(dir){
+  const [lo,hi]=priceBounds[dir];
+  priceRange.min=lo; priceRange.max=hi; priceRange.value=hi; priceRange.step=500;
+  state.maxPrice=hi;
+}
+
+const stayCap = Math.max(M.min_stay, M.max_korea_days);
+const stayMin = document.getElementById('stayMin'), stayMax = document.getElementById('stayMax');
+stayMin.min = stayMax.min = M.min_stay; stayMin.max = stayMax.max = stayCap; stayMin.step = stayMax.step = 1;
+stayMin.value = M.min_stay; stayMax.value = stayCap;
+
+const legTravMax = Math.ceil((M.max_leg_travel_minutes||0)/60) || 1;
+const maxStopDays = M.max_stop_days || 6;
+const thereTravel = document.getElementById('thereTravel');
+const backTravel  = document.getElementById('backTravel');
+[thereTravel, backTravel].forEach(r=>{ r.min=0; r.max=legTravMax; r.value=legTravMax; r.step=1; });
+const sdaysEls = {
+  there:{min:document.getElementById('thereSdaysMin'), max:document.getElementById('thereSdaysMax')},
+  back: {min:document.getElementById('backSdaysMin'),  max:document.getElementById('backSdaysMax')},
+};
+for(const leg of ['there','back']){
+  sdaysEls[leg].min.min = sdaysEls[leg].max.min = 0;
+  sdaysEls[leg].min.max = sdaysEls[leg].max.max = maxStopDays;
+  sdaysEls[leg].min.step = sdaysEls[leg].max.step = 1;
+  sdaysEls[leg].min.value = 0; sdaysEls[leg].max.value = maxStopDays;
+}
+const thereDepFrom=document.getElementById('thereDepFrom'), thereDepTo=document.getElementById('thereDepTo');
+const backDepFrom=document.getElementById('backDepFrom'),  backDepTo=document.getElementById('backDepTo');
+if(M.dep_there_range){ [thereDepFrom,thereDepTo].forEach(el=>{el.min=M.dep_there_range[0]; el.max=M.dep_there_range[1];}); }
+if(M.dep_back_range){ [backDepFrom,backDepTo].forEach(el=>{el.min=M.dep_back_range[0]; el.max=M.dep_back_range[1];}); }
+
+const state = {
+  dir:'round',
+  there:{stop:'all', tr:'all', maxTravel:legTravMax, sMin:0, sMax:maxStopDays, city:'all', depFrom:'', depTo:''},
+  back: {stop:'all', tr:'all', maxTravel:legTravMax, sMin:0, sMax:maxStopDays, city:'all', depFrom:'', depTo:''},
+  maxPrice:0, minStay:M.min_stay, maxStay:stayCap, sort:'price',
+};
+setPriceBounds('round');
+
+const dirBtns = document.getElementById('dirBtns');
+const els = {
+  there:{opts:THERE, stop:document.getElementById('thereStop'), tr:document.getElementById('thereTr'),
+         panel:document.getElementById('panelThere'), travVal:document.getElementById('thereTravVal'),
+         sdaysVal:document.getElementById('thereSdaysVal')},
+  back: {opts:BACK, stop:document.getElementById('backStop'), tr:document.getElementById('backTr'),
+         panel:document.getElementById('panelBack'), travVal:document.getElementById('backTravVal'),
+         sdaysVal:document.getElementById('backSdaysVal')},
+};
+
+function segHTML(opts, cur, countFn){
+  return opts.map(o=>{
+    const n = countFn(o.v);
+    const cls = (cur===o.v?'active ':'') + (n===0?'zero':'');
+    return `<button data-v="${o.v}" class="${cls}">${o.l}<span class="cnt">${n}</span></button>`;
+  }).join('');
+}
+
+function renderFilters(){
+  dirBtns.innerHTML = DIR_OPTS.map(o=>
+    `<button data-v="${o.v}" class="${state.dir===o.v?'active':''}">${o.l}</button>`).join('');
+
+  for(const leg of ['there','back']){
+    const pool = els[leg].opts;
+    els[leg].stop.innerHTML = segHTML(STOP_OPTS, state[leg].stop,
+      v => pool.filter(o=>matchOpt(o,{...state[leg],stop:v})).length);
+    els[leg].tr.innerHTML = segHTML(TR_OPTS, state[leg].tr,
+      v => pool.filter(o=>matchOpt(o,{...state[leg],tr:v})).length);
+    els[leg].travVal.textContent = (state[leg].maxTravel>=legTravMax ? 'любое' : '≤ '+state[leg].maxTravel+' ч');
+    const f=state[leg];
+    els[leg].sdaysVal.textContent = (f.sMin<=0 && f.sMax>=maxStopDays) ? 'любое' : `${f.sMin}–${f.sMax} дн.`;
+  }
+  els.there.panel.classList.toggle('disabled', state.dir==='back');
+  els.back.panel.classList.toggle('disabled', state.dir==='there');
+  // «дней на месте» имеет смысл только для round-trip
+  const stayLocked = (state.dir!=='round');
+  stayMin.disabled = stayMax.disabled = stayLocked;
+  stayMin.closest('.ctl').style.opacity = stayLocked ? .4 : 1;
+}
+
+dirBtns.addEventListener('click', e=>{
+  const b = e.target.closest('button'); if(!b) return;
+  state.dir = b.dataset.v; setPriceBounds(state.dir); renderFilters(); render();
+});
+for(const leg of ['there','back']){
+  els[leg].stop.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b||b.classList.contains('zero')) return;
+    state[leg].stop=b.dataset.v; renderFilters(); render();
+  });
+  els[leg].tr.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b||b.classList.contains('zero')) return;
+    state[leg].tr=b.dataset.v; renderFilters(); render();
+  });
+}
+thereTravel.addEventListener('input', ()=>{ state.there.maxTravel=+thereTravel.value; renderFilters(); render(); });
+backTravel.addEventListener('input',  ()=>{ state.back.maxTravel=+backTravel.value; renderFilters(); render(); });
+for(const leg of ['there','back']){
+  const mn=sdaysEls[leg].min, mx=sdaysEls[leg].max;
+  mn.addEventListener('input', ()=>{ if(+mn.value>+mx.value) mx.value=mn.value; state[leg].sMin=+mn.value; state[leg].sMax=+mx.value; renderFilters(); render(); });
+  mx.addEventListener('input', ()=>{ if(+mx.value<+mn.value) mn.value=mx.value; state[leg].sMin=+mn.value; state[leg].sMax=+mx.value; renderFilters(); render(); });
+}
+thereDepFrom.addEventListener('change', ()=>{ state.there.depFrom=thereDepFrom.value; renderFilters(); render(); });
+thereDepTo.addEventListener('change',   ()=>{ state.there.depTo=thereDepTo.value; renderFilters(); render(); });
+backDepFrom.addEventListener('change',  ()=>{ state.back.depFrom=backDepFrom.value; renderFilters(); render(); });
+backDepTo.addEventListener('change',    ()=>{ state.back.depTo=backDepTo.value; renderFilters(); render(); });
+thereCitySel.addEventListener('change', ()=>{ state.there.city=thereCitySel.value; renderFilters(); render(); });
+backCitySel.addEventListener('change',  ()=>{ state.back.city=backCitySel.value; renderFilters(); render(); });
+priceRange.addEventListener('input', ()=>{ state.maxPrice=+priceRange.value; render(); });
+stayMin.addEventListener('input', ()=>{ if(+stayMin.value>+stayMax.value) stayMax.value=stayMin.value; state.minStay=+stayMin.value; state.maxStay=+stayMax.value; render(); });
+stayMax.addEventListener('input', ()=>{ if(+stayMax.value<+stayMin.value) stayMin.value=stayMax.value; state.minStay=+stayMin.value; state.maxStay=+stayMax.value; render(); });
+document.getElementById('sortSel').addEventListener('change', e=>{ state.sort=e.target.value; render(); });
+
+// ---------------- render ----------------
+const dayW = n => plural(n,'день','дня','дней');
+const dateChip = iso => fmtDT((iso.length===10?iso+'T00:00':iso)).d;
+
+function legRow(seg){
+  const dep=fmtDT(seg.departure_at), arr=fmtDT(seg.arrival_at);
+  return `<div class="leg">
+    <div class="pt">
+      <div class="code">${seg.origin}</div>
+      <div class="cty">${seg.origin_city||''}</div>
+      <div class="when">${dep.d}</div>
+      <div class="clock">${dep.t}</div>
+    </div>
+    <div class="mid">
+      <div class="line"><span>вылет</span><span class="track"></span>🛬<span>прилёт</span></div>
+      <div class="dest">🛬 <b>${seg.destination}</b>${seg.destination_city?(' · '+seg.destination_city):''}
+        <span style="color:var(--muted)"> — ${arr.d} ${arr.t}</span></div>
+      <div class="info2">
+        ${transferBadge(seg)}
+        <span class="i">🕓 ${durFmt(seg.duration)}</span>
+        ${seg.airline?`<span class="i">🛩 ${seg.airline}</span>`:''}
+      </div>
+    </div>
+    <div class="buy">${seg.link
+        ? `<a href="${seg.link}" target="_blank" rel="noopener"><span class="p">${money(seg.price)}</span> →</a>`
+        : `<span class="p">${money(seg.price)}</span>`}</div>
+  </div>`;
+}
+
+function regionBarDays(days){
+  return `<div class="stopstay region">${REGION}: <b>&nbsp;${days} ${dayW(days)}${M.event?' · событие здесь':''}</b></div>`;
+}
+function cityBar(so, days, tail){
+  let xfer = '';
+  if(so.transfer){
+    const tr = so.transfer;
+    xfer = `<div class="xfer">🛬 прилёт ${tr.from_city} (${tr.from}) → 🚗 ${Math.round(tr.distance_km)} км → 🛫 вылет ${tr.to_city} (${tr.to})</div>`;
+  }
+  return `<div class="stopstay">🏙 ${so.flag} ${so.city}: остановка <b>&nbsp;${days} ${dayW(days)}</b>&nbsp; · ${tail}${xfer}</div>`;
+}
+const stopChip = o => {
+  const xf = o.transfer ? ` ↹ ${o.transfer.from}/${o.transfer.to}` : '';
+  return `<span class="mchip stay">🏙 ${o.flag} ${o.city}: <b>${o.days} ${dayW(o.days)}</b>${xf}</span>`;
+};
+function card(codes, pill, price, priceLbl, meta, legsHTML){
+  return `<div class="card">
+    <div class="top">
+      <div class="route">${codes.join(' → ')}<span class="type-pill ${pill.cls}">${pill.l}</span></div>
+      <div class="price">${money(price)} <small>${priceLbl}</small></div>
+    </div>
+    <div class="meta-row">${meta}</div>
+    <div class="legs">${legsHTML}</div>
+  </div>`;
+}
+function legsOf(opt, tail){          // сегменты одного плеча + плашка остановки
+  let h='';
+  opt.segments.forEach((s,i)=>{ h+=legRow(s); if(opt.stop && i===0) h+=cityBar(opt.stopover, opt.sdays, tail); });
+  return h;
+}
+
+function cardOneway(o){
+  const codes = o.segments.map(s=>s.origin).concat(o.segments[o.segments.length-1].destination);
+  const legsHTML = legsOf(o, o.direction==='there' ? `далее в ${REGION}` : 'далее домой');
+  let meta;
+  if(o.direction==='there'){
+    meta = `<span class="mchip">🛫 вылет из Москвы: <b>${dateChip(o.segments[0].departure_at)}</b></span>`
+      + `<span class="mchip korea">${M.region_flag||'📍'} прилёт: <b>${dateChip(o.hub_date)}</b></span>`;
+  } else {
+    meta = `<span class="mchip korea">${M.region_flag||'📍'} вылет: <b>${dateChip(o.hub_date)}</b></span>`
+      + `<span class="mchip">🛬 в Москве: <b>${dateChip(o.segments[o.segments.length-1].arrival_at)}</b></span>`;
+  }
+  if(o.stop) meta += stopChip(o.stopover);
+  meta += `<span class="mchip">🕓 в пути: <b>${durFmt(o.travel_minutes)}</b></span>`
+        + `<span class="mchip tr">🔁 пересадок: <b>${o.total_transfers}</b></span>`;
+  const pill = o.direction==='there'
+    ? {cls:'t-there', l:o.stop?'Туда · с остановкой':'Туда'}
+    : {cls:'t-back',  l:o.stop?'Обратно · с остановкой':'Обратно'};
+  return card(codes, pill, o.total_price, 'в одну сторону', meta, legsHTML);
+}
+
+function cardRound(th, bk, korea){
+  const segs = th.segments.concat(bk.segments);
+  const codes = segs.map(s=>s.origin).concat(segs[segs.length-1].destination);
+  const legsHTML = legsOf(th,'далее к цели') + regionBarDays(korea) + legsOf(bk,'далее домой');
+  let meta = `<span class="mchip korea">${M.region_flag||'📍'} на месте: <b>${korea} ${dayW(korea)}</b></span>`;
+  if(th.stop) meta += stopChip(th.stopover);
+  if(bk.stop) meta += stopChip(bk.stopover);
+  meta += `<span class="mchip">🛫 вылет: <b>${dateChip(th.segments[0].departure_at)}</b></span>`
+        + `<span class="mchip">🛬 назад: <b>${dateChip(bk.segments[bk.segments.length-1].arrival_at)}</b></span>`
+        + `<span class="mchip">🕓 в пути: <b>${durFmt(th.travel_minutes+bk.travel_minutes)}</b></span>`
+        + `<span class="mchip tr">🔁 пересадок всего: <b>${th.total_transfers+bk.total_transfers}</b></span>`;
+  const stops = (th.stop?1:0)+(bk.stop?1:0);
+  const pill = stops===0 ? {cls:'t-direct',l:'Туда-обратно · без остановок'}
+             : {cls:'t-two', l:`Туда-обратно · остановки: ${stops}`};
+  return card(codes, pill, th.total_price+bk.total_price, 'всего', meta, legsHTML);
+}
+
+function render(){
+  const fThere = THERE.filter(o=>matchOpt(o,state.there));
+  const fBack  = BACK.filter(o=>matchOpt(o,state.back));
+  let items = [];   // {price, stay, sdays, tr, travel, html}
+
+  if(state.dir==='there'){
+    items = fThere.filter(o=>o.total_price<=state.maxPrice).map(o=>({
+      price:o.total_price, stay:0, sdays:o.sdays, tr:o.total_transfers, travel:o.travel_minutes,
+      html:cardOneway(o)}));
+  } else if(state.dir==='back'){
+    items = fBack.filter(o=>o.total_price<=state.maxPrice).map(o=>({
+      price:o.total_price, stay:0, sdays:o.sdays, tr:o.total_transfers, travel:o.travel_minutes,
+      html:cardOneway(o)}));
+  } else {                       // round: собираем на лету
+    // ограничиваем произведение, но НЕ режем сторону, если другая уже сужена фильтром
+    let ths = fThere, bks = fBack;
+    const LIM = 250000;
+    if(ths.length * bks.length > LIM){
+      const capT = Math.max(400, Math.floor(LIM / Math.max(1, bks.length)));
+      const capB = Math.max(400, Math.floor(LIM / Math.max(1, ths.length)));
+      ths = fThere.slice(0, capT);
+      bks = fBack.slice(0, capB);
+    }
+    for(const th of ths) for(const bk of bks){
+      const korea = bk.hub_ord - th.hub_ord;
+      if(korea < state.minStay || korea > state.maxStay) continue;
+      if(CONCERT && !(th.hub_date <= CONCERT && CONCERT <= bk.hub_date)) continue;
+      const price = th.total_price + bk.total_price;
+      if(price > state.maxPrice) continue;
+      items.push({price, stay:korea, sdays:Math.max(th.sdays,bk.sdays),
+        tr:th.total_transfers+bk.total_transfers, travel:th.travel_minutes+bk.travel_minutes,
+        _th:th, _bk:bk, _korea:korea});
+    }
+  }
+
+  const cmp = {
+    price:(a,b)=>a.price-b.price,
+    stay_desc:(a,b)=>b.stay-a.stay||a.price-b.price,
+    stopdays_desc:(a,b)=>b.sdays-a.sdays||a.price-b.price,
+    transfers:(a,b)=>a.tr-b.tr||a.price-b.price,
+    travel:(a,b)=>a.travel-b.travel||a.price-b.price,
+  }[state.sort];
+  items.sort(cmp);
+
+  const CAP = 250;
+  const shown = items.slice(0, CAP);
+  const total = state.dir==='there' ? THERE.length : state.dir==='back' ? BACK.length : (THERE.length*BACK.length);
+
+  document.getElementById('priceVal').textContent = money(state.maxPrice);
+  document.getElementById('stayVal').textContent = (state.minStay<=M.min_stay && state.maxStay>=stayCap)
+    ? `${M.min_stay}+ дн.` : `${state.minStay}–${state.maxStay} дн.`;
+  document.getElementById('count').innerHTML = items.length > CAP
+    ? `Показаны первые <b>${CAP}</b> из <b>${items.length}</b> подходящих (уточните фильтры)`
+    : `Найдено <b>${items.length}</b> маршрутов`;
+  document.getElementById('cards').innerHTML =
+    shown.length ? shown.map(x=>x.html || cardRound(x._th,x._bk,x._korea)).join('')
+                 : `<div class="empty">Ничего не найдено под эти фильтры 🤷</div>`;
+}
+
+document.getElementById('foot').textContent =
+  `Данные Travelpayouts/Aviasales · сгенерировано ${M.generated_at.replace('T',' ')} · цены и наличие мест могут меняться`;
+
+renderFilters();
+render();
+</script>
+</body>
+</html>

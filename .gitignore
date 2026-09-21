@@ -33,6 +33,7 @@ poetry.lock
 data/
 *.json
 *.csv
+web/data.js  # генерируется build_web_data.py
 
 # IDE
 .vscode/
