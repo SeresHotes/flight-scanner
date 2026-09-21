@@ -131,6 +131,26 @@ App
 - (2) FastAPI: `/search` (пока только из кэша, синхронно) + `/airports`.
       React-каркас (Vite/TS) с формой и портом карточек/фильтров.
 
+**Статус Фазы 1 — ЗАКРЫТА** (2026-09-21). Подшаги (0), (1), (2) выполнены.
+
+- (0) `core/` — рефактор скриптов без смены поведения: `aggregate.py`,
+  `trip_builder.py` (+ `Config`/`build_payload`/`build_from_config`), `collector.py`,
+  `airports.py`, `routes.py`. Старые `aggregate_flights.py`/`build_web_data.py`/
+  `collect_flights.py` — тонкие CLI-обёртки. Проверено: `build_from_config`
+  воспроизводит `web/data.json` **байт-в-байт** (meta без `generated_at` + все 3019 trips).
+- (1) `storage/hot.py` — SQLite (WAL) `quotes`+`jobs`, upsert «свежайшее по
+  маршруту+дате+рейсу», импорт `data/*.json` (19 655 котировок), детект покрытия.
+  `storage/lake.py` — append-only Parquet-озеро (партиции `dt=/route=`, pyarrow).
+- (2) FastAPI (`api/main.py`): `POST /api/search` (синхронно из кэша через
+  `trip_builder`), `GET /api/airports` (автокомплит), `GET /api/health`. React
+  подключён к реальному API (`searchClient` → `fetch`), A/B **разлочены** с
+  автокомплитом; для несобранных маршрутов — `needs_backend`.
+  Запуск — `docs/RUN.md`.
+
+Остаётся к Фазе 2: воркер + таблица `jobs` в деле (сбор недостающего с прогрессом),
+`/search` заводит job по пробелам покрытия, `BackendNote → JobProgress`,
+периодический сбор по `deploy/config.yaml`, запись собранного в SQLite + Parquet.
+
 > «Логику не меняем» относится к бизнес-логике (`aggregate`/`trip_builder`) — она
 > нетронута. Storage-слой (SQLite) вводится уже здесь: без него React не сможет
 > запрашивать произвольные A/B. Запись/сбор добавляются в Фазе 2.
@@ -143,6 +163,25 @@ App
 - **Периодический сбор:** APScheduler-крон обходит направления из `deploy/config.yaml`
   и наполняет озеро/кэш. Механически — тот же джоб, запускаемый по расписанию,
   поэтому цепляется сюда же (фича №2, а не «доработка»).
+
+**Статус Фазы 2 — сделано on-demand (2026-09-21):** реальный сбор через Travelpayouts.
+- `core/collector.collect_route()` — сбор маршрута (6 под-запросов: прямые O→D/D→O +
+  стыковочные O→любой/любой→D/D→любой/любой→O; leg2 остановки в окне вылет+stopover).
+- `api/worker.run_collection` в ThreadPoolExecutor: прогресс в `jobs`, upsert котировок
+  в SQLite + append в Parquet, сборка контракта через `trip_builder.build_payload`
+  (произвольный маршрут через `routes.make_route_config`, без события).
+- `POST /api/search` **ничего не собирает сам** — только оценивает: собран → `{ok,data}`;
+  не собран + даты → `{needs_collection, estimate:{requests,seconds}}`; идёт сбор →
+  `{collecting, job_id}`; нет дат → `{needs_backend}`. Сбор запускает отдельный
+  `POST /api/collect` — только после явного подтверждения (защита от случайного сбора).
+  `GET /api/jobs/{id}` — прогресс.
+- Фронт: `JobProgress` (прогресс-бар + polling `useJob`), по завершении рефетч `/search`.
+  Проверено e2e (MOW→FUK, MOW→OSA): collecting → прогресс → карточки.
+- Предохранитель `MAX_REQUESTS=150`. Поле `min_stay` убрано с формы (дни на месте
+  крутятся слайдером на результатах; для сбора используется дефолт).
+
+**Остаётся в Фазе 2:** периодический сбор по расписанию (APScheduler + `deploy/config.yaml`) —
+механически тот же job, запускаемый кроном.
 
 ### Фаза 3. В облако
 - Деплой в Yandex Cloud: burstable VM + Docker Compose (api + worker + Caddy),

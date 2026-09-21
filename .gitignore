@@ -33,7 +33,15 @@ poetry.lock
 data/
 *.json
 *.csv
-web/data.js  # генерируется build_web_data.py
+# генерируется build_web_data.py
+web/data.js
+
+# ...но JSON-конфиги фронтенда нужны в репозитории (перебиваем *.json выше)
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
+!frontend/tsconfig.app.json
+!frontend/tsconfig.node.json
 
 # IDE
 .vscode/
