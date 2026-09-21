@@ -51,7 +51,8 @@ def get_date_range(start_date: str, end_date: str) -> List[str]:
 
 
 def fetch_flights(origin: str = None, destination: str = None, departure_at: str = None,
-                  currency: str = "RUB", unique: bool = True, limit: int = 1000) -> Dict[str, Any]:
+                  currency: str = "RUB", unique: bool = True, limit: int = 1000,
+                  allow_indirect: bool = False) -> Dict[str, Any]:
     """
     Получает данные о перелетах из API.
 
@@ -62,6 +63,7 @@ def fetch_flights(origin: str = None, destination: str = None, departure_at: str
         currency: Валюта цен (по умолчанию RUB)
         unique: Уникальные направления (по умолчанию True)
         limit: Лимит результатов (по умолчанию 1000)
+        allow_indirect: Разрешить непрямые перелеты (с пересадками) (по умолчанию False)
 
     Returns:
         Словарь с данными о перелетах
@@ -69,7 +71,7 @@ def fetch_flights(origin: str = None, destination: str = None, departure_at: str
     params = {
         "currency": currency,
         "token": API_TOKEN,
-        "direct": "true",
+        "direct": "false" if allow_indirect else "true",
         "one_way": "true",
         "limit": limit
     }
@@ -98,7 +100,8 @@ def fetch_flights(origin: str = None, destination: str = None, departure_at: str
 
 
 def collect_leg_data(origin: str = None, destination: str = None,
-                     date_range: List[str] = None, leg_name: str = "") -> List[Dict[str, Any]]:
+                     date_range: List[str] = None, leg_name: str = "",
+                     allow_indirect: bool = False) -> List[Dict[str, Any]]:
     """
     Собирает данные о перелетах для одного этапа маршрута.
     Если origin указан, а destination нет - получает все направления из origin.
@@ -109,6 +112,7 @@ def collect_leg_data(origin: str = None, destination: str = None,
         destination: Код города назначения (IATA), опционально
         date_range: Список дат для проверки
         leg_name: Название этапа (для логирования)
+        allow_indirect: Разрешить непрямые перелеты (с пересадками) (по умолчанию False)
 
     Returns:
         Список всех найденных перелетов
@@ -133,7 +137,7 @@ def collect_leg_data(origin: str = None, destination: str = None,
             current_request += 1
             print(f"[{current_request}/{total_requests}] Запрос: {origin_str} -> {dest_str} на {date}...", end=" ")
 
-            result = fetch_flights(origin, destination, date)
+            result = fetch_flights(origin, destination, date, allow_indirect=allow_indirect)
 
             if result.get("data"):
                 flight_count = len(result["data"])
@@ -154,7 +158,7 @@ def collect_leg_data(origin: str = None, destination: str = None,
     else:
         # Запрос без указания конкретной даты
         print(f"Запрос: {origin_str} -> {dest_str}...", end=" ")
-        result = fetch_flights(origin, destination)
+        result = fetch_flights(origin, destination, allow_indirect=allow_indirect)
 
         if result.get("data"):
             flight_count = len(result["data"])
@@ -209,6 +213,12 @@ def main():
 
   # Только сбор вылетов из города (все направления)
   python collect_flights.py MOW --leg1-dates 2026-02-15 2026-02-20
+
+  # С разрешением непрямых перелетов (с пересадками)
+  python collect_flights.py MOW BKK \\
+    --leg1-dates 2026-02-15 2026-02-20 \\
+    --leg2-dates 2026-02-25 2026-03-05 \\
+    --allow-indirect
         """
     )
 
@@ -229,6 +239,9 @@ def main():
 
     parser.add_argument("--currency", default="RUB",
                        help="Валюта для цен (по умолчанию RUB)")
+
+    parser.add_argument("--allow-indirect", action="store_true",
+                       help="Разрешить непрямые перелеты (с пересадками). По умолчанию только прямые рейсы")
 
     parser.add_argument("--output", default=None,
                        help="Путь к выходному файлу (по умолчанию data/flights_TIMESTAMP.json)")
@@ -257,6 +270,7 @@ def main():
     if leg2_dates:
         print(f"Второй этап: {len(leg2_dates)} дней ({leg2_dates[0]} - {leg2_dates[-1]})")
     print(f"Валюта: {args.currency}")
+    print(f"Тип перелетов: {'Непрямые (с пересадками)' if args.allow_indirect else 'Прямые'}")
 
     # Сбор данных для первого этапа
     if args.intermediate:
@@ -267,7 +281,8 @@ def main():
                 origin=args.origin,
                 destination=intermediate,
                 date_range=leg1_dates,
-                leg_name="leg1"
+                leg_name="leg1",
+                allow_indirect=args.allow_indirect
             )
             leg1_flights.extend(flights)
     else:
@@ -276,7 +291,8 @@ def main():
             origin=args.origin,
             destination=None,  # Не указываем destination - получим все направления
             date_range=leg1_dates,
-            leg_name="leg1"
+            leg_name="leg1",
+            allow_indirect=args.allow_indirect
         )
 
     # Сбор данных для второго этапа (если нужен)
@@ -289,7 +305,8 @@ def main():
                     origin=intermediate,
                     destination=args.destination,
                     date_range=leg2_dates,
-                    leg_name="leg2"
+                    leg_name="leg2",
+                    allow_indirect=args.allow_indirect
                 )
                 leg2_flights.extend(flights)
         else:
@@ -298,7 +315,8 @@ def main():
                 origin=None,  # Не указываем origin - получим все направления
                 destination=args.destination,
                 date_range=leg2_dates,
-                leg_name="leg2"
+                leg_name="leg2",
+                allow_indirect=args.allow_indirect
             )
 
     # Извлекаем уникальные промежуточные аэропорты из собранных данных
@@ -319,6 +337,8 @@ def main():
                 "end": leg1_dates[-1]
             },
             "currency": args.currency,
+            "allow_indirect": args.allow_indirect,
+            "flight_type": "indirect" if args.allow_indirect else "direct",
             "collected_at": datetime.now().isoformat(),
             "total_flights": len(leg1_flights) + len(leg2_flights)
         },

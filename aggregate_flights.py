@@ -393,7 +393,8 @@ def find_combinations(data: Dict[str, Any], min_stay: int = 1,
                     "airline": flight1.get("airline"),
                     "flight_number": flight1.get("flight_number"),
                     "link": flight1.get("link"),
-                    "duration": flight1.get("duration")
+                    "duration": flight1.get("duration"),
+                    "transfers": flight1.get("transfers", 0)
                 },
                 "leg2": {
                     "origin": leg2_origin,  # Используем реальный аэропорт вылета
@@ -404,7 +405,8 @@ def find_combinations(data: Dict[str, Any], min_stay: int = 1,
                     "airline": flight2.get("airline"),
                     "flight_number": flight2.get("flight_number"),
                     "link": flight2.get("link"),
-                    "duration": flight2.get("duration")
+                    "duration": flight2.get("duration"),
+                    "transfers": flight2.get("transfers", 0)
                 }
             }
 

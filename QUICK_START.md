@@ -44,6 +44,17 @@ poetry run python collect_flights.py MOW BKK \
   --intermediate IST DXB AUH
 ```
 
+### 2️⃣.5 Непрямые перелеты (с пересадками)
+
+Для поиска рейсов с пересадками используйте флаг `--allow-indirect`:
+
+```bash
+poetry run python collect_flights.py MOW BKK \
+  --leg1-dates 2026-02-15 2026-02-20 \
+  --leg2-dates 2026-02-25 2026-03-05 \
+  --allow-indirect
+```
+
 ### 3️⃣ Анализ собранных данных
 
 ```bash
@@ -140,7 +151,8 @@ poetry run python aggregate_flights.py data/flights_MOW_BKK_*.json \
 
 - До **1000** уникальных маршрутов за один запрос
 - Скрипт автоматически добавляет паузы между запросами (0.5 сек)
-- Используется только параметр `direct=true` (прямые рейсы)
+- По умолчанию используются только прямые рейсы (`direct=true`)
+- Используйте `--allow-indirect` для поиска рейсов с пересадками
 
 ---
 
