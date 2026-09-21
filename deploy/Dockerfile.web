@@ -1,0 +1,16 @@
+# Web-образ: собранный React-фронт (статика) + Caddy как единый origin.
+# Caddy отдаёт статику и reverse-proxy'ит /api/* на контейнер api; TLS — авто (Let's Encrypt).
+
+# --- этап сборки фронта ---
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+# Один origin в проде: VITE_API_BASE не задаём — клиент бьёт в относительный /api.
+RUN npm run build
+
+# --- рантайм: Caddy со статикой ---
+FROM caddy:2-alpine
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /app/dist /srv

@@ -1,0 +1,90 @@
+name: Deploy
+
+# Собирает образы flights-api и flights-web и пушит в Yandex Container Registry.
+# VM сама подхватывает свежие образы (systemd-таймер flights-update каждые 2 мин),
+# поэтому SSH-доступ к VM из CI не нужен.
+#
+# Требуемые секреты репозитория (Settings → Secrets and variables → Actions):
+#   YC_SA_KEY_JSON  — authorized-key SA flights-ci (terraform output ci_sa_key_json)
+#   YC_FOLDER_ID    — ID каталога
+#   YC_REGISTRY_ID  — ID реестра (terraform output registry_id)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api/**"
+      - "core/**"
+      - "storage/**"
+      - "frontend/**"
+      - "deploy/**"
+      - "pyproject.toml"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check secrets configured
+        id: check
+        env:
+          YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
+        run: |
+          if [ -n "$YC_SA_KEY_JSON" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Секреты YC не заданы — деплой пропущен (см. infra/terraform/README.md)."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.ok == 'true'
+
+      - name: Install yc CLI
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i "$HOME/yc" -n
+          echo "$HOME/yc/bin" >> "$GITHUB_PATH"
+
+      - name: Authenticate to Yandex Cloud
+        if: steps.check.outputs.ok == 'true'
+        env:
+          YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
+          YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+        run: |
+          printf '%s' "$YC_SA_KEY_JSON" > "$HOME/sa-key.json"
+          yc config profile create ci 2>/dev/null || yc config profile activate ci
+          yc config set service-account-key "$HOME/sa-key.json"
+          yc config set folder-id "$YC_FOLDER_ID"
+          yc container registry configure-docker
+
+      - name: Build & push API image
+        if: steps.check.outputs.ok == 'true'
+        env:
+          REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+          IMAGE="cr.yandex/$REGISTRY_ID/flights-api"
+          SHA="${GITHUB_SHA::7}"
+          docker build -t "$IMAGE:latest" -t "$IMAGE:$SHA" -f deploy/Dockerfile .
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:$SHA"
+
+      - name: Build & push web image
+        if: steps.check.outputs.ok == 'true'
+        env:
+          REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+          IMAGE="cr.yandex/$REGISTRY_ID/flights-web"
+          SHA="${GITHUB_SHA::7}"
+          docker build -t "$IMAGE:latest" -t "$IMAGE:$SHA" -f deploy/Dockerfile.web .
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:$SHA"
+
+      - name: Cleanup credentials
+        if: always() && steps.check.outputs.ok == 'true'
+        run: rm -f "$HOME/sa-key.json"

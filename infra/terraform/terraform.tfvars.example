@@ -1,0 +1,26 @@
+# Скопируйте в terraform.tfvars и заполните. terraform.tfvars игнорируется git (секреты).
+
+cloud_id  = "b1gj9177hplh08bhiq5s"
+folder_id = "b1grl72vuumj68vs4moa"
+zone      = "ru-central1-a"
+
+# Глобально уникальное имя бакета Object Storage.
+bucket_name = "sereshotes-flights-data"
+
+# Домен сайта — заведите A-запись на внешний IP VM (output vm_external_ip).
+site_domain = "flights.sereshotes.dev"
+
+# Токен Travelpayouts/Aviasales (берётся из корневого .env проекта).
+travelpayouts_token = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Публичный SSH-ключ для доступа к VM (ubuntu@<ip>).
+ssh_public_key = "ssh-ed25519 AAAA... you@host"
+
+# Параметры VM (по умолчанию 2 vCPU / 20% / 4 ГБ / 20 ГБ диск).
+# vm_cores         = 2
+# vm_core_fraction = 20
+# vm_memory_gb     = 4
+# vm_disk_gb       = 20
+
+# Потолок размера бакета, ГБ (0 = без лимита).
+# bucket_max_size_gb = 10
