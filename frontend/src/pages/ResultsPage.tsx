@@ -31,6 +31,13 @@ export function ResultsPage() {
     setJobId(null)
   }, [location.search])
 
+  // «Загрузить данные» с главной (?collect=1) — сразу запускаем сбор свежих данных.
+  const wantCollect = new URLSearchParams(location.search).get('collect') === '1'
+  useEffect(() => {
+    if (wantCollect) onCollect(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search])
+
   if (!params) return <Navigate to="/" replace />
 
   const activeJob = jobId ?? (result?.status === 'collecting' ? result.job_id : null)
