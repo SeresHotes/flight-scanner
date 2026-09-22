@@ -169,12 +169,42 @@ def _build_payload(origin: str, destination: str) -> Optional[Dict[str, Any]]:
 def _on_job_done(key: Tuple[str, str], payload: Dict[str, Any]) -> None:
     _dynamic_payloads[key] = payload
     _save_collected(key, payload)  # durable — переживёт перезапуск
+    # Сбрасываем реестровый кэш: _build_payload берёт _payload_cache раньше
+    # _dynamic_payloads, иначе после пересбора отдавался бы старый payload.
+    _payload_cache.pop(key, None)
     _route_jobs.pop(key, None)
 
 
 def _has_dates(req: "SearchRequest") -> bool:
     return bool(req.leg1_dates and len(req.leg1_dates) == 2 and all(req.leg1_dates)
                 and req.leg2_dates and len(req.leg2_dates) == 2 and all(req.leg2_dates))
+
+
+def _within(requested: List[str], covered: List[str]) -> bool:
+    """Лежит ли запрошенное окно [start, end] внутри собранного диапазона.
+
+    ISO-даты (YYYY-MM-DD) сравниваются лексикографически = хронологически.
+    Пустой собранный диапазон (по плечу ничего нет) не покрывает ничего.
+    """
+    c_start, c_end = covered[0], covered[1]
+    if not c_start or not c_end:
+        return False
+    return requested[0] >= c_start and requested[1] <= c_end
+
+
+def _covers_request(payload: Dict[str, Any], req: "SearchRequest") -> bool:
+    """Покрывают ли уже собранные окна вылета запрошенный диапазон дат.
+
+    Без дат в запросе считаем покрытым: клик по готовому маршруту подставляет
+    даты ровно из его диапазона. Если даты заданы и выходят за собранные окна —
+    это запрос НОВЫХ данных, старый payload отдавать нельзя.
+    """
+    if not _has_dates(req):
+        return True
+    m = payload["meta"]
+    there = m.get("dep_there_range") or ["", ""]
+    back = m.get("dep_back_range") or ["", ""]
+    return _within(list(req.leg1_dates), there) and _within(list(req.leg2_dates), back)
 
 
 def _estimate(params: Dict[str, Any]) -> Dict[str, int]:
@@ -204,8 +234,10 @@ def search(req: SearchRequest) -> Dict[str, Any]:
     """
     key = (req.origin.upper(), req.destination.upper())
 
+    # Отдаём собранное только если запрошенные даты уже покрыты. Запрос дат шире
+    # собранного окна — это запрос НОВЫХ данных, старый payload не показываем.
     payload = _build_payload(req.origin, req.destination)
-    if payload is not None:
+    if payload is not None and _covers_request(payload, req):
         return {"status": "ok", "data": payload}
 
     active = _active_job_id(key)
@@ -237,8 +269,10 @@ def gather(req: SearchRequest) -> Dict[str, Any]:
     """
     key = (req.origin.upper(), req.destination.upper())
 
+    # Уже покрыто — собирать нечего, возвращаем готовое. Иначе (даты шире
+    # собранного) идём в сбор недостающего окна.
     payload = _build_payload(req.origin, req.destination)
-    if payload is not None:
+    if payload is not None and _covers_request(payload, req):
         return {"status": "ok", "data": payload}
 
     active = _active_job_id(key)
