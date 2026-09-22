@@ -13,8 +13,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -30,7 +30,7 @@ poetry.lock
 .env
 
 # Data files
-data/
+/data/
 *.json
 *.csv
 # генерируется build_web_data.py
