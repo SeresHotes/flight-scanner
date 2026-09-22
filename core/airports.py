@@ -49,6 +49,15 @@ CITY_CODES = [
 _CITY_BY_CODE = {c[0]: c for c in CITY_CODES}
 
 
+def _matches_word_start(text: str, ql: str) -> bool:
+    """Совпадение по началу слова, а не по произвольной подстроке.
+
+    Иначе короткий IATA-код замусоривает выдачу: 'PEK' находит 'toPEKa' (Topeka).
+    'bei' → 'Beijing' совпадёт (начало слова), 'pek' → 'Topeka' — нет.
+    """
+    return any(word.startswith(ql) for word in text.replace("-", " ").split())
+
+
 @lru_cache(maxsize=4)
 def _network(path: str = DEFAULT_NETWORK_PATH) -> Dict[str, Dict[str, Any]]:
     return agg.load_airport_network(path)
@@ -91,7 +100,9 @@ def search_airports(q: str, limit: int = 10, path: str = DEFAULT_NETWORK_PATH) -
     used = set()
     for entry in CITY_CODES:
         code, ru, en, _country = entry
-        if code == qu or code.startswith(qu) or ql in ru.lower() or ql in en.lower():
+        if (code == qu or code.startswith(qu)
+                or _matches_word_start(ru.lower(), ql)
+                or _matches_word_start(en.lower(), ql)):
             results.append(_city_option(entry))
             used.add(code)
 
@@ -106,7 +117,7 @@ def search_airports(q: str, limit: int = 10, path: str = DEFAULT_NETWORK_PATH) -
             exact.append((code, entry))
         elif code.startswith(qu):
             prefix.append((code, entry))
-        elif ql in muni or ql in name:
+        elif _matches_word_start(muni, ql) or _matches_word_start(name, ql):
             contains.append((code, entry))
     for code, entry in exact + prefix + contains:
         results.append(_airport_option(code, entry))
