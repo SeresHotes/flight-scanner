@@ -1,5 +1,6 @@
 import type { Meta } from '../types'
 import type { FilterState, SortKey } from '../lib/filters'
+import { DateRangePicker } from './DateRangePicker'
 
 const SORT_OPTS: { v: SortKey; l: string }[] = [
   { v: 'price', l: 'Сначала дешёвые' },
@@ -134,7 +135,7 @@ export function Controls({
 
       <div className="ctl ctl-windows">
         <label>
-          Быть в точке назначения ({destName}){' '}
+          Точные даты присутствия{' '}
           {windowsActive && (
             <button
               type="button"
@@ -145,32 +146,19 @@ export function Controls({
             </button>
           )}
         </label>
-        <div className="daterow">
-          <input
-            type="date"
-            value={state.beFrom}
-            onChange={(e) => onPatch({ beFrom: e.target.value })}
-          />
-          <span>–</span>
-          <input
-            type="date"
-            value={state.beTo}
-            onChange={(e) => onPatch({ beTo: e.target.value })}
-          />
-        </div>
+        <DateRangePicker
+          label={`Даты в ${destName}`}
+          from={state.beFrom}
+          to={state.beTo}
+          onChange={(f, t) => onPatch({ beFrom: f, beTo: t })}
+        />
         <div className="ctl-sub">Оставить только поездки, которые целиком покрывают эти даты в {destName}.</div>
-        <label style={{ marginTop: 10 }}>Быть в городе-остановке</label>
-        <div className="daterow">
-          <input
-            type="date"
-            value={state.stopFrom}
-            onChange={(e) => onPatch({ stopFrom: e.target.value })}
-          />
-          <span>–</span>
-          <input
-            type="date"
-            value={state.stopTo}
-            onChange={(e) => onPatch({ stopTo: e.target.value })}
+        <div style={{ marginTop: 10 }}>
+          <DateRangePicker
+            label="Даты в городе-остановке"
+            from={state.stopFrom}
+            to={state.stopTo}
+            onChange={(f, t) => onPatch({ stopFrom: f, stopTo: t })}
           />
         </div>
         <div className="ctl-sub">Если задано — покажем только варианты с остановкой, покрывающей эти даты.</div>
