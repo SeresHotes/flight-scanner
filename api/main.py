@@ -148,6 +148,8 @@ class SearchRequest(BaseModel):
     leg1_dates: Optional[List[str]] = None
     leg2_dates: Optional[List[str]] = None
     min_stay: Optional[int] = None
+    # force=True: пересобрать заново, даже если данные уже есть (кнопка «свежие данные»).
+    force: Optional[bool] = None
 
 
 def _build_payload(origin: str, destination: str) -> Optional[Dict[str, Any]]:
@@ -168,6 +170,9 @@ def _build_payload(origin: str, destination: str) -> Optional[Dict[str, Any]]:
 
 def _on_job_done(key: Tuple[str, str], payload: Dict[str, Any]) -> None:
     _dynamic_payloads[key] = payload
+    # Инвалидируем статический кэш реестра — после форс-сбора свежий payload должен
+    # победить (в _build_payload _dynamic_payloads проверяется после _payload_cache).
+    _payload_cache.pop(key, None)
     _save_collected(key, payload)  # durable — переживёт перезапуск
     _route_jobs.pop(key, None)
 
@@ -180,6 +185,17 @@ def _has_dates(req: "SearchRequest") -> bool:
 def _estimate(params: Dict[str, Any]) -> Dict[str, int]:
     requests = worker.estimate_requests(params)
     return {"requests": requests, "seconds": round(requests * worker.SECONDS_PER_REQUEST)}
+
+
+def _refresh_estimate(req: "SearchRequest") -> Optional[Dict[str, int]]:
+    """Оценка форс-пересбора для уже собранного маршрута; None — если собрать нельзя
+    (нет дат или диапазон шире предохранителя MAX_REQUESTS)."""
+    if not _has_dates(req):
+        return None
+    params = {"origin": req.origin.upper(), "destination": req.destination.upper(),
+              "leg1_dates": list(req.leg1_dates), "leg2_dates": list(req.leg2_dates)}
+    est = _estimate(params)
+    return est if est["requests"] <= worker.MAX_REQUESTS else None
 
 
 def _active_job_id(key) -> Optional[str]:
@@ -206,7 +222,11 @@ def search(req: SearchRequest) -> Dict[str, Any]:
 
     payload = _build_payload(req.origin, req.destination)
     if payload is not None:
-        return {"status": "ok", "data": payload}
+        resp: Dict[str, Any] = {"status": "ok", "data": payload}
+        # Оценка форс-пересбора: чтобы на результатах показать кнопку «свежие данные»
+        # с числом запросов. None → диапазон дат слишком широк или не задан.
+        resp["refresh_estimate"] = _refresh_estimate(req)
+        return resp
 
     active = _active_job_id(key)
     if active:
@@ -237,9 +257,11 @@ def gather(req: SearchRequest) -> Dict[str, Any]:
     """
     key = (req.origin.upper(), req.destination.upper())
 
-    payload = _build_payload(req.origin, req.destination)
-    if payload is not None:
-        return {"status": "ok", "data": payload}
+    # При force=True не замыкаем на «данные уже есть» — цель именно пересобрать свежие.
+    if not req.force:
+        payload = _build_payload(req.origin, req.destination)
+        if payload is not None:
+            return {"status": "ok", "data": payload}
 
     active = _active_job_id(key)
     if active:
