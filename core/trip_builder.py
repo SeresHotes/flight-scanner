@@ -41,11 +41,20 @@ def flag_emoji(iso2: str) -> str:
 
 
 def make_city_lookup(network: dict):
+    # Метро-коды агломераций (BJS, LON, TYO…) физических аэропортов в сети не имеют,
+    # поэтому их имена берём из курируемого справочника — иначе в выдаче остаётся
+    # голый код («BJS» вместо «Beijing»). Импорт ленивый: рвём цикл airports↔trip_builder.
+    from core.airports import _CITY_BY_CODE
+
     def city_info(code: str) -> dict:
         info = network.get(code, {})
-        name = info.get("municipality") or info.get("name") or code
+        name = info.get("municipality") or info.get("name")
         country = info.get("iso_country") or ""
-        return {"city": name, "country": country, "flag": flag_emoji(country)}
+        if not name:
+            entry = _CITY_BY_CODE.get(code)
+            if entry:
+                name, country = entry[2], entry[3]  # английское имя, ISO2 страны
+        return {"city": name or code, "country": country, "flag": flag_emoji(country)}
     return city_info
 
 
