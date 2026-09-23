@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import type { SearchParams } from '../data/searchClient'
 import { useRoutes } from '../hooks/useRoutes'
 import { paramsToQuery } from '../lib/urlParams'
@@ -34,6 +34,10 @@ export function SearchPage() {
   return (
     <>
       <Header />
+
+      <div className="backlink">
+        <Link to="/planner">🧭 Попробовать планировщик маршрута (цепочка городов) →</Link>
+      </div>
 
       <SearchForm availableRoutes={data?.available} onShow={goToResults} onCollect={goToCollect} />
 

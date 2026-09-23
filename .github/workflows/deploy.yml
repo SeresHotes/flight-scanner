@@ -1,13 +1,17 @@
 name: Deploy
 
-# Собирает образы flights-api и flights-web и пушит в Yandex Container Registry.
-# VM сама подхватывает свежие образы (systemd-таймер flights-update каждые 2 мин),
-# поэтому SSH-доступ к VM из CI не нужен.
+# Собирает образы flights-api и flights-web, пушит в Yandex Container Registry и
+# (опционально) мгновенно выкатывает на VM по SSH. Если SSH-секреты не заданы —
+# VM подхватит свежие образы сама (systemd-таймер flights-update каждые 2 мин).
 #
-# Требуемые секреты репозитория (Settings → Secrets and variables → Actions):
+# Обязательные секреты (Settings → Secrets and variables → Actions):
 #   YC_SA_KEY_JSON  — authorized-key SA flights-ci (terraform output ci_sa_key_json)
 #   YC_FOLDER_ID    — ID каталога
 #   YC_REGISTRY_ID  — ID реестра (terraform output registry_id)
+# Опциональные (для мгновенного деплоя; иначе выкатка таймером ~2 мин):
+#   VM_SSH_HOST     — внешний IP VM (terraform output vm_external_ip)
+#   VM_SSH_KEY      — приватный SSH-ключ (пара к var.ssh_public_key; пользователь ubuntu)
+#   VM_SSH_USER     — пользователь SSH (по умолчанию ubuntu)
 
 on:
   push:
@@ -29,6 +33,8 @@ concurrency:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    outputs:
+      pushed: ${{ steps.check.outputs.ok }}
     steps:
       - name: Check secrets configured
         id: check
@@ -88,3 +94,41 @@ jobs:
       - name: Cleanup credentials
         if: always() && steps.check.outputs.ok == 'true'
         run: rm -f "$HOME/sa-key.json"
+
+  # Мгновенная выкатка на VM по SSH (иначе — таймер flights-update на VM, ~2 мин).
+  deploy:
+    needs: build-push
+    if: needs.build-push.outputs.pushed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check SSH secrets
+        id: check
+        env:
+          VM_SSH_HOST: ${{ secrets.VM_SSH_HOST }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+        run: |
+          if [ -n "$VM_SSH_HOST" ] && [ -n "$VM_SSH_KEY" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SSH-секреты не заданы — мгновенный деплой пропущен, VM подхватит образы таймером (~2 мин)."
+          fi
+
+      - name: Deploy over SSH
+        if: steps.check.outputs.ok == 'true'
+        env:
+          VM_SSH_HOST: ${{ secrets.VM_SSH_HOST }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "$VM_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          USER_NAME="${VM_SSH_USER:-ubuntu}"
+          # run.sh на VM: логин в реестр IAM-токеном SA + docker compose pull + up -d.
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=accept-new \
+            "$USER_NAME@$VM_SSH_HOST" 'sudo systemctl start flights-update.service'
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_deploy
