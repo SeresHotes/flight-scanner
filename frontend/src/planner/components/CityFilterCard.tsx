@@ -1,3 +1,4 @@
+import { DateRangePicker } from '../../components/DateRangePicker'
 import { dayW } from '../../lib/format'
 import type { CityFilter } from '../types'
 
@@ -50,17 +51,12 @@ export function CityFilterCard({
           Обязательно покрыть окно дат
         </label>
         {coverOn && (
-          <div className="daterow" style={{ marginTop: 8 }}>
-            <input
-              type="date"
-              value={cover[0]}
-              onChange={(e) => onChange({ mustCover: [e.target.value, cover[1]] })}
-            />
-            <span>–</span>
-            <input
-              type="date"
-              value={cover[1]}
-              onChange={(e) => onChange({ mustCover: [cover[0], e.target.value] })}
+          <div style={{ marginTop: 8 }}>
+            <DateRangePicker
+              label="покрыть даты"
+              from={cover[0]}
+              to={cover[1]}
+              onChange={(from, to) => onChange({ mustCover: [from, to] })}
             />
           </div>
         )}
