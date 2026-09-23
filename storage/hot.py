@@ -236,3 +236,20 @@ def update_job(conn: sqlite3.Connection, job_id: str, **fields) -> None:
 def get_job(conn: sqlite3.Connection, job_id: str) -> Optional[Dict[str, Any]]:
     row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     return dict(row) if row else None
+
+
+def fail_stale_jobs(conn: sqlite3.Connection,
+                    error: str = "прервана рестартом сервера") -> int:
+    """Помечает зависшие джобы (pending/running) как error.
+
+    Воркер живёт в потоке процесса, поэтому при перезапуске сервера незавершённые
+    джобы теряют исполнителя, но остаются в БД в статусе running навсегда. Чистим
+    их на старте, чтобы маршрут можно было собрать заново."""
+    now = datetime.now().isoformat()
+    cur = conn.execute(
+        "UPDATE jobs SET status='error', error=?, updated_at=? "
+        "WHERE status IN ('pending', 'running')",
+        (error, now),
+    )
+    conn.commit()
+    return cur.rowcount
