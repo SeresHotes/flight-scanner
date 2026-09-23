@@ -23,24 +23,28 @@ export function PlanEstimateBar({
 
   return (
     <div className="pl-estimate">
-      <div className="pl-est-info">
-        <div className="pl-est-num">
-          Потребуется загрузить <b>{estimate.requests}</b> {reqWord}
-          <span className="pl-est-sec"> · {fmtSeconds(estimate.seconds)}</span>
+      {/* Оценку показываем только для корректного маршрута — иначе число бессмысленно
+          (напр. два «любых» подряд → плечо нечем заякорить). */}
+      {validation.ok && (
+        <div className="pl-est-info">
+          <div className="pl-est-num">
+            Потребуется загрузить <b>{estimate.requests}</b> {reqWord}
+            <span className="pl-est-sec"> · {fmtSeconds(estimate.seconds)}</span>
+          </div>
+          <div className="pl-est-legs">
+            {estimate.legs.map((leg, i) => (
+              <span className="mchip" key={i}>
+                {leg.fromLabel} → {leg.toLabel}: <b>{leg.requests}</b>
+                <span className="pl-anytag"> · запр/день</span>
+              </span>
+            ))}
+          </div>
+          <div className="pl-est-hint">
+            Собираем «все направления» и фильтруем по выбранным городам — конкретные
+            города не дороже «любого».
+          </div>
         </div>
-        <div className="pl-est-legs">
-          {estimate.legs.map((leg, i) => (
-            <span className="mchip" key={i}>
-              {leg.fromLabel} → {leg.toLabel}: <b>{leg.requests}</b>
-              <span className="pl-anytag"> · запр/день</span>
-            </span>
-          ))}
-        </div>
-        <div className="pl-est-hint">
-          Собираем «все направления» и фильтруем по выбранным городам — конкретные
-          города не дороже «любого».
-        </div>
-      </div>
+      )}
 
       <button type="button" className="btn-primary" disabled={disabled} onClick={onLoad}>
         Загрузить данные →
