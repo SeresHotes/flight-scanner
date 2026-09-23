@@ -13,14 +13,14 @@ const DEFAULT_LEG_DAYS = 7 // ширина окна плеча, если оба 
 
 // Пул городов, которыми мок «раскрывает» wildcard-остановки (any).
 const ANY_POOL: AirportOption[] = [
-  { code: 'IST', city: 'Стамбул', flag: '🇹🇷', label: 'Стамбул (IST)' },
-  { code: 'DXB', city: 'Дубай', flag: '🇦🇪', label: 'Дубай (DXB)' },
-  { code: 'EVN', city: 'Ереван', flag: '🇦🇲', label: 'Ереван (EVN)' },
-  { code: 'TBS', city: 'Тбилиси', flag: '🇬🇪', label: 'Тбилиси (TBS)' },
-  { code: 'BEG', city: 'Белград', flag: '🇷🇸', label: 'Белград (BEG)' },
-  { code: 'ALA', city: 'Алматы', flag: '🇰🇿', label: 'Алматы (ALA)' },
-  { code: 'DOH', city: 'Доха', flag: '🇶🇦', label: 'Доха (DOH)' },
-  { code: 'GYD', city: 'Баку', flag: '🇦🇿', label: 'Баку (GYD)' },
+  { code: 'IST', city: 'Istanbul', flag: '🇹🇷', label: 'Istanbul (IST)' },
+  { code: 'DXB', city: 'Dubai', flag: '🇦🇪', label: 'Dubai (DXB)' },
+  { code: 'EVN', city: 'Yerevan', flag: '🇦🇲', label: 'Yerevan (EVN)' },
+  { code: 'TBS', city: 'Tbilisi', flag: '🇬🇪', label: 'Tbilisi (TBS)' },
+  { code: 'BEG', city: 'Belgrade', flag: '🇷🇸', label: 'Belgrade (BEG)' },
+  { code: 'ALA', city: 'Almaty', flag: '🇰🇿', label: 'Almaty (ALA)' },
+  { code: 'DOH', city: 'Doha', flag: '🇶🇦', label: 'Doha (DOH)' },
+  { code: 'GYD', city: 'Baku', flag: '🇦🇿', label: 'Baku (GYD)' },
 ]
 
 const AIRLINES = ['Aeroflot', 'Turkish Airlines', 'Emirates', 'Qatar Airways', 'S7', 'flydubai']
