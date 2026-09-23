@@ -72,10 +72,12 @@ def _network(path: str = DEFAULT_NETWORK_PATH) -> Dict[str, Dict[str, Any]]:
 
 
 def _city_option(entry) -> Dict[str, str]:
-    code, ru, _en, country = entry
+    # Отдаём английское имя (поиск ниже всё равно матчит и по русскому вводу).
+    # Так автокомплит консистентен с названиями из airport_network (тоже английскими).
+    code, _ru, en, country = entry
     return {
-        "code": code, "city": ru, "country": country,
-        "flag": flag_emoji(country), "label": f"{ru} ({code})",
+        "code": code, "city": en, "country": country,
+        "flag": flag_emoji(country), "label": f"{en} ({code})",
     }
 
 
