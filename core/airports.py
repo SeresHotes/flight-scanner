@@ -45,6 +45,14 @@ CITY_CODES = [
     ("ALA", "Алматы", "Almaty", "KZ"),
     ("TAS", "Ташкент", "Tashkent", "UZ"),
     ("DEL", "Дели", "Delhi", "IN"),
+    ("BAK", "Баку", "Baku", "AZ"),
+    ("JKT", "Джакарта", "Jakarta", "ID"),
+    ("SAO", "Сан-Паулу", "São Paulo", "BR"),
+    ("SPK", "Саппоро", "Sapporo", "JP"),
+    ("YTO", "Торонто", "Toronto", "CA"),
+    ("NHA", "Нячанг", "Nha Trang", "VN"),
+    ("RTW", "Саратов", "Saratov", "RU"),
+    ("BSZ", "Бишкек", "Bishkek", "KG"),  # Manas International — обслуживает Бишкек
 ]
 _CITY_BY_CODE = {c[0]: c for c in CITY_CODES}
 
