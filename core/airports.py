@@ -45,6 +45,14 @@ CITY_CODES = [
     ("ALA", "Алматы", "Almaty", "KZ"),
     ("TAS", "Ташкент", "Tashkent", "UZ"),
     ("DEL", "Дели", "Delhi", "IN"),
+    ("BAK", "Баку", "Baku", "AZ"),
+    ("JKT", "Джакарта", "Jakarta", "ID"),
+    ("SAO", "Сан-Паулу", "São Paulo", "BR"),
+    ("SPK", "Саппоро", "Sapporo", "JP"),
+    ("YTO", "Торонто", "Toronto", "CA"),
+    ("NHA", "Нячанг", "Nha Trang", "VN"),
+    ("RTW", "Саратов", "Saratov", "RU"),
+    ("BSZ", "Бишкек", "Bishkek", "KG"),  # Manas International — обслуживает Бишкек
 ]
 _CITY_BY_CODE = {c[0]: c for c in CITY_CODES}
 
@@ -64,10 +72,12 @@ def _network(path: str = DEFAULT_NETWORK_PATH) -> Dict[str, Dict[str, Any]]:
 
 
 def _city_option(entry) -> Dict[str, str]:
-    code, ru, _en, country = entry
+    # Отдаём английское имя (поиск ниже всё равно матчит и по русскому вводу).
+    # Так автокомплит консистентен с названиями из airport_network (тоже английскими).
+    code, _ru, en, country = entry
     return {
-        "code": code, "city": ru, "country": country,
-        "flag": flag_emoji(country), "label": f"{ru} ({code})",
+        "code": code, "city": en, "country": country,
+        "flag": flag_emoji(country), "label": f"{en} ({code})",
     }
 
 

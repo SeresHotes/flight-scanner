@@ -1,0 +1,10 @@
+# Зеркало провайдера Yandex Cloud (registry.terraform.io недоступен в РФ).
+# Использование:
+#   cp terraform.rc.example terraform.rc
+#   export TF_CLI_CONFIG_FILE="$PWD/terraform.rc"
+#   terraform init
+provider_installation {
+  network_mirror {
+    url = "https://terraform-mirror.yandexcloud.net/"
+  }
+}

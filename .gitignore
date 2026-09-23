@@ -1,24 +1,24 @@
-# Python
+# Python (каталоги-артефакты анкерим к корню — иначе ловят frontend/src/lib и т.п.)
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+/env/
+/venv/
+/ENV/
+/build/
+/develop-eggs/
+/dist/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -29,12 +29,14 @@ poetry.lock
 # Environment
 .env
 
-# Data files
-data/
+# Data files (только корневой каталог данных; НЕ frontend/src/data и т.п.)
+/data/
 *.json
 *.csv
 # генерируется build_web_data.py
 web/data.js
+# сид для Object Storage (собирается deploy/make-seed.sh из data/)
+/seed/
 
 # ...но JSON-конфиги фронтенда нужны в репозитории (перебиваем *.json выше)
 !frontend/package.json

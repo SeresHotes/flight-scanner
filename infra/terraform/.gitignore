@@ -1,0 +1,11 @@
+# Локальное состояние и секреты Terraform — не в git.
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+crash.log
+terraform.rc
+tfplan
+*.tfplan

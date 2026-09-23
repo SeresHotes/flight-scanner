@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import type { SearchParams } from '../data/searchClient'
 import { useRoutes } from '../hooks/useRoutes'
 import { paramsToQuery } from '../lib/urlParams'
@@ -13,6 +13,11 @@ export function SearchPage() {
 
   function goToResults(params: SearchParams) {
     navigate(`/results?${paramsToQuery(params)}`)
+  }
+
+  // «Загрузить данные» — на страницу результатов с флагом авто-сбора свежих данных.
+  function goToCollect(params: SearchParams) {
+    navigate(`/results?${paramsToQuery(params)}&collect=1`)
   }
 
   function pickRoute(origin: string, destination: string) {
@@ -30,7 +35,11 @@ export function SearchPage() {
     <>
       <Header />
 
-      <SearchForm availableRoutes={data?.available} onSubmit={goToResults} />
+      <div className="backlink">
+        <Link to="/planner">🧭 Попробовать планировщик маршрута (цепочка городов) →</Link>
+      </div>
+
+      <SearchForm availableRoutes={data?.available} onShow={goToResults} onCollect={goToCollect} />
 
       {isLoading && <div className="loading-note">Загружаем список собранных данных…</div>}
       {isError && (

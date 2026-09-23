@@ -1,0 +1,32 @@
+# Контекст сборки — из корня репозитория (context: ..). Не тащим в образ лишнее:
+.git
+.claude
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv
+venv/
+env/
+ENV/
+
+# Данные (сид/озеро/SQLite) — приезжают на том, не в образ.
+/data/
+results/
+web/data.js
+
+# Фронт: node_modules и dist пересобираются внутри Dockerfile.web.
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# Прочее
+.DS_Store
+*.swp
+notebooks/
+docs/
+*.md
+!README.md
+.env
+infra/terraform/.terraform/
+infra/terraform/*.tfstate*
+infra/terraform/terraform.tfvars

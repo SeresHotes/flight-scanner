@@ -1,0 +1,79 @@
+import { dayW } from '../../lib/format'
+import type { CityFilter } from '../types'
+
+// Фильтры одного города: мин/макс дней, обязательное окно, оба выходных.
+export function CityFilterCard({
+  title,
+  filter,
+  onChange,
+}: {
+  title: string
+  filter: CityFilter
+  onChange: (patch: Partial<CityFilter>) => void
+}) {
+  const coverOn = filter.mustCover !== null
+  const cover = filter.mustCover ?? ['', '']
+
+  return (
+    <div className="legpanel">
+      <div className="legtitle">🏙 {title}</div>
+
+      <div className="fsub">
+        <span>
+          Дней в городе: <span className="rangeval">{filter.minStay}–{filter.maxStay} {dayW(filter.maxStay)}</span>
+        </span>
+        <div className="dualrange">
+          <input
+            type="range"
+            min={1}
+            max={30}
+            value={filter.minStay}
+            onChange={(e) => onChange({ minStay: Math.min(Number(e.target.value), filter.maxStay) })}
+          />
+          <input
+            type="range"
+            min={1}
+            max={30}
+            value={filter.maxStay}
+            onChange={(e) => onChange({ maxStay: Math.max(Number(e.target.value), filter.minStay) })}
+          />
+        </div>
+      </div>
+
+      <div className="fsub">
+        <label className="pl-check">
+          <input
+            type="checkbox"
+            checked={coverOn}
+            onChange={(e) => onChange({ mustCover: e.target.checked ? ['', ''] : null })}
+          />
+          Обязательно покрыть окно дат
+        </label>
+        {coverOn && (
+          <div className="daterow" style={{ marginTop: 8 }}>
+            <input
+              type="date"
+              value={cover[0]}
+              onChange={(e) => onChange({ mustCover: [e.target.value, cover[1]] })}
+            />
+            <span>–</span>
+            <input
+              type="date"
+              value={cover[1]}
+              onChange={(e) => onChange({ mustCover: [cover[0], e.target.value] })}
+            />
+          </div>
+        )}
+      </div>
+
+      <label className="pl-check">
+        <input
+          type="checkbox"
+          checked={filter.requireWeekend}
+          onChange={(e) => onChange({ requireWeekend: e.target.checked })}
+        />
+        Должны быть оба выходных (сб + вс)
+      </label>
+    </div>
+  )
+}

@@ -9,6 +9,7 @@
 import glob
 import json
 import os
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -43,6 +44,10 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 _payload_cache: Dict[tuple, Dict[str, Any]] = {}
 _dynamic_payloads: Dict[tuple, Dict[str, Any]] = {}
 _route_jobs: Dict[tuple, str] = {}
+# Сериализует check-active-then-create в /gather и чистку в _active_job_id/_on_job_done:
+# sync-эндпоинты FastAPI крутятся в пуле потоков, без лока два параллельных /gather
+# завели бы две джобы на один маршрут. RLock — т.к. /gather под локом зовёт _active_job_id.
+_jobs_lock = threading.RLock()
 _executor = ThreadPoolExecutor(max_workers=1)  # сериализуем сбор (rate-limit к API)
 _conn = None
 
@@ -81,8 +86,11 @@ def _startup() -> None:
     # Импорт существующих выгрузок коллектора в горячее хранилище (идемпотентно).
     imported = hot.import_data_dir(_conn, "data")
     restored = _load_collected()  # ранее собранные маршруты (durable)
+    # Джобы, не пережившие прошлый рестарт, висят в running — помечаем error,
+    # иначе маршрут навсегда считался бы «в процессе сбора».
+    stale = hot.fail_stale_jobs(_conn)
     print(f"[startup] импортировано котировок: {imported}, всего в БД: {hot.count_quotes(_conn)}; "
-          f"восстановлено собранных маршрутов: {restored}")
+          f"восстановлено собранных маршрутов: {restored}; зависших джоб сброшено: {stale}")
 
 
 # --------------------------------- health ------------------------------------
@@ -148,6 +156,8 @@ class SearchRequest(BaseModel):
     leg1_dates: Optional[List[str]] = None
     leg2_dates: Optional[List[str]] = None
     min_stay: Optional[int] = None
+    # force=True: пересобрать заново, даже если данные уже есть (кнопка «свежие данные»).
+    force: Optional[bool] = None
 
 
 def _build_payload(origin: str, destination: str) -> Optional[Dict[str, Any]]:
@@ -168,11 +178,12 @@ def _build_payload(origin: str, destination: str) -> Optional[Dict[str, Any]]:
 
 def _on_job_done(key: Tuple[str, str], payload: Dict[str, Any]) -> None:
     _dynamic_payloads[key] = payload
-    _save_collected(key, payload)  # durable — переживёт перезапуск
-    # Сбрасываем реестровый кэш: _build_payload берёт _payload_cache раньше
-    # _dynamic_payloads, иначе после пересбора отдавался бы старый payload.
+    # Инвалидируем статический кэш реестра — после форс-сбора свежий payload должен
+    # победить (в _build_payload _dynamic_payloads проверяется после _payload_cache).
     _payload_cache.pop(key, None)
-    _route_jobs.pop(key, None)
+    _save_collected(key, payload)  # durable — переживёт перезапуск
+    with _jobs_lock:
+        _route_jobs.pop(key, None)
 
 
 def _has_dates(req: "SearchRequest") -> bool:
@@ -212,15 +223,29 @@ def _estimate(params: Dict[str, Any]) -> Dict[str, int]:
     return {"requests": requests, "seconds": round(requests * worker.SECONDS_PER_REQUEST)}
 
 
-def _active_job_id(key) -> Optional[str]:
-    active = _route_jobs.get(key)
-    if not active:
+def _refresh_estimate(req: "SearchRequest") -> Optional[Dict[str, int]]:
+    """Оценка форс-пересбора для уже собранного маршрута; None — если собрать нельзя
+    (нет дат или диапазон шире предохранителя MAX_REQUESTS)."""
+    if not _has_dates(req):
         return None
-    job = hot.get_job(_conn, active)
-    if job and job["status"] in ("pending", "running"):
-        return active
-    _route_jobs.pop(key, None)  # завершилась — больше не активна
-    return None
+    params = {"origin": req.origin.upper(), "destination": req.destination.upper(),
+              "leg1_dates": list(req.leg1_dates), "leg2_dates": list(req.leg2_dates)}
+    est = _estimate(params)
+    return est if est["requests"] <= worker.MAX_REQUESTS else None
+
+
+def _active_job_id(key) -> Optional[str]:
+    """Активная (pending/running) джоба по маршруту.
+    Лениво чистит запись, если джоба уже завершилась (done/error)."""
+    with _jobs_lock:
+        active = _route_jobs.get(key)
+        if not active:
+            return None
+        job = hot.get_job(_conn, active)
+        if job and job["status"] in ("pending", "running"):
+            return active
+        _route_jobs.pop(key, None)  # завершилась — больше не активна
+        return None
 
 
 @app.post("/api/search")
@@ -238,7 +263,11 @@ def search(req: SearchRequest) -> Dict[str, Any]:
     # собранного окна — это запрос НОВЫХ данных, старый payload не показываем.
     payload = _build_payload(req.origin, req.destination)
     if payload is not None and _covers_request(payload, req):
-        return {"status": "ok", "data": payload}
+        resp: Dict[str, Any] = {"status": "ok", "data": payload}
+        # Оценка форс-пересбора: чтобы на результатах показать кнопку «свежие данные»
+        # с числом запросов. None → диапазон дат слишком широк или не задан.
+        resp["refresh_estimate"] = _refresh_estimate(req)
+        return resp
 
     active = _active_job_id(key)
     if active:
@@ -269,11 +298,13 @@ def gather(req: SearchRequest) -> Dict[str, Any]:
     """
     key = (req.origin.upper(), req.destination.upper())
 
-    # Уже покрыто — собирать нечего, возвращаем готовое. Иначе (даты шире
-    # собранного) идём в сбор недостающего окна.
-    payload = _build_payload(req.origin, req.destination)
-    if payload is not None and _covers_request(payload, req):
-        return {"status": "ok", "data": payload}
+    # При force=True не замыкаем на «данные уже есть» — цель именно пересобрать свежие.
+    # Иначе отдаём готовое, только если запрошенные даты уже покрыты; шире окна —
+    # это запрос новых данных, идём в сбор недостающего.
+    if not req.force:
+        payload = _build_payload(req.origin, req.destination)
+        if payload is not None and _covers_request(payload, req):
+            return {"status": "ok", "data": payload}
 
     active = _active_job_id(key)
     if active:
@@ -290,9 +321,15 @@ def gather(req: SearchRequest) -> Dict[str, Any]:
         return {"status": "needs_backend", "origin": req.origin, "destination": req.destination,
                 "message": f"Слишком широкий диапазон дат (~{est['requests']} запросов). Сузьте окна плеч."}
 
-    job_id = uuid.uuid4().hex[:12]
-    hot.create_job(_conn, job_id, params, total=est["requests"])
-    _route_jobs[key] = job_id
+    # Check-and-create под локом: без него два параллельных /gather на один маршрут
+    # завели бы две джобы (sync-эндпоинты FastAPI исполняются в пуле потоков).
+    with _jobs_lock:
+        active = _active_job_id(key)
+        if active:
+            return {"status": "collecting", "job_id": active}
+        job_id = uuid.uuid4().hex[:12]
+        hot.create_job(_conn, job_id, params, total=est["requests"])
+        _route_jobs[key] = job_id
     _executor.submit(worker.run_collection, hot.DEFAULT_DB, job_id, params, _on_job_done)
     return {"status": "collecting", "job_id": job_id}
 
