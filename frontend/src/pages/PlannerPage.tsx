@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { DEFAULT_ORIGIN, DEFAULT_DESTINATION } from '../data/airports'
+import { DEFAULT_ORIGIN, DEFAULT_DESTINATION, type AirportOption } from '../data/airports'
 import type { CollectState, Itinerary, PlannerFilters, PlannerStop } from '../planner/types'
 import { estimatePlan, runMockCollection } from '../planner/mock'
 import { validatePlan } from '../planner/validation'
@@ -13,11 +13,17 @@ import { FiltersPanel } from '../planner/components/FiltersPanel'
 let stopSeq = 0
 const nid = () => `s${stopSeq++}`
 
+// Демо-города для промежуточной остановки «несколько на выбор».
+const IST: AirportOption = { code: 'IST', city: 'Стамбул', flag: '🇹🇷', label: 'Стамбул (IST)' }
+const DXB: AirportOption = { code: 'DXB', city: 'Дубай', flag: '🇦🇪', label: 'Дубай (DXB)' }
+
 function initialStops(): PlannerStop[] {
   return [
-    { id: nid(), kind: 'city', airport: DEFAULT_ORIGIN, window: ['2026-11-01', '2026-11-05'] },
-    { id: nid(), kind: 'any', airport: null, window: ['2026-11-06', '2026-11-10'] },
-    { id: nid(), kind: 'city', airport: DEFAULT_DESTINATION, window: ['2026-11-11', '2026-11-20'] },
+    // Концы — конкретные города, без окна дат (выводится из соседних).
+    { id: nid(), kind: 'cities', airports: [DEFAULT_ORIGIN], window: ['', ''] },
+    // Промежуточная — несколько городов на выбор + диапазон дат.
+    { id: nid(), kind: 'cities', airports: [IST, DXB], window: ['2026-11-06', '2026-11-10'] },
+    { id: nid(), kind: 'cities', airports: [DEFAULT_DESTINATION], window: ['', ''] },
   ]
 }
 
@@ -48,7 +54,7 @@ export function PlannerPage() {
     setStops((prev) => {
       const insertAt = Math.max(1, prev.length - 1) // новую — перед последней (концы фиксированы)
       const next = [...prev]
-      next.splice(insertAt, 0, { id: nid(), kind: 'any', airport: null, window: ['', ''] })
+      next.splice(insertAt, 0, { id: nid(), kind: 'cities', airports: [], window: ['', ''] })
       return next
     })
     resetCollected()

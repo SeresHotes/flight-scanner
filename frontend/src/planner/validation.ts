@@ -1,9 +1,11 @@
 // Правила корректности скелета маршрута (v1):
 //  • минимум 2 остановки;
-//  • концы (первая и последняя) — конкретные города, не «любой»;
+//  • концы (первая и последняя) — конкретные города (не «любой»), ≥1 город;
+//  • у каждой остановки с городами выбран хотя бы один город;
 //  • два «любых» подряд запрещены;
-//  • один и тот же город не может идти дважды подряд;
-//  • у каждой остановки задано окно дат, start <= end.
+//  • один и тот же единственный город не может идти дважды подряд;
+//  • у ПРОМЕЖУТОЧНЫХ остановок задан диапазон дат (start <= end); у концов даты
+//    выводятся из соседей — поле не показывается и не требуется.
 
 import type { PlannerStop } from './types'
 
@@ -41,15 +43,18 @@ export function validatePlan(stops: PlannerStop[]): Validation {
     if (isEndpoint && s.kind === 'any') {
       flag(i, `Точка ${pointLabel(i)}: концы маршрута должны быть конкретным городом.`)
     }
-    if (s.kind === 'city' && !s.airport?.code) {
-      flag(i, `Точка ${pointLabel(i)}: выберите город.`)
+    if (s.kind === 'cities' && s.airports.length === 0) {
+      flag(i, `Точка ${pointLabel(i)}: добавьте хотя бы один город.`)
     }
 
-    const [from, to] = s.window
-    if (!from || !to) {
-      flag(i, `Точка ${pointLabel(i)}: задайте окно дат пребывания.`)
-    } else if (from > to) {
-      flag(i, `Точка ${pointLabel(i)}: начало окна позже конца.`)
+    // Диапазон дат — только у промежуточных остановок (у концов выводится из соседей).
+    if (!isEndpoint) {
+      const [from, to] = s.window
+      if (!from || !to) {
+        flag(i, `Точка ${pointLabel(i)}: задайте диапазон дат «когда ОК быть здесь».`)
+      } else if (from > to) {
+        flag(i, `Точка ${pointLabel(i)}: начало диапазона позже конца.`)
+      }
     }
   })
 
@@ -60,11 +65,15 @@ export function validatePlan(stops: PlannerStop[]): Validation {
     }
   }
 
-  // Один и тот же город дважды подряд.
+  // Один и тот же единственный город дважды подряд.
   for (let i = 0; i < stops.length - 1; i++) {
     const a = stops[i]
     const b = stops[i + 1]
-    if (a.kind === 'city' && b.kind === 'city' && a.airport?.code && a.airport.code === b.airport?.code) {
+    if (
+      a.kind === 'cities' && b.kind === 'cities' &&
+      a.airports.length === 1 && b.airports.length === 1 &&
+      a.airports[0].code && a.airports[0].code === b.airports[0].code
+    ) {
       flag(i + 1, `Точки ${pointLabel(i)} и ${pointLabel(i + 1)}: один город дважды подряд.`)
     }
   }

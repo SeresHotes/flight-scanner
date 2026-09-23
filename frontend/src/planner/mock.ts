@@ -8,6 +8,8 @@ import type { Itinerary, ItineraryStop, PlannerEstimate, PlannerStop } from './t
 import { addDays, dateOnly, dayCountBetween, daysInWindow, hasBothWeekendDays } from './dates'
 
 const SECONDS_PER_REQUEST = 0.65 // совпадает с api/worker.py
+const DEFAULT_START = '2026-11-01' // якорь старта цепочки, если окон нигде нет
+const DEFAULT_LEG_DAYS = 7 // ширина окна плеча, если оба конца без окна (2-остановочный)
 
 // Пул городов, которыми мок «раскрывает» wildcard-остановки (any).
 const ANY_POOL: AirportOption[] = [
@@ -25,15 +27,27 @@ const AIRLINES = ['Aeroflot', 'Turkish Airlines', 'Emirates', 'Qatar Airways', '
 
 export function stopLabel(s: PlannerStop): string {
   if (s.kind === 'any') return 'Любой город'
-  return s.airport?.code ? `${s.airport.city} (${s.airport.code})` : 'Город не выбран'
+  if (s.airports.length === 0) return 'Город не выбран'
+  if (s.airports.length === 1) return `${s.airports[0].city} (${s.airports[0].code})`
+  return s.airports.map((a) => a.code).join('/')
 }
 
-// Оценка: одно плечо на каждый переход, число запросов = дни окна города-отправления.
+// Ширина окна плеча i (stop i → i+1): берём заданное окно того конца, у кого оно
+// есть (у концов маршрута окна нет — они выводятся из соседей), иначе дефолт.
+function legWindowDays(stops: PlannerStop[], i: number): number {
+  const wi = stops[i].window
+  if (wi[0] && wi[1]) return daysInWindow(wi)
+  const wj = stops[i + 1].window
+  if (wj[0] && wj[1]) return daysInWindow(wj)
+  return DEFAULT_LEG_DAYS
+}
+
+// Оценка: одно плечо на каждый переход, число запросов = дни окна плеча.
 export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
   const legs = []
   let requests = 0
   for (let i = 0; i < stops.length - 1; i++) {
-    const days = daysInWindow(stops[i].window)
+    const days = legWindowDays(stops, i)
     const anyLeg = stops[i].kind === 'any' || stops[i + 1].kind === 'any'
     legs.push({ fromLabel: stopLabel(stops[i]), toLabel: stopLabel(stops[i + 1]), days, anyLeg })
     requests += days
@@ -65,15 +79,23 @@ function bookingLink(origin: string, dest: string, departDate: string): string {
   return `https://www.aviasales.ru/search/${origin}${ddmm(departDate)}${dest}1`
 }
 
-// Кандидаты под остановку: конкретный город → он сам; «любой» → до 3 из пула,
-// исключая соседей (чтобы не нарушать «не дважды подряд»).
+// Однозначный код соседа (если у него ровно один город) — чтобы не ставить его
+// дважды подряд при раскрытии наборов/«любого».
+const neighborCode = (s: PlannerStop): string | null =>
+  s.kind === 'cities' && s.airports.length === 1 ? s.airports[0].code : null
+
+// Кандидаты под остановку: набор выбранных городов; «любой» → до 3 из пула,
+// исключая однозначных соседей (чтобы не нарушать «не дважды подряд»).
 function candidates(
   stop: PlannerStop,
   prev: string | null,
   next: string | null,
   rng: () => number,
 ): AirportOption[] {
-  if (stop.kind === 'city' && stop.airport) return [stop.airport]
+  if (stop.kind === 'cities') {
+    const list = stop.airports.filter((a) => a.code !== prev && a.code !== next)
+    return list.length ? list : stop.airports
+  }
   const pool = ANY_POOL.filter((a) => a.code !== prev && a.code !== next)
   const shuffled = [...pool].sort(() => rng() - 0.5)
   return shuffled.slice(0, 3)
@@ -98,6 +120,12 @@ function cityCombos(perStop: AirportOption[][], cap: number): AirportOption[][] 
   return combos
 }
 
+// Дата старта цепочки: начало первого заданного окна (у концов окна нет), иначе дефолт.
+function firstWindowStart(stops: PlannerStop[]): string {
+  for (const s of stops) if (s.window[0]) return dateOnly(s.window[0])
+  return DEFAULT_START
+}
+
 function buildItinerary(
   id: number,
   cities: AirportOption[],
@@ -108,13 +136,14 @@ function buildItinerary(
   const segments: Segment[] = []
   const itinStops: ItineraryStop[] = []
 
-  let arriveDate = dateOnly(stops[0].window[0]) // старт — в первом городе с начала его окна
+  let arriveDate = firstWindowStart(stops) // старт цепочки — по первому заданному окну
   let arriveHour = 13
 
   for (let i = 0; i < cities.length; i++) {
     const c = cities[i]
-    // Длительность пребывания: тяготеет к длине окна, но в разумных пределах.
-    const winDays = Math.max(1, daysInWindow(stops[i].window) - 1)
+    // Длительность пребывания: тяготеет к длине окна (у концов окна нет — берём дефолт).
+    const win = stops[i].window
+    const winDays = win[0] && win[1] ? Math.max(1, daysInWindow(win) - 1) : 5
     const stay = Math.max(2, Math.min(winDays, between(rng, 2, 6)))
     const arriveIso = `${arriveDate}T${String(arriveHour).padStart(2, '0')}:00`
     const departDate = addDays(arriveDate, stay)
@@ -175,13 +204,21 @@ function buildItinerary(
 
 // Генерирует набор цепочек под маршрут (детерминированно по составу остановок).
 export function generateItineraries(stops: PlannerStop[]): Itinerary[] {
-  const seed0 = stops.reduce((h, s, i) => h + (s.airport?.code.charCodeAt(0) || 42) * (i + 7) + s.window[0].length, 17)
+  const seed0 = stops.reduce(
+    (h, s, i) => h + ((s.airports[0]?.code.charCodeAt(0) ?? 42) * (i + 7)) + (s.window[0]?.length ?? 0),
+    17,
+  )
   const rng = mulberry32(seed0)
 
   const perStop = stops.map((s, i) =>
-    candidates(s, i > 0 ? stops[i - 1].airport?.code ?? null : null, i < stops.length - 1 ? stops[i + 1].airport?.code ?? null : null, rng),
+    candidates(
+      s,
+      i > 0 ? neighborCode(stops[i - 1]) : null,
+      i < stops.length - 1 ? neighborCode(stops[i + 1]) : null,
+      rng,
+    ),
   )
-  const combos = cityCombos(perStop, 12)
+  const combos = cityCombos(perStop, 16)
 
   const itineraries: Itinerary[] = []
   let id = 1

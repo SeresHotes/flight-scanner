@@ -4,15 +4,18 @@
 import type { AirportOption } from '../data/airports'
 import type { Segment } from '../types'
 
-export type StopKind = 'city' | 'any'
+export type StopKind = 'cities' | 'any'
 
-// Одна остановка маршрута: конкретный город или «любой», плюс широкое окно
-// «примерно хочу быть в этом городе тогда-то».
+// Одна остановка маршрута: набор городов-кандидатов (kind==='cities', ≥1 — движок
+// переберёт по одному) или «любой город» (kind==='any', wildcard).
+// window — диапазон «в какие даты нам ОК быть в этом городе». Задаётся только для
+// ПРОМЕЖУТОЧНЫХ остановок; у первого и последнего города даты выводятся из соседних,
+// поэтому у концов window = ['', ''].
 export interface PlannerStop {
   id: string
   kind: StopKind
-  airport: AirportOption | null // задан для kind==='city'
-  window: [string, string] // [start, end] дат пребывания (YYYY-MM-DD)
+  airports: AirportOption[] // кандидаты для kind==='cities' (для 'any' — пусто)
+  window: [string, string] // [start, end] (YYYY-MM-DD); ['',''] у концов
 }
 
 export interface PlannerRequest {
