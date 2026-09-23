@@ -5,7 +5,7 @@
 import type { AirportOption } from '../data/airports'
 import type { Segment } from '../types'
 import type { Itinerary, ItineraryStop, PlannerEstimate, PlannerStop } from './types'
-import { addDays, dateOnly, dayCountBetween, daysInWindow, hasBothWeekendDays } from './dates'
+import { addDays, dateOnly, dayCountBetween, daysInWindow, monthsInWindow, hasBothWeekendDays } from './dates'
 
 const SECONDS_PER_REQUEST = 0.65 // совпадает с api/worker.py
 const DEFAULT_START = '2026-11-01' // якорь старта цепочки, если окон нигде нет
@@ -32,25 +32,42 @@ export function stopLabel(s: PlannerStop): string {
   return s.airports.map((a) => a.code).join('/')
 }
 
-// Ширина окна плеча i (stop i → i+1): берём заданное окно того конца, у кого оно
-// есть (у концов маршрута окна нет — они выводятся из соседей), иначе дефолт.
-function legWindowDays(stops: PlannerStop[], i: number): number {
+// Окно, задающее плечо i (stop i → i+1): заданное окно того конца, у кого оно есть
+// (у концов маршрута окна нет — выводятся из соседей), иначе пусто.
+function legWindow(stops: PlannerStop[], i: number): [string, string] {
   const wi = stops[i].window
-  if (wi[0] && wi[1]) return daysInWindow(wi)
+  if (wi[0] && wi[1]) return wi
   const wj = stops[i + 1].window
-  if (wj[0] && wj[1]) return daysInWindow(wj)
-  return DEFAULT_LEG_DAYS
+  if (wj[0] && wj[1]) return wj
+  return ['', '']
 }
 
-// Оценка: одно плечо на каждый переход, число запросов = дни окна плеча.
+const cityCount = (s: PlannerStop): number => (s.kind === 'cities' ? Math.max(1, s.airports.length) : 1)
+
+// Оценка запросов, как у реального коллектора:
+//  • оба конца — конкретные города (фикс): month-matrix — 1 запрос на МЕСЯЦ × пары город-город;
+//  • есть «любой»: per-date (все направления) — 1 запрос на ДЕНЬ × число городов фикс.конца.
 export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
   const legs = []
   let requests = 0
   for (let i = 0; i < stops.length - 1; i++) {
-    const days = legWindowDays(stops, i)
-    const anyLeg = stops[i].kind === 'any' || stops[i + 1].kind === 'any'
-    legs.push({ fromLabel: stopLabel(stops[i]), toLabel: stopLabel(stops[i + 1]), days, anyLeg })
-    requests += days
+    const from = stops[i]
+    const to = stops[i + 1]
+    const win = legWindow(stops, i)
+    const days = daysInWindow(win) || DEFAULT_LEG_DAYS
+    const anyLeg = from.kind === 'any' || to.kind === 'any'
+    const fixed = from.kind === 'cities' && to.kind === 'cities'
+
+    let reqs: number
+    if (fixed) {
+      const months = Math.max(1, monthsInWindow(win))
+      reqs = months * cityCount(from) * cityCount(to) // month-matrix на каждую пару
+    } else {
+      reqs = days * (from.kind === 'cities' ? cityCount(from) : cityCount(to))
+    }
+
+    legs.push({ fromLabel: stopLabel(from), toLabel: stopLabel(to), days, requests: reqs, monthly: fixed, anyLeg })
+    requests += reqs
   }
   return { requests, seconds: Math.round(requests * SECONDS_PER_REQUEST), legs }
 }

@@ -20,6 +20,9 @@ import time
 load_dotenv()
 
 API_BASE_URL = "https://api.travelpayouts.com/aviasales/v3/prices_for_dates"
+# Календарь цен: самая дешёвая цена на КАЖДЫЙ день месяца одним запросом.
+# Используем для плеч с фиксированными концами (O↔D) — вместо запроса на каждый день.
+MONTH_MATRIX_URL = "https://api.travelpayouts.com/v2/prices/month-matrix"
 API_TOKEN = os.getenv("TRAVELPAYOUTS_TOKEN")
 
 
@@ -209,9 +212,101 @@ def _leg_plan(origin: str, destination: str, leg1_dates, leg2_dates, stop_days):
     ]
 
 
+def _is_fixed(origin, destination) -> bool:
+    """Оба конца плеча заданы → тянем календарём (month-matrix), а не по дню."""
+    return bool(origin) and bool(destination)
+
+
+def _months_spanning(dates: List[str]) -> List[str]:
+    """Первые числа месяцев, покрывающих [dates[0]..dates[-1]] — для month-matrix."""
+    if not dates:
+        return []
+    start = datetime.strptime(dates[0], "%Y-%m-%d").replace(day=1)
+    end = datetime.strptime(dates[-1], "%Y-%m-%d").replace(day=1)
+    months, cur = [], start
+    while cur <= end:
+        months.append(cur.strftime("%Y-%m-%d"))
+        cur = (cur + timedelta(days=32)).replace(day=1)
+    return months
+
+
+def fetch_month_matrix(origin: str, destination: str, month: str,
+                       currency: str = "RUB") -> List[Dict[str, Any]]:
+    """Календарь цен O→D за месяц одним запросом. month — первое число (YYYY-MM-DD)."""
+    params = {"currency": currency.lower(), "origin": origin, "destination": destination,
+              "month": month, "show_to_affiliates": "true", "token": API_TOKEN}
+    try:
+        response = requests.get(MONTH_MATRIX_URL, params=params, timeout=15)
+        response.raise_for_status()
+        return response.json().get("data", []) or []
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка month-matrix {origin}->{destination} за {month}: {e}")
+        return []
+
+
+def _normalize_matrix_item(item: Dict[str, Any], origin: str, destination: str,
+                           leg_name: str) -> Dict[str, Any]:
+    """Запись month-matrix → формат рейса коллектора.
+
+    ВАЖНО про компромисс month-matrix: отдаёт САМУЮ ДЕШЁВУЮ цену за день (может быть
+    С ПЕРЕСАДКОЙ — фильтра «только прямые» у ручки нет), без времени вылета и
+    авиакомпании. Поэтому пересадки берём из number_of_changes, время ставим 00:00,
+    airline пустой, ссылку генерируем по коду города и дате.
+    """
+    depart_date = item.get("depart_date", "")
+    changes = int(item.get("number_of_changes") or 0)
+    link = None
+    if depart_date:
+        ddmm = depart_date[8:10] + depart_date[5:7]
+        link = f"https://www.aviasales.ru/search/{origin}{ddmm}{destination}1"
+    return {
+        "origin": origin, "destination": destination,
+        "origin_airport": origin, "destination_airport": destination,
+        "departure_at": f"{depart_date}T00:00" if depart_date else None,
+        "price": item.get("value"),
+        "transfers": changes,
+        "direct": changes == 0,
+        "duration": item.get("duration"),
+        "airline": None, "flight_number": None,
+        "link": link,
+        "leg": leg_name,
+        "search_origin": origin, "search_destination": destination,
+        "search_date": depart_date,
+        "gate": item.get("gate"),
+    }
+
+
+def collect_leg_monthly(origin: str, destination: str, date_range: List[str],
+                        leg_name: str = "", currency: str = "RUB",
+                        progress_cb=None) -> List[Dict[str, Any]]:
+    """Сбор плеча O→D календарём: по запросу на месяц + фильтр по окну дат."""
+    if not date_range:
+        return []
+    lo, hi = date_range[0], date_range[-1]
+    months = _months_spanning(date_range)
+    print(f"\n[month-matrix] {origin}->{destination}: {len(months)} мес., окно {lo}..{hi}")
+    flights = []
+    for month in months:
+        for item in fetch_month_matrix(origin, destination, month, currency=currency):
+            d = item.get("depart_date", "")
+            if d and lo <= d <= hi:
+                flights.append(_normalize_matrix_item(item, origin, destination, leg_name))
+        if progress_cb:
+            progress_cb()
+        time.sleep(0.5)
+    print(f"[month-matrix] {origin}->{destination}: {len(flights)} рейс(ов) в окне")
+    return flights
+
+
 def plan_request_count(origin, destination, leg1_dates, leg2_dates, stop_days=(2, 7)) -> int:
-    """Сколько запросов к API потребует сбор (для прогресса джобы)."""
-    return sum(len(dates) for *_, dates, _ in _leg_plan(origin, destination, leg1_dates, leg2_dates, stop_days))
+    """Сколько запросов к API потребует сбор (для прогресса/оценки).
+
+    Плечи с фиксированными концами тянутся календарём — 1 запрос на месяц, а не на день.
+    """
+    total = 0
+    for _ds, _leg, o, d, dates, _ind in _leg_plan(origin, destination, leg1_dates, leg2_dates, stop_days):
+        total += len(_months_spanning(dates)) if _is_fixed(o, d) else len(dates)
+    return total
 
 
 def collect_route(origin: str, destination: str, leg1_dates, leg2_dates,
@@ -228,7 +323,12 @@ def collect_route(origin: str, destination: str, leg1_dates, leg2_dates,
         "back": {"leg1_flights": [], "leg2_flights": []},
     }
     for dataset, leg, o, d, dates, indirect in _leg_plan(origin, destination, leg1_dates, leg2_dates, stop_days):
-        flights = collect_leg_data(o, d, dates, leg, allow_indirect=indirect, progress_cb=progress_cb)
+        # Фиксированные концы (плоские плечи O↔D) → календарём (1 запрос/месяц);
+        # плечи с «любым» концом (стыковочные) — по-прежнему по дню (all-directions).
+        if _is_fixed(o, d):
+            flights = collect_leg_monthly(o, d, dates, leg, progress_cb=progress_cb)
+        else:
+            flights = collect_leg_data(o, d, dates, leg, allow_indirect=indirect, progress_cb=progress_cb)
         result[dataset][leg] = flights
     return result
 

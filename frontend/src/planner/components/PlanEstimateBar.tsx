@@ -31,8 +31,10 @@ export function PlanEstimateBar({
         <div className="pl-est-legs">
           {estimate.legs.map((leg, i) => (
             <span className="mchip" key={i}>
-              {leg.fromLabel} → {leg.toLabel}: <b>{leg.days}</b>
-              {leg.anyLeg && <span className="pl-anytag"> · все направления</span>}
+              {leg.fromLabel} → {leg.toLabel}: <b>{leg.requests}</b>{' '}
+              <span className="pl-anytag">
+                {leg.monthly ? '· по месяцам' : leg.anyLeg ? '· по дням, все направления' : '· по дням'}
+              </span>
             </span>
           ))}
         </div>
