@@ -326,6 +326,7 @@ select:disabled{opacity:.4}
 .pl-est-num b{color:var(--gold)}
 .pl-est-sec{color:var(--muted)}
 .pl-est-legs{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.pl-est-hint{margin-top:8px;font-size:12px;color:var(--muted);max-width:540px;line-height:1.4}
 .pl-anytag{color:var(--accent2);font-weight:600}
 .pl-wknd{color:var(--ok);font-weight:600}
 .pl-issues{margin:6px 0 0;padding-left:18px;color:#ff6b6f;font-size:12.5px;width:100%}
