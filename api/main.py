@@ -191,6 +191,33 @@ def _has_dates(req: "SearchRequest") -> bool:
                 and req.leg2_dates and len(req.leg2_dates) == 2 and all(req.leg2_dates))
 
 
+def _within(requested: List[str], covered: List[str]) -> bool:
+    """Лежит ли запрошенное окно [start, end] внутри собранного диапазона.
+
+    ISO-даты (YYYY-MM-DD) сравниваются лексикографически = хронологически.
+    Пустой собранный диапазон (по плечу ничего нет) не покрывает ничего.
+    """
+    c_start, c_end = covered[0], covered[1]
+    if not c_start or not c_end:
+        return False
+    return requested[0] >= c_start and requested[1] <= c_end
+
+
+def _covers_request(payload: Dict[str, Any], req: "SearchRequest") -> bool:
+    """Покрывают ли уже собранные окна вылета запрошенный диапазон дат.
+
+    Без дат в запросе считаем покрытым: клик по готовому маршруту подставляет
+    даты ровно из его диапазона. Если даты заданы и выходят за собранные окна —
+    это запрос НОВЫХ данных, старый payload отдавать нельзя.
+    """
+    if not _has_dates(req):
+        return True
+    m = payload["meta"]
+    there = m.get("dep_there_range") or ["", ""]
+    back = m.get("dep_back_range") or ["", ""]
+    return _within(list(req.leg1_dates), there) and _within(list(req.leg2_dates), back)
+
+
 def _estimate(params: Dict[str, Any]) -> Dict[str, int]:
     requests = worker.estimate_requests(params)
     return {"requests": requests, "seconds": round(requests * worker.SECONDS_PER_REQUEST)}
@@ -232,8 +259,10 @@ def search(req: SearchRequest) -> Dict[str, Any]:
     """
     key = (req.origin.upper(), req.destination.upper())
 
+    # Отдаём собранное только если запрошенные даты уже покрыты. Запрос дат шире
+    # собранного окна — это запрос НОВЫХ данных, старый payload не показываем.
     payload = _build_payload(req.origin, req.destination)
-    if payload is not None:
+    if payload is not None and _covers_request(payload, req):
         resp: Dict[str, Any] = {"status": "ok", "data": payload}
         # Оценка форс-пересбора: чтобы на результатах показать кнопку «свежие данные»
         # с числом запросов. None → диапазон дат слишком широк или не задан.
@@ -270,9 +299,11 @@ def gather(req: SearchRequest) -> Dict[str, Any]:
     key = (req.origin.upper(), req.destination.upper())
 
     # При force=True не замыкаем на «данные уже есть» — цель именно пересобрать свежие.
+    # Иначе отдаём готовое, только если запрошенные даты уже покрыты; шире окна —
+    # это запрос новых данных, идём в сбор недостающего.
     if not req.force:
         payload = _build_payload(req.origin, req.destination)
-        if payload is not None:
+        if payload is not None and _covers_request(payload, req):
             return {"status": "ok", "data": payload}
 
     active = _active_job_id(key)
