@@ -10,7 +10,9 @@ import { ItineraryCard } from './ItineraryCard'
 
 function cityName(s: PlannerStop): string {
   if (s.kind === 'any') return 'любой город'
-  return s.airport?.city || 'город'
+  if (s.airports.length === 0) return 'город'
+  if (s.airports.length === 1) return s.airports[0].city
+  return s.airports.map((a) => a.city).join(' / ')
 }
 
 // Зона 3: детальные фильтры (город → переход → город → …), общая длина, результаты.
