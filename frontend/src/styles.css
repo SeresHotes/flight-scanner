@@ -350,4 +350,6 @@ select:disabled{opacity:.4}
 .pl-chip-x:hover{color:var(--accent)}
 /* Дата-пикер занимает всю ширину ячейки; у концов — заметка о выводе дат */
 .pl-window .drp,.pl-window .drp-trigger{width:100%}
+/* Дата-пикер в карточке фильтра города — на всю ширину */
+.legpanel .drp,.legpanel .drp-trigger{width:100%}
 .pl-window-derived{font-size:12px;color:var(--muted);font-style:italic;padding:8px 4px}
