@@ -21,6 +21,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 
 from core import airports as airports_mod
+from core import planner
 from core.routes import get_route_config, get_route_keys
 from core.trip_builder import build_from_config
 from storage import hot
@@ -345,3 +346,68 @@ def job_status(job_id: str) -> Dict[str, Any]:
         "total": job["total"],
         "error": job["error"],
     }
+
+
+# ------------------------- планировщик цепочек A→B→C --------------------------
+
+class PlanStop(BaseModel):
+    kind: str = "cities"               # 'cities' | 'any'
+    codes: List[str] = []              # IATA-коды городов-кандидатов (пусто для 'any')
+    window: List[str] = ["", ""]       # [start, end], YYYY-MM-DD; ['',''] у концов
+
+
+class PlanRequest(BaseModel):
+    stops: List[PlanStop]
+
+
+def _stops_payload(req: "PlanRequest") -> List[Dict[str, Any]]:
+    return [{"kind": s.kind, "codes": s.codes, "window": s.window} for s in req.stops]
+
+
+@app.post("/api/plan/estimate")
+def plan_estimate(req: PlanRequest) -> Dict[str, Any]:
+    """Оценка объёма сбора цепочки (запросы/время + разбивка по переходам)."""
+    stops = planner.parse_stops(_stops_payload(req))
+    return planner.estimate_plan(stops)
+
+
+@app.post("/api/plan/gather")
+def plan_gather(req: PlanRequest) -> Dict[str, Any]:
+    """Запускает фоновый сбор цепочки. Отдаёт job_id — прогресс/результат по /plan/jobs/{id}."""
+    raw = _stops_payload(req)
+    stops = planner.parse_stops(raw)
+    if len(stops) < 2:
+        return {"status": "invalid", "message": "Нужно минимум две остановки."}
+
+    est = planner.estimate_plan(stops)
+    if est["requests"] == 0:
+        return {"status": "invalid", "message": "Задайте окна дат для остановок."}
+    if est["requests"] > planner.MAX_REQUESTS:
+        return {"status": "too_wide",
+                "message": f"Слишком широкие окна (~{est['requests']} запросов). Сузьте диапазоны.",
+                "estimate": est}
+
+    job_id = uuid.uuid4().hex[:12]
+    hot.create_job(_conn, job_id, {"kind": "plan", "stops": raw}, total=est["requests"])
+    _executor.submit(worker.run_plan_collection, hot.DEFAULT_DB, job_id, raw)
+    return {"status": "collecting", "job_id": job_id, "total": est["requests"]}
+
+
+@app.get("/api/plan/jobs/{job_id}")
+def plan_job_status(job_id: str) -> Dict[str, Any]:
+    """Прогресс джобы; по завершении — собранные цепочки (itineraries)."""
+    job = hot.get_job(_conn, job_id)
+    if not job:
+        return {"status": "not_found"}
+    out: Dict[str, Any] = {
+        "status": job["status"],
+        "progress": job["progress"],
+        "total": job["total"],
+        "error": job["error"],
+    }
+    if job["status"] == "done" and job["result_json"]:
+        try:
+            out["itineraries"] = json.loads(job["result_json"]).get("itineraries", [])
+        except json.JSONDecodeError:
+            out["itineraries"] = []
+    return out
