@@ -28,8 +28,7 @@ export interface EstimateLeg {
   fromLabel: string
   toLabel: string
   days: number
-  requests: number // реальное число запросов с учётом режима и числа городов
-  monthly: boolean // фиксированные концы → календарь (month-matrix), запрос на месяц
+  requests: number // per-date: «якорных» запросов/день (all-directions) × дни
   anyLeg: boolean
 }
 

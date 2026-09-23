@@ -31,12 +31,14 @@ export function PlanEstimateBar({
         <div className="pl-est-legs">
           {estimate.legs.map((leg, i) => (
             <span className="mchip" key={i}>
-              {leg.fromLabel} → {leg.toLabel}: <b>{leg.requests}</b>{' '}
-              <span className="pl-anytag">
-                {leg.monthly ? '· по месяцам' : leg.anyLeg ? '· по дням, все направления' : '· по дням'}
-              </span>
+              {leg.fromLabel} → {leg.toLabel}: <b>{leg.requests}</b>
+              <span className="pl-anytag"> · запр/день</span>
             </span>
           ))}
+        </div>
+        <div className="pl-est-hint">
+          Собираем «все направления» и фильтруем по выбранным городам — конкретные
+          города не дороже «любого».
         </div>
       </div>
 

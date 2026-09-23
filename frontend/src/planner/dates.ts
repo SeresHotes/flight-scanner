@@ -19,14 +19,6 @@ export function daysInWindow([a, b]: [string, string]): number {
   return diff < 0 ? 0 : diff + 1
 }
 
-// Сколько календарных месяцев покрывает окно [a, b] (для оценки month-matrix).
-export function monthsInWindow([a, b]: [string, string]): number {
-  if (!a || !b) return 0
-  const [ya, ma] = a.slice(0, 7).split('-').map(Number)
-  const [yb, mb] = b.slice(0, 7).split('-').map(Number)
-  return (yb - ya) * 12 + (mb - ma) + 1
-}
-
 // Разница в днях между двумя датами (b - a), по календарю.
 export function dayCountBetween(a: string, b: string): number {
   if (!a || !b) return 0

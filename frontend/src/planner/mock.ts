@@ -5,7 +5,7 @@
 import type { AirportOption } from '../data/airports'
 import type { Segment } from '../types'
 import type { Itinerary, ItineraryStop, PlannerEstimate, PlannerStop } from './types'
-import { addDays, dateOnly, dayCountBetween, daysInWindow, monthsInWindow, hasBothWeekendDays } from './dates'
+import { addDays, dateOnly, dayCountBetween, daysInWindow, hasBothWeekendDays } from './dates'
 
 const SECONDS_PER_REQUEST = 0.65 // совпадает с api/worker.py
 const DEFAULT_START = '2026-11-01' // якорь старта цепочки, если окон нигде нет
@@ -42,11 +42,15 @@ function legWindow(stops: PlannerStop[], i: number): [string, string] {
   return ['', '']
 }
 
-const cityCount = (s: PlannerStop): number => (s.kind === 'cities' ? Math.max(1, s.airports.length) : 1)
+// Число городов на конце; «любой» = бесконечность (нельзя «заякорить»).
+const cardinality = (s: PlannerStop): number =>
+  s.kind === 'cities' ? Math.max(1, s.airports.length) : Infinity
 
-// Оценка запросов, как у реального коллектора:
-//  • оба конца — конкретные города (фикс): month-matrix — 1 запрос на МЕСЯЦ × пары город-город;
-//  • есть «любой»: per-date (все направления) — 1 запрос на ДЕНЬ × число городов фикс.конца.
+// Оценка запросов (per-date, как у реального коллектора). Автоматически используем
+// «все направления»: якорим сторону с МЕНЬШИМ числом городов и запрашиваем через неё
+// один запрос в день (origin=X,dest=None или origin=None,dest=Y), другую сторону
+// фильтруем по выбранным городам. Поэтому конкретные города не дороже «любого»:
+// BJS/TAO(2) → SEL(1) якорится по SEL = 1 запрос/день, а не 2.
 export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
   const legs = []
   let requests = 0
@@ -56,17 +60,13 @@ export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
     const win = legWindow(stops, i)
     const days = daysInWindow(win) || DEFAULT_LEG_DAYS
     const anyLeg = from.kind === 'any' || to.kind === 'any'
-    const fixed = from.kind === 'cities' && to.kind === 'cities'
 
-    let reqs: number
-    if (fixed) {
-      const months = Math.max(1, monthsInWindow(win))
-      reqs = months * cityCount(from) * cityCount(to) // month-matrix на каждую пару
-    } else {
-      reqs = days * (from.kind === 'cities' ? cityCount(from) : cityCount(to))
-    }
+    // Хотя бы один конец конкретен (концы фикс., два «любых» подряд запрещены),
+    // поэтому anchor конечен.
+    const anchor = Math.min(cardinality(from), cardinality(to))
+    const reqs = anchor * days
 
-    legs.push({ fromLabel: stopLabel(from), toLabel: stopLabel(to), days, requests: reqs, monthly: fixed, anyLeg })
+    legs.push({ fromLabel: stopLabel(from), toLabel: stopLabel(to), days, requests: reqs, anyLeg })
     requests += reqs
   }
   return { requests, seconds: Math.round(requests * SECONDS_PER_REQUEST), legs }
