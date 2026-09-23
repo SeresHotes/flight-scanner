@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { DEFAULT_ORIGIN, DEFAULT_DESTINATION, type AirportOption } from '../data/airports'
+import { type AirportOption } from '../data/airports'
 import type { CollectState, Itinerary, PlannerFilters, PlannerStop } from '../planner/types'
 import { estimatePlan, runMockCollection } from '../planner/mock'
 import { validatePlan } from '../planner/validation'
@@ -13,17 +13,19 @@ import { FiltersPanel } from '../planner/components/FiltersPanel'
 let stopSeq = 0
 const nid = () => `s${stopSeq++}`
 
-// Демо-города для промежуточной остановки «несколько на выбор».
-const IST: AirportOption = { code: 'IST', city: 'Стамбул', flag: '🇹🇷', label: 'Стамбул (IST)' }
-const DXB: AirportOption = { code: 'DXB', city: 'Дубай', flag: '🇦🇪', label: 'Дубай (DXB)' }
+// Демо-города (названия — на английском, как в справочнике аэропортов/автокомплите).
+const MOW: AirportOption = { code: 'MOW', city: 'Moscow', flag: '🇷🇺', label: 'Moscow (MOW)' }
+const IST: AirportOption = { code: 'IST', city: 'Istanbul', flag: '🇹🇷', label: 'Istanbul (IST)' }
+const DXB: AirportOption = { code: 'DXB', city: 'Dubai', flag: '🇦🇪', label: 'Dubai (DXB)' }
+const ICN: AirportOption = { code: 'ICN', city: 'Seoul', flag: '🇰🇷', label: 'Seoul (ICN)' }
 
 function initialStops(): PlannerStop[] {
   return [
     // Концы — конкретные города, без окна дат (выводится из соседних).
-    { id: nid(), kind: 'cities', airports: [DEFAULT_ORIGIN], window: ['', ''] },
+    { id: nid(), kind: 'cities', airports: [MOW], window: ['', ''] },
     // Промежуточная — несколько городов на выбор + диапазон дат.
     { id: nid(), kind: 'cities', airports: [IST, DXB], window: ['2026-11-06', '2026-11-10'] },
-    { id: nid(), kind: 'cities', airports: [DEFAULT_DESTINATION], window: ['', ''] },
+    { id: nid(), kind: 'cities', airports: [ICN], window: ['', ''] },
   ]
 }
 
