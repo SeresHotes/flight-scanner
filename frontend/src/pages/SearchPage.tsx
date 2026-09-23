@@ -15,6 +15,11 @@ export function SearchPage() {
     navigate(`/results?${paramsToQuery(params)}`)
   }
 
+  // «Загрузить данные» — на страницу результатов с флагом авто-сбора свежих данных.
+  function goToCollect(params: SearchParams) {
+    navigate(`/results?${paramsToQuery(params)}&collect=1`)
+  }
+
   function pickRoute(origin: string, destination: string) {
     const r = data?.available.find((a) => a.origin === origin && a.destination === destination)
     goToResults({
@@ -34,7 +39,7 @@ export function SearchPage() {
         <Link to="/planner">🧭 Попробовать планировщик маршрута (цепочка городов) →</Link>
       </div>
 
-      <SearchForm availableRoutes={data?.available} onSubmit={goToResults} />
+      <SearchForm availableRoutes={data?.available} onShow={goToResults} onCollect={goToCollect} />
 
       {isLoading && <div className="loading-note">Загружаем список собранных данных…</div>}
       {isError && (

@@ -1,0 +1,133 @@
+#cloud-config
+# Terraform templatefile обрабатывает только последовательности вида "доллар+фигурные".
+# Единственная реальная подстановка — env_b64. Shell-переменные пишем $VAR / $(...),
+# а compose-подстановки экранируем удвоением доллара, чтобы templatefile их не трогал.
+write_files:
+  # Секреты и параметры: и env_file для контейнера api, и переменные подстановки compose.
+  - path: /opt/flights/.env
+    permissions: '0600'
+    encoding: b64
+    content: ${env_b64}
+
+  # Прод-compose: образы из Container Registry (НЕ сборка). Единый origin через caddy.
+  - path: /opt/flights/docker-compose.yml
+    permissions: '0644'
+    content: |
+      services:
+        api:
+          image: $${API_IMAGE}
+          env_file:
+            - /opt/flights/.env
+          volumes:
+            - /opt/flights/data:/app/data
+          restart: always
+        web:
+          image: $${WEB_IMAGE}
+          environment:
+            - SITE_DOMAIN=$${SITE_DOMAIN}
+          ports:
+            - "80:80"
+            - "443:443"
+          depends_on:
+            - api
+          restart: always
+          volumes:
+            - caddy-data:/data
+            - caddy-config:/config
+      volumes:
+        caddy-data:
+        caddy-config:
+
+  # Засев горячего тома из Object Storage при первом бутe (идемпотентно).
+  - path: /opt/flights/seed.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      set -a; source /opt/flights/.env; set +a
+      mkdir -p /opt/flights/data
+      if [ -f /opt/flights/data/airport_network.json ]; then
+        echo "seed: данные уже на месте, пропуск"
+        exit 0
+      fi
+      echo "seed: sync s3://$S3_BUCKET/seed -> /opt/flights/data"
+      docker run --rm \
+        -e AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
+        -e AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
+        -v /opt/flights/data:/data \
+        amazon/aws-cli:latest \
+        --endpoint-url "$S3_ENDPOINT" --region "$S3_REGION" \
+        s3 sync "s3://$S3_BUCKET/seed" /data
+
+  # Логин в реестр по IAM-токену SA этой VM, засев, поднятие/обновление стека.
+  # Тот же скрипт запускает и таймер обновления — поэтому он и self-heal (если образ
+  # ещё не был запушен на первом бутe), и авто-апдейт (pull свежих образов).
+  - path: /opt/flights/run.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      set -a; source /opt/flights/.env; set +a
+      TOKEN=$(curl -s -H "Metadata-Flavor: Google" \
+        "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token" \
+        | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+      echo "$TOKEN" | docker login --username iam --password-stdin cr.yandex
+      /opt/flights/seed.sh
+      # Контейнер api работает под непривилегированным uid 1000 — том должен быть его
+      # (сид качает root-контейнер aws-cli). Иначе SQLite не создать: "unable to open database file".
+      chown -R 1000:1000 /opt/flights/data
+      cd /opt/flights
+      docker compose pull
+      docker compose up -d
+
+  - path: /etc/systemd/system/flights.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Flight Scanner (FastAPI + Caddy) via docker compose
+      After=docker.service network-online.target
+      Requires=docker.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/opt/flights/run.sh
+      # На первом бутe образ мог быть ещё не запушен — повторяем, таймер добьёт.
+      Restart=on-failure
+      RestartSec=30
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Периодический pull свежих образов + docker compose up -d (self-heal + авто-деплой).
+  - path: /etc/systemd/system/flights-update.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Pull latest flights images and reconcile compose
+      After=docker.service network-online.target
+      Requires=docker.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/opt/flights/run.sh
+
+  - path: /etc/systemd/system/flights-update.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Periodic flights image update
+
+      [Timer]
+      OnBootSec=2min
+      OnUnitActiveSec=2min
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl daemon-reload
+  - systemctl enable --now flights.service
+  - systemctl enable --now flights-update.timer

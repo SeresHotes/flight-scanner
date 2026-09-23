@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import type { FlightData } from '../types'
 import type { SearchParams } from '../data/searchClient'
 import { makeMoney, fmtDate } from '../lib/format'
-import { buildItems, type FilterState, type LegFilter, type DirFilter } from '../lib/filters'
+import { buildItems, durationBounds, type FilterState, type LegFilter, type DirFilter } from '../lib/filters'
 import { Stats } from './Stats'
 import { FilterBar } from './FilterBar'
 import { Controls } from './Controls'
@@ -34,6 +34,7 @@ export function ResultsView({ data, params }: { data: FlightData; params: Search
   const legTravMax = Math.ceil((meta.max_leg_travel_minutes || 0) / 60) || 1
   const maxStopDays = meta.max_stop_days || 6
   const priceBounds = useMemo(() => priceBoundsFor(data), [data])
+  const durBounds = useMemo(() => durationBounds(THERE, BACK), [THERE, BACK])
 
   const [state, setState] = useState<FilterState>(() => {
     const initMinStay = Math.max(meta.min_stay, params.min_stay || meta.min_stay)
@@ -55,6 +56,13 @@ export function ResultsView({ data, params }: { data: FlightData; params: Search
       minStay: initMinStay,
       maxStay: stayCap,
       sort: 'price',
+      // По умолчанию точные фильтры дат не ограничивают (полный диапазон / пустые окна).
+      durMin: durBounds[0],
+      durMax: durBounds[1],
+      beFrom: '',
+      beTo: '',
+      stopFrom: '',
+      stopTo: '',
     }
   })
 
@@ -93,6 +101,7 @@ export function ResultsView({ data, params }: { data: FlightData; params: Search
         meta={meta}
         stayCap={stayCap}
         priceBounds={priceBounds[state.dir]}
+        durBounds={durBounds}
         money={money}
         onPatch={onPatch}
       />

@@ -16,7 +16,9 @@ export interface Estimate {
 }
 
 export type SearchResult =
-  | { status: 'ok'; data: FlightData }
+  // refresh_estimate — оценка пересбора «свежих данных» (null, если диапазон дат
+  // слишком широк или не задан). Питает кнопку обновления на странице результатов.
+  | { status: 'ok'; data: FlightData; refresh_estimate?: Estimate | null }
   // Идёт фоновый сбор недостающих данных — фронт следит за прогрессом job.
   | { status: 'collecting'; job_id: string }
   // Данных нет, но собрать можно — ждём подтверждения пользователя (с оценкой объёма).
@@ -42,11 +44,12 @@ export async function search(params: SearchParams): Promise<SearchResult> {
 
 // Явный запуск сбора (после подтверждения). Возвращает collecting/ok/needs_backend.
 // Путь /gather (не /collect) — блокировщики рекламы режут "collect" как трекер.
-export async function startCollection(params: SearchParams): Promise<SearchResult> {
+export async function startCollection(params: SearchParams, force = false): Promise<SearchResult> {
   const res = await fetch(`${API_BASE}/gather`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    // force=true — пересобрать заново, даже если данные уже есть («свежие данные»).
+    body: JSON.stringify({ ...params, force }),
   })
   if (!res.ok) {
     throw new Error(`Ошибка запуска сбора: ${res.status}`)

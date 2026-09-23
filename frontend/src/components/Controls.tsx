@@ -1,5 +1,6 @@
 import type { Meta } from '../types'
 import type { FilterState, SortKey } from '../lib/filters'
+import { DateRangePicker } from './DateRangePicker'
 
 const SORT_OPTS: { v: SortKey; l: string }[] = [
   { v: 'price', l: 'Сначала дешёвые' },
@@ -9,12 +10,13 @@ const SORT_OPTS: { v: SortKey; l: string }[] = [
   { v: 'travel', l: 'Быстрее в пути' },
 ]
 
-// Порт .controls из index.html: цена, дни на месте, сортировка.
+// Порт .controls из index.html: цена, дни на месте, сортировка + точные фильтры дат.
 export function Controls({
   state,
   meta,
   stayCap,
   priceBounds,
+  durBounds,
   money,
   onPatch,
 }: {
@@ -22,6 +24,7 @@ export function Controls({
   meta: Meta
   stayCap: number
   priceBounds: [number, number]
+  durBounds: [number, number]
   money: (n: number) => string
   onPatch: (patch: Partial<FilterState>) => void
 }) {
@@ -30,6 +33,13 @@ export function Controls({
     state.minStay <= meta.min_stay && state.maxStay >= stayCap
       ? `${meta.min_stay}+ дн.`
       : `${state.minStay}–${state.maxStay} дн.`
+
+  const destName = meta.region_label || meta.destination || meta.destination_code
+  const durVal =
+    state.durMin <= durBounds[0] && state.durMax >= durBounds[1]
+      ? 'любая'
+      : `${state.durMin}–${state.durMax} дн.`
+  const windowsActive = !!(state.beFrom || state.beTo || state.stopFrom || state.stopTo)
 
   return (
     <div className="controls">
@@ -80,6 +90,36 @@ export function Controls({
       </div>
 
       <div className="ctl">
+        <label>
+          Длительность поездки: <span className="rangeval">{durVal}</span>
+        </label>
+        <div className="dualrange">
+          <input
+            type="range"
+            min={durBounds[0]}
+            max={durBounds[1]}
+            step={1}
+            value={state.durMin}
+            onChange={(e) => {
+              const v = Number(e.target.value)
+              onPatch({ durMin: v, durMax: Math.max(v, state.durMax) })
+            }}
+          />
+          <input
+            type="range"
+            min={durBounds[0]}
+            max={durBounds[1]}
+            step={1}
+            value={state.durMax}
+            onChange={(e) => {
+              const v = Number(e.target.value)
+              onPatch({ durMax: v, durMin: Math.min(v, state.durMin) })
+            }}
+          />
+        </div>
+      </div>
+
+      <div className="ctl">
         <label>Сортировка</label>
         <select
           value={state.sort}
@@ -91,6 +131,37 @@ export function Controls({
             </option>
           ))}
         </select>
+      </div>
+
+      <div className="ctl ctl-windows">
+        <label>
+          Точные даты присутствия{' '}
+          {windowsActive && (
+            <button
+              type="button"
+              className="ctl-clear"
+              onClick={() => onPatch({ beFrom: '', beTo: '', stopFrom: '', stopTo: '' })}
+            >
+              сбросить
+            </button>
+          )}
+        </label>
+        <DateRangePicker
+          label={`Даты в ${destName}`}
+          from={state.beFrom}
+          to={state.beTo}
+          onChange={(f, t) => onPatch({ beFrom: f, beTo: t })}
+        />
+        <div className="ctl-sub">Оставить только поездки, которые целиком покрывают эти даты в {destName}.</div>
+        <div style={{ marginTop: 10 }}>
+          <DateRangePicker
+            label="Даты в городе-остановке"
+            from={state.stopFrom}
+            to={state.stopTo}
+            onChange={(f, t) => onPatch({ stopFrom: f, stopTo: t })}
+          />
+        </div>
+        <div className="ctl-sub">Если задано — покажем только варианты с остановкой, покрывающей эти даты.</div>
       </div>
     </div>
   )

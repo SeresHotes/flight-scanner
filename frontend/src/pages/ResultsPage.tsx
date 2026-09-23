@@ -8,6 +8,7 @@ import { ResultsView } from '../components/ResultsView'
 import { BackendNote } from '../components/BackendNote'
 import { CollectPrompt } from '../components/CollectPrompt'
 import { JobProgress } from '../components/JobProgress'
+import { FreshnessBar } from '../components/FreshnessBar'
 
 // Страница 2 — результаты по выбранному маршруту (параметры берём из URL).
 export function ResultsPage() {
@@ -30,16 +31,23 @@ export function ResultsPage() {
     setJobId(null)
   }, [location.search])
 
+  // «Загрузить данные» с главной (?collect=1) — сразу запускаем сбор свежих данных.
+  const wantCollect = new URLSearchParams(location.search).get('collect') === '1'
+  useEffect(() => {
+    if (wantCollect) onCollect(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search])
+
   if (!params) return <Navigate to="/" replace />
 
   const activeJob = jobId ?? (result?.status === 'collecting' ? result.job_id : null)
 
-  async function onCollect() {
+  async function onCollect(force = false) {
     if (!params) return
     setStarting(true)
     setCollectError(null)
     try {
-      const r = await startCollection(params)
+      const r = await startCollection(params, force)
       if (r.status === 'collecting') setJobId(r.job_id)
       else if (r.status === 'needs_backend') setCollectError(r.message ?? 'Сбор недоступен для этого запроса.')
       else await query.refetch() // ok — данные уже собраны
@@ -100,8 +108,17 @@ export function ResultsPage() {
         />
       )}
 
-      {!activeJob && result?.status === 'ok' && (
-        <ResultsView key={location.search} data={result.data} params={params} />
+      {result?.status === 'ok' && (
+        <>
+          <FreshnessBar
+            collectedAt={result.data.meta.collected_at}
+            estimate={result.refresh_estimate}
+            starting={starting || !!activeJob}
+            error={collectError}
+            onRefresh={() => onCollect(true)}
+          />
+          <ResultsView key={location.search} data={result.data} params={params} />
+        </>
       )}
     </>
   )

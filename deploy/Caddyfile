@@ -1,0 +1,22 @@
+# Единый origin: статика фронта + reverse-proxy /api → FastAPI. Авто-TLS по домену.
+#
+# SITE_DOMAIN подставляется из окружения контейнера:
+#   - прод: flights.sereshotes.dev → Caddy сам берёт сертификат Let's Encrypt (HTTP-01),
+#     нужна A-запись домена на внешний IP VM.
+#   - локально: SITE_DOMAIN=localhost → Caddy выдаёт локальный самоподписанный серт.
+{$SITE_DOMAIN} {
+	encode zstd gzip
+
+	# API — на контейнер api (имя сервиса в compose-сети). reverse_proxy сохраняет путь,
+	# бэкенд ждёт префикс /api (роуты объявлены как /api/...), поэтому не стрипаем.
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	# Всё остальное — SPA: отдаём файл, иначе index.html (client-side routing react-router).
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

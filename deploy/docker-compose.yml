@@ -1,0 +1,41 @@
+# Локальная проверка прод-схемы (api + caddy) на своей машине.
+#   cd deploy && SITE_DOMAIN=localhost docker compose up --build
+#   → http://localhost (Caddy редиректит на https://localhost с самоподписанным сертом)
+#
+# На VM используется НЕ этот файл, а /opt/flights/docker-compose.yml, который пишет
+# cloud-init (там образы тянутся из Container Registry, а не собираются). См. infra/terraform.
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: flights-api:local
+    # Секреты/токен сбора — из корневого .env (нужен только для реального сбора).
+    env_file:
+      - ../.env
+    # Горячее состояние (SQLite + collected + Parquet-озеро). Для локали засеивается
+    # bind-моунтом реального data/; в проде — именованный том, засеянный из Object Storage.
+    volumes:
+      - ../data:/app/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    image: flights-web:local
+    environment:
+      - SITE_DOMAIN=${SITE_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+    restart: unless-stopped
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

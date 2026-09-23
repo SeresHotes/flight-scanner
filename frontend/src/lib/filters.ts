@@ -1,6 +1,42 @@
 import type { Trip } from '../types'
+import { dateOnly, daysBetweenISO } from './dates'
 
 // Логика фильтрации/сортировки — перенос из web/index.html без смены поведения.
+
+// --- Даты присутствия по точкам маршрута (для точных фильтров дат) ---
+
+// Первый вылет (из A) и последний прилёт (обратно в A / в B для плеча) — по сегментам.
+export function tripStart(t: Trip): string {
+  return dateOnly(t.segments[0]?.departure_at)
+}
+export function tripEnd(t: Trip): string {
+  return dateOnly(t.segments[t.segments.length - 1]?.arrival_at)
+}
+
+// Интервал присутствия в городе-остановке = самый длинный «разрыв» между соседними
+// сегментами (там и живём). null — если остановки нет. Надёжнее матчинга по названию.
+export function stopoverInterval(t: Trip): [string, string] | null {
+  if (!t.stop || t.segments.length < 2) return null
+  let best: [string, string] | null = null
+  let bestGap = -1
+  for (let i = 0; i < t.segments.length - 1; i++) {
+    const a = dateOnly(t.segments[i].arrival_at)
+    const b = dateOnly(t.segments[i + 1].departure_at)
+    const gap = daysBetweenISO(a, b)
+    if (gap > bestGap) {
+      bestGap = gap
+      best = [a, b]
+    }
+  }
+  return best
+}
+
+// Интервал [start, end] полностью покрывает окно [from, to]. Пустые границы окна не ограничивают.
+function covers(start: string, end: string, from: string, to: string): boolean {
+  if (from && start > from) return false
+  if (to && end < to) return false
+  return true
+}
 
 export type StopFilter = 'all' | 'no' | 'yes'
 export type TrFilter = 'all' | 'no' | 'yes'
@@ -26,6 +62,63 @@ export interface FilterState {
   minStay: number
   maxStay: number
   sort: SortKey
+  // Точные фильтры дат (клиентские, поверх собранного):
+  durMin: number // длительность всей поездки, дней (A→B→A для round, A→B для плеча)
+  durMax: number
+  beFrom: string // окно, которое поездка должна ПОКРЫТЬ присутствием в точке назначения B
+  beTo: string
+  stopFrom: string // окно присутствия в городе-остановке (если есть)
+  stopTo: string
+}
+
+// Длительность отображаемого варианта, дней. Для round — от вылета из A до прилёта
+// обратно в A; для плеча — его собственный размах (включая остановку).
+export function itemDuration(it: RenderItem): number {
+  if (it.kind === 'round') return Math.max(0, daysBetweenISO(tripStart(it.th), tripEnd(it.bk)))
+  return Math.max(0, daysBetweenISO(tripStart(it.trip), tripEnd(it.trip)))
+}
+
+// Верхняя граница слайдера длительности — по самому размашистому возможному варианту.
+export function durationBounds(there: Trip[], back: Trip[]): [number, number] {
+  const starts = there.map(tripStart).filter(Boolean)
+  const ends = back.map(tripEnd).filter(Boolean)
+  let max = 1
+  if (starts.length && ends.length) {
+    max = Math.max(max, daysBetweenISO(starts.reduce((a, b) => (a < b ? a : b)),
+                                       ends.reduce((a, b) => (a > b ? a : b))))
+  }
+  for (const t of [...there, ...back]) max = Math.max(max, daysBetweenISO(tripStart(t), tripEnd(t)))
+  return [1, Math.max(2, max)]
+}
+
+// Проходит ли вариант точные фильтры дат (длительность + окна присутствия по точкам).
+function matchDates(it: RenderItem, s: FilterState): boolean {
+  const dur = itemDuration(it)
+  if (dur < s.durMin || dur > s.durMax) return false
+
+  // Присутствие в точке назначения B.
+  if (s.beFrom || s.beTo) {
+    if (it.kind === 'round') {
+      // Живём в B с прилёта туда (th.hub_date) до вылета обратно (bk.hub_date).
+      if (!covers(it.th.hub_date, it.bk.hub_date, s.beFrom, s.beTo)) return false
+    } else {
+      // Плечо касается B один раз (hub_date) — должно попадать в окно.
+      const d = it.trip.hub_date
+      if (s.beFrom && d < s.beFrom) return false
+      if (s.beTo && d > s.beTo) return false
+    }
+  }
+
+  // Присутствие в городе-остановке (если задано окно — вариант без остановки не подходит).
+  if (s.stopFrom || s.stopTo) {
+    const legs = it.kind === 'round' ? [it.th, it.bk] : [it.trip]
+    const ok = legs.some((t) => {
+      const iv = stopoverInterval(t)
+      return iv ? covers(iv[0], iv[1], s.stopFrom, s.stopTo) : false
+    })
+    if (!ok) return false
+  }
+  return true
 }
 
 export const DIR_OPTS: { v: DirFilter; l: string }[] = [
@@ -144,6 +237,9 @@ export function buildItems(
       }
     }
   }
+
+  // Точные фильтры дат (длительность + окна присутствия) — поверх уже собранного списка.
+  items = items.filter((it) => matchDates(it, state))
 
   items.sort(COMPARATORS[state.sort])
 
