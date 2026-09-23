@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { type AirportOption } from '../data/airports'
 import type { CollectState, Itinerary, PlannerFilters, PlannerStop } from '../planner/types'
-import { estimatePlan, runMockCollection } from '../planner/mock'
+import { estimatePlan } from '../planner/estimate'
+import { runCollection } from '../planner/api'
 import { validatePlan } from '../planner/validation'
 import { defaultFilters } from '../planner/filtering'
 import { RouteSkeleton } from '../planner/components/RouteSkeleton'
@@ -70,13 +71,17 @@ export function PlannerPage() {
     cancelRef.current?.()
     setFilters(null)
     setCollect({ status: 'collecting', progress: 0, total: estimate.requests })
-    cancelRef.current = runMockCollection(
+    cancelRef.current = runCollection(
       stops,
       (progress, total) => setCollect({ status: 'collecting', progress, total }),
       (itineraries: Itinerary[]) => {
         cancelRef.current = null
         setCollect({ status: 'ready', itineraries })
         setFilters(defaultFilters(itineraries, stops.length))
+      },
+      (message: string) => {
+        cancelRef.current = null
+        setCollect({ status: 'error', message })
       },
     )
   }
