@@ -9,6 +9,8 @@ import { RouteSkeleton } from '../planner/components/RouteSkeleton'
 import { PlanEstimateBar } from '../planner/components/PlanEstimateBar'
 import { CollectProgress } from '../planner/components/CollectProgress'
 import { FiltersPanel } from '../planner/components/FiltersPanel'
+import { RecentSearches } from '../planner/components/RecentSearches'
+import { addRecent, loadRecent, removeRecent, type RecentSearch } from '../planner/recentSearches'
 
 let stopSeq = 0
 const nid = () => `s${stopSeq++}`
@@ -35,6 +37,7 @@ export function PlannerPage() {
   const [stops, setStops] = useState<PlannerStop[]>(initialStops)
   const [collect, setCollect] = useState<CollectState>({ status: 'idle' })
   const [filters, setFilters] = useState<PlannerFilters | null>(null)
+  const [recent, setRecent] = useState<RecentSearch[]>(() => loadRecent())
   const cancelRef = useRef<(() => void) | null>(null)
 
   const estimate = useMemo(() => estimatePlan(stops), [stops])
@@ -66,9 +69,24 @@ export function PlannerPage() {
     resetCollected()
   }
 
+  // Восстановить маршрут из истории: id остановок регенерим (они не переносятся).
+  function restoreRecent(saved: PlannerStop[]) {
+    cancelRef.current?.()
+    cancelRef.current = null
+    setStops(saved.map((s) => ({ ...s, id: nid() })))
+    setCollect({ status: 'idle' })
+    setFilters(null)
+  }
+  function dropRecent(key: string) {
+    setRecent(removeRecent(key))
+  }
+
   function load() {
+    if (!validation.ok) return
     cancelRef.current?.()
     setFilters(null)
+    // Валидный запрос уходит в сбор — фиксируем его в истории.
+    setRecent(addRecent(stops, Date.now()))
     setCollect({ status: 'collecting', progress: 0, total: estimate.requests })
     cancelRef.current = runMockCollection(
       stops,
@@ -111,6 +129,8 @@ export function PlannerPage() {
           onLoad={load}
         />
       </div>
+
+      <RecentSearches items={recent} onRestore={restoreRecent} onRemove={dropRecent} />
 
       {collect.status === 'collecting' && (
         <CollectProgress progress={collect.progress} total={collect.total} />
