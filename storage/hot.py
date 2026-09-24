@@ -47,6 +47,20 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at  TEXT,
     updated_at  TEXT
 );
+
+-- Кэш ответов Travelpayouts по одному под-запросу (origin, destination, day).
+-- Позволяет не перезапрашивать недавно собранные под-запросы (TTL — см. worker).
+-- origin/destination хранятся как '' когда в запросе не заданы (ANY-направления);
+-- direct различает прямые (1) и с пересадками (0) — это разные ответы API.
+CREATE TABLE IF NOT EXISTS fetch_cache (
+    origin       TEXT NOT NULL,
+    destination  TEXT NOT NULL,
+    search_date  TEXT NOT NULL,
+    direct       INTEGER NOT NULL,
+    fetched_at   TEXT NOT NULL,
+    data_json    TEXT NOT NULL,
+    PRIMARY KEY (origin, destination, search_date, direct)
+);
 """
 
 
@@ -209,6 +223,50 @@ def coverage_gaps(conn: sqlite3.Connection, origin: str, destination: str,
         if row is None:
             gaps.append(d)
     return gaps
+
+
+# ----------------------------- fetch cache -----------------------------------
+
+def _fetch_cache_key(origin: Optional[str], destination: Optional[str]) -> tuple:
+    """Нормализует ключ: ANY-направление (origin/destination=None) → ''."""
+    return (origin or "", destination or "")
+
+
+def fetch_cache_get(conn: sqlite3.Connection, origin: Optional[str],
+                    destination: Optional[str], search_date: str, direct: int,
+                    ttl_seconds: float) -> Optional[List[Dict[str, Any]]]:
+    """Список рейсов из кэша, если запрос свежее ttl_seconds; иначе None.
+
+    None означает «надо сходить в API» — как при промахе, так и при протухании.
+    """
+    o, d = _fetch_cache_key(origin, destination)
+    row = conn.execute(
+        "SELECT fetched_at, data_json FROM fetch_cache "
+        "WHERE origin=? AND destination=? AND search_date=? AND direct=?",
+        (o, d, search_date, direct),
+    ).fetchone()
+    if row is None:
+        return None
+    age = (datetime.now() - datetime.fromisoformat(row["fetched_at"])).total_seconds()
+    if age > ttl_seconds:
+        return None
+    return json.loads(row["data_json"])
+
+
+def fetch_cache_put(conn: sqlite3.Connection, origin: Optional[str],
+                    destination: Optional[str], search_date: str, direct: int,
+                    data: List[Dict[str, Any]]) -> None:
+    """Сохраняет ответ API по под-запросу, отметив время (для TTL)."""
+    o, d = _fetch_cache_key(origin, destination)
+    now = datetime.now().isoformat()
+    conn.execute(
+        "INSERT INTO fetch_cache (origin, destination, search_date, direct, fetched_at, data_json) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(origin, destination, search_date, direct) "
+        "DO UPDATE SET fetched_at=excluded.fetched_at, data_json=excluded.data_json",
+        (o, d, search_date, direct, now, json.dumps(data, ensure_ascii=False)),
+    )
+    conn.commit()
 
 
 # -------------------------------- jobs ---------------------------------------

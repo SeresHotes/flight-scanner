@@ -22,6 +22,10 @@ load_dotenv()
 API_BASE_URL = "https://api.travelpayouts.com/aviasales/v3/prices_for_dates"
 API_TOKEN = os.getenv("TRAVELPAYOUTS_TOKEN")
 
+# Пауза между реальными запросами к API (rate-limit). Живёт внутри fetch_flights,
+# поэтому попадания в кэш её не платят.
+RATE_LIMIT_SLEEP_SECONDS = 0.5
+
 
 def require_token() -> str:
     """Проверяет наличие токена в момент сбора (не при импорте — чтобы API мог
@@ -95,17 +99,23 @@ def fetch_flights(origin: str = None, destination: str = None, departure_at: str
     try:
         response = requests.get(API_BASE_URL, params=params, timeout=10)
         response.raise_for_status()
-        return response.json()
+        result = response.json()
     except requests.exceptions.RequestException as e:
         origin_str = origin or "ANY"
         dest_str = destination or "ANY"
         print(f"Ошибка при запросе {origin_str} -> {dest_str} на {departure_at}: {e}")
-        return {"data": []}
+        # error=True: сбойный ответ не должен попасть в кэш (в отличие от честного пустого).
+        result = {"data": [], "error": True}
+    finally:
+        # Rate-limit: держим паузу между реальными обращениями к API.
+        time.sleep(RATE_LIMIT_SLEEP_SECONDS)
+    return result
 
 
 def collect_leg_data(origin: str = None, destination: str = None,
                      date_range: List[str] = None, leg_name: str = "",
-                     allow_indirect: bool = False, progress_cb=None) -> List[Dict[str, Any]]:
+                     allow_indirect: bool = False, progress_cb=None,
+                     fetch_fn=None) -> List[Dict[str, Any]]:
     """
     Собирает данные о перелетах для одного этапа маршрута.
     Если origin указан, а destination нет - получает все направления из origin.
@@ -121,6 +131,7 @@ def collect_leg_data(origin: str = None, destination: str = None,
     Returns:
         Список всех найденных перелетов
     """
+    fetch = fetch_fn or fetch_flights
     all_flights = []
     total_requests = len(date_range) if date_range else 1
     current_request = 0
@@ -141,7 +152,7 @@ def collect_leg_data(origin: str = None, destination: str = None,
             current_request += 1
             print(f"[{current_request}/{total_requests}] Запрос: {origin_str} -> {dest_str} на {date}...", end=" ")
 
-            result = fetch_flights(origin, destination, date, allow_indirect=allow_indirect)
+            result = fetch(origin, destination, date, allow_indirect=allow_indirect)
 
             if result.get("data"):
                 flight_count = len(result["data"])
@@ -159,13 +170,10 @@ def collect_leg_data(origin: str = None, destination: str = None,
 
             if progress_cb:
                 progress_cb()
-
-            # Небольшая задержка для избежания rate limiting
-            time.sleep(0.5)
     else:
         # Запрос без указания конкретной даты
         print(f"Запрос: {origin_str} -> {dest_str}...", end=" ")
-        result = fetch_flights(origin, destination, allow_indirect=allow_indirect)
+        result = fetch(origin, destination, allow_indirect=allow_indirect)
 
         if result.get("data"):
             flight_count = len(result["data"])
@@ -215,11 +223,12 @@ def plan_request_count(origin, destination, leg1_dates, leg2_dates, stop_days=(2
 
 
 def collect_route(origin: str, destination: str, leg1_dates, leg2_dates,
-                  stop_days=(2, 7), progress_cb=None) -> Dict[str, Dict[str, Any]]:
+                  stop_days=(2, 7), progress_cb=None, fetch_fn=None) -> Dict[str, Dict[str, Any]]:
     """Собирает datasets {plain, there, back} для маршрута под core.trip_builder.
 
     Каждый — формата коллектора {leg1_flights, leg2_flights}. progress_cb() вызывается
-    после каждого запроса к API (для отслеживания прогресса).
+    после каждого запроса к API (для отслеживания прогресса). fetch_fn позволяет
+    подменить обращение к API (например, кэширующей обёрткой из api.worker).
     """
     require_token()
     result = {
@@ -228,7 +237,8 @@ def collect_route(origin: str, destination: str, leg1_dates, leg2_dates,
         "back": {"leg1_flights": [], "leg2_flights": []},
     }
     for dataset, leg, o, d, dates, indirect in _leg_plan(origin, destination, leg1_dates, leg2_dates, stop_days):
-        flights = collect_leg_data(o, d, dates, leg, allow_indirect=indirect, progress_cb=progress_cb)
+        flights = collect_leg_data(o, d, dates, leg, allow_indirect=indirect,
+                                   progress_cb=progress_cb, fetch_fn=fetch_fn)
         result[dataset][leg] = flights
     return result
 
