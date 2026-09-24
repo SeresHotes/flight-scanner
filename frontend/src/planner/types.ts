@@ -45,6 +45,7 @@ export interface CityFilter {
   maxStay: number
   mustCover: [string, string] | null // окно, которое город обязан покрыть целиком
   requireWeekend: boolean // должны быть оба выходных (сб + вс)
+  allowedCodes: string[] | null // разрешённые города (IATA); null — любые из собранных
 }
 
 export interface TransitionFilter {
