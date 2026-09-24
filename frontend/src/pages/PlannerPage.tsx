@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { type AirportOption } from '../data/airports'
 import type { CollectState, Itinerary, PlannerFilters, PlannerStop } from '../planner/types'
 import { estimatePlan, runMockCollection } from '../planner/mock'
 import { validatePlan } from '../planner/validation'
 import { defaultFilters } from '../planner/filtering'
+import { buildPlannerQuery, parsePlannerQuery } from '../planner/urlState'
 import { RouteSkeleton } from '../planner/components/RouteSkeleton'
 import { PlanEstimateBar } from '../planner/components/PlanEstimateBar'
 import { CollectProgress } from '../planner/components/CollectProgress'
@@ -12,6 +13,11 @@ import { FiltersPanel } from '../planner/components/FiltersPanel'
 
 let stopSeq = 0
 const nid = () => `s${stopSeq++}`
+
+// Фильтры из URL применимы, только если их форма совпадает с текущим маршрутом.
+function filtersFitStops(f: PlannerFilters, stopCount: number): boolean {
+  return f.cities.length === stopCount && f.transitions.length === Math.max(0, stopCount - 1)
+}
 
 // Демо-города (названия — на английском, как в справочнике аэропортов/автокомплите).
 const MOW: AirportOption = { code: 'MOW', city: 'Moscow', flag: '🇷🇺', label: 'Moscow (MOW)' }
@@ -32,18 +38,32 @@ function initialStops(): PlannerStop[] {
 // Альтернативная страница-планировщик: цепочка остановок с окнами дат,
 // оценка объёма + загрузка, затем детальные фильтры и карточки маршрутов.
 export function PlannerPage() {
-  const [stops, setStops] = useState<PlannerStop[]>(initialStops)
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // Разбираем URL один раз при монтировании: маршрут → начальное состояние,
+  // фильтры → отложенно применяем после первого сбора (см. load).
+  const initial = useMemo(() => parsePlannerQuery(searchParams, nid), [])
+  const [stops, setStops] = useState<PlannerStop[]>(() => initial.stops ?? initialStops())
   const [collect, setCollect] = useState<CollectState>({ status: 'idle' })
   const [filters, setFilters] = useState<PlannerFilters | null>(null)
   const cancelRef = useRef<(() => void) | null>(null)
+  // Фильтры из ссылки ждут своего сбора; правка маршрута их аннулирует.
+  const pendingFilters = useRef<PlannerFilters | null>(initial.filters)
 
   const estimate = useMemo(() => estimatePlan(stops), [stops])
   const validation = useMemo(() => validatePlan(stops), [stops])
+
+  // URL всегда отражает то, что на экране: маршрут + активные фильтры.
+  useEffect(() => {
+    const activeFilters = collect.status === 'ready' ? filters : null
+    setSearchParams(buildPlannerQuery(stops, activeFilters), { replace: true })
+  }, [stops, filters, collect.status, setSearchParams])
 
   // Любая правка маршрута сбрасывает собранное — данные надо перезагрузить.
   function resetCollected() {
     cancelRef.current?.()
     cancelRef.current = null
+    pendingFilters.current = null
     setCollect({ status: 'idle' })
     setFilters(null)
   }
@@ -76,7 +96,15 @@ export function PlannerPage() {
       (itineraries: Itinerary[]) => {
         cancelRef.current = null
         setCollect({ status: 'ready', itineraries })
-        setFilters(defaultFilters(itineraries, stops.length))
+        // Если пришли по ссылке с фильтрами и они подходят под маршрут — берём их,
+        // иначе — широкие значения по умолчанию. Фильтры из URL одноразовые.
+        const fromUrl = pendingFilters.current
+        pendingFilters.current = null
+        setFilters(
+          fromUrl && filtersFitStops(fromUrl, stops.length)
+            ? fromUrl
+            : defaultFilters(itineraries, stops.length),
+        )
       },
     )
   }
