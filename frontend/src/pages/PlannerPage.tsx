@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { type AirportOption } from '../data/airports'
+import { resolveAirports, type AirportOption } from '../data/airports'
 import type { CollectState, Itinerary, PlannerFilters, PlannerStop } from '../planner/types'
 import { estimatePlan } from '../planner/estimate'
 import { runCollection } from '../planner/api'
@@ -69,6 +69,32 @@ export function PlannerPage() {
     const activeFilters = collect.status === 'ready' ? filters : null
     setSearchParams(buildPlannerQuery(stops, activeFilters), { replace: true })
   }, [stops, filters, collect.status, setSearchParams])
+
+  // Дорезолв названий/флагов: из ссылки приходят только коды городов (city пустой).
+  // Коды в URL/кэше не меняются, поэтому подстановка карточек не трогает ни URL,
+  // ни ключ кэша.
+  useEffect(() => {
+    const codes = stops
+      .filter((s) => s.kind === 'cities')
+      .flatMap((s) => s.airports)
+      .filter((a) => a.code && !a.city)
+      .map((a) => a.code)
+    if (codes.length === 0) return
+    let cancelled = false
+    resolveAirports(codes).then((map) => {
+      if (cancelled || map.size === 0) return
+      setStops((prev) =>
+        prev.map((s) =>
+          s.kind !== 'cities'
+            ? s
+            : { ...s, airports: s.airports.map((a) => (!a.city && map.has(a.code) ? map.get(a.code)! : a)) },
+        ),
+      )
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [stops])
 
   // Гидрация из кэша: при заходе по ссылке или смене маршрута показываем уже
   // собранные данные вместо повторного сбора. Свежий сбор запускается кнопкой.

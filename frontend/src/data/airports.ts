@@ -19,6 +19,24 @@ export async function searchAirports(q: string, limit = 8): Promise<AirportOptio
   return json.airports
 }
 
+// Резолв IATA-кода в полную карточку: в URL храним только код, а имя/флаг
+// подтягиваем через тот же /api/airports (код ищется точным совпадением).
+export async function resolveAirport(code: string): Promise<AirportOption | null> {
+  const cu = code.trim().toUpperCase()
+  if (!cu) return null
+  const res = await searchAirports(cu, 10)
+  return res.find((a) => a.code === cu) ?? null
+}
+
+// Пакетный резолв набора кодов (с дедупликацией) → карта code → карточка.
+export async function resolveAirports(codes: string[]): Promise<Map<string, AirportOption>> {
+  const uniq = [...new Set(codes.map((c) => c.trim().toUpperCase()).filter(Boolean))]
+  const entries = await Promise.all(uniq.map(async (code) => [code, await resolveAirport(code)] as const))
+  const map = new Map<string, AirportOption>()
+  for (const [code, opt] of entries) if (opt) map.set(code, opt)
+  return map
+}
+
 // Дефолтные точки — единственный уже собранный маршрут.
 export const DEFAULT_ORIGIN: AirportOption = {
   code: 'MOW',
