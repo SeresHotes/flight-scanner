@@ -44,22 +44,35 @@ function decodeStop(raw: string, id: string): PlannerStop | null {
 
 // --- Фильтры ---
 
+// allowedCodes: null — любые города → маркер '*'; массив — коды через запятую
+// (пустой массив «никакие» кодируется пустой строкой).
+const ANY_CITIES = '*'
+
 function encodeCity(c: CityFilter): string {
   const cover = c.mustCover ?? ['', '']
-  // minStay ~ maxStay ~ coverStart ~ coverEnd ~ requireWeekend(1/0)
-  return [c.minStay, c.maxStay, cover[0], cover[1], c.requireWeekend ? '1' : '0'].join(F)
+  const allowed = c.allowedCodes === null ? ANY_CITIES : c.allowedCodes.join(',')
+  // minStay ~ maxStay ~ coverStart ~ coverEnd ~ requireWeekend(1/0) ~ allowedCodes
+  return [c.minStay, c.maxStay, cover[0], cover[1], c.requireWeekend ? '1' : '0', allowed].join(F)
 }
 
 function decodeCity(raw: string): CityFilter | null {
   const parts = raw.split(F)
   if (parts.length < 5) return null
-  const [minStay, maxStay, coverA, coverB, weekend] = parts
+  const [minStay, maxStay, coverA, coverB, weekend, allowedRaw] = parts
   const mustCover: [string, string] | null = coverA && coverB ? [coverA, coverB] : null
+  // Старые ссылки (без 6-го поля) → allowedCodes null (любые города).
+  const allowedCodes =
+    allowedRaw === undefined || allowedRaw === ANY_CITIES
+      ? null
+      : allowedRaw === ''
+        ? []
+        : allowedRaw.split(',')
   return {
     minStay: Number(minStay),
     maxStay: Number(maxStay),
     mustCover,
     requireWeekend: weekend === '1',
+    allowedCodes,
   }
 }
 

@@ -338,6 +338,12 @@ select:disabled{opacity:.4}
 .pl-issues{margin:6px 0 0;padding-left:18px;color:#ff6b6f;font-size:12.5px;width:100%}
 .pl-issues li{margin:2px 0}
 
+/* Плашка «данные собраны …» + кнопка свежего сбора */
+.pl-dataline{margin-top:16px;padding-top:16px;border-top:1px solid var(--line);
+  display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 16px}
+.pl-data-age{font-size:13px;color:var(--muted)}
+.pl-data-age b{color:var(--txt);font-variant-numeric:tabular-nums}
+
 /* Недавние запросы (localStorage) */
 .pl-recent{margin-top:14px}
 .pl-recent-title{font-size:13px;font-weight:700;color:var(--muted);margin-bottom:8px}
