@@ -85,5 +85,5 @@ export interface Itinerary {
 export type CollectState =
   | { status: 'idle' }
   | { status: 'collecting'; progress: number; total: number }
-  | { status: 'ready'; itineraries: Itinerary[] }
+  | { status: 'ready'; itineraries: Itinerary[]; collectedAt: string } // collectedAt — ISO момента сбора
   | { status: 'error'; message: string }

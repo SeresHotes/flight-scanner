@@ -6,6 +6,7 @@ import { estimatePlan, runMockCollection } from '../planner/mock'
 import { validatePlan } from '../planner/validation'
 import { defaultFilters } from '../planner/filtering'
 import { buildPlannerQuery, parsePlannerQuery } from '../planner/urlState'
+import { getCached, putCached } from '../planner/cache'
 import { RouteSkeleton } from '../planner/components/RouteSkeleton'
 import { PlanEstimateBar } from '../planner/components/PlanEstimateBar'
 import { CollectProgress } from '../planner/components/CollectProgress'
@@ -17,6 +18,12 @@ const nid = () => `s${stopSeq++}`
 // Фильтры из URL применимы, только если их форма совпадает с текущим маршрутом.
 function filtersFitStops(f: PlannerFilters, stopCount: number): boolean {
   return f.cities.length === stopCount && f.transitions.length === Math.max(0, stopCount - 1)
+}
+
+function formatCollectedAt(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 // Демо-города (названия — на английском, как в справочнике аэропортов/автокомплите).
@@ -41,7 +48,7 @@ export function PlannerPage() {
   const [searchParams, setSearchParams] = useSearchParams()
 
   // Разбираем URL один раз при монтировании: маршрут → начальное состояние,
-  // фильтры → отложенно применяем после первого сбора (см. load).
+  // фильтры → отложенно применяем при гидрации из кэша или после сбора.
   const initial = useMemo(() => parsePlannerQuery(searchParams, nid), [])
   const [stops, setStops] = useState<PlannerStop[]>(() => initial.stops ?? initialStops())
   const [collect, setCollect] = useState<CollectState>({ status: 'idle' })
@@ -58,6 +65,21 @@ export function PlannerPage() {
     const activeFilters = collect.status === 'ready' ? filters : null
     setSearchParams(buildPlannerQuery(stops, activeFilters), { replace: true })
   }, [stops, filters, collect.status, setSearchParams])
+
+  // Гидрация из кэша: при заходе по ссылке или смене маршрута показываем уже
+  // собранные данные вместо повторного сбора. Свежий сбор запускается кнопкой.
+  useEffect(() => {
+    const cached = getCached(stops)
+    if (!cached) return // нет данных под маршрут — оставляем как есть (idle → приглашение собрать)
+    const fromUrl = pendingFilters.current
+    pendingFilters.current = null
+    setCollect({ status: 'ready', itineraries: cached.itineraries, collectedAt: cached.collectedAt })
+    setFilters(
+      fromUrl && filtersFitStops(fromUrl, stops.length)
+        ? fromUrl
+        : defaultFilters(cached.itineraries, stops.length),
+    )
+  }, [stops])
 
   // Любая правка маршрута сбрасывает собранное — данные надо перезагрузить.
   function resetCollected() {
@@ -86,25 +108,28 @@ export function PlannerPage() {
     resetCollected()
   }
 
-  function load() {
+  // Собрать данные под текущий маршрут (первичная загрузка и «свежие данные» —
+  // это одно и то же действие). Результат кэшируется с отметкой времени.
+  function collectFresh() {
     cancelRef.current?.()
-    setFilters(null)
+    const prevFilters = filters // при пересборе сохраняем уже настроенные фильтры
     setCollect({ status: 'collecting', progress: 0, total: estimate.requests })
     cancelRef.current = runMockCollection(
       stops,
       (progress, total) => setCollect({ status: 'collecting', progress, total }),
       (itineraries: Itinerary[]) => {
         cancelRef.current = null
-        setCollect({ status: 'ready', itineraries })
-        // Если пришли по ссылке с фильтрами и они подходят под маршрут — берём их,
-        // иначе — широкие значения по умолчанию. Фильтры из URL одноразовые.
+        const collectedAt = new Date().toISOString()
+        putCached(stops, itineraries, collectedAt)
+        setCollect({ status: 'ready', itineraries, collectedAt })
+        // Приоритет фильтров: из ссылки (одноразово) → уже настроенные → дефолтные.
         const fromUrl = pendingFilters.current
         pendingFilters.current = null
-        setFilters(
-          fromUrl && filtersFitStops(fromUrl, stops.length)
-            ? fromUrl
-            : defaultFilters(itineraries, stops.length),
-        )
+        const reuse =
+          (fromUrl && filtersFitStops(fromUrl, stops.length) && fromUrl) ||
+          (prevFilters && filtersFitStops(prevFilters, stops.length) && prevFilters) ||
+          defaultFilters(itineraries, stops.length)
+        setFilters(reuse)
       },
     )
   }
@@ -132,12 +157,33 @@ export function PlannerPage() {
           onAdd={addStop}
           onRemove={removeStop}
         />
-        <PlanEstimateBar
-          estimate={estimate}
-          validation={validation}
-          disabled={!validation.ok || collect.status === 'collecting'}
-          onLoad={load}
-        />
+        {/* Пока данных нет — оценка объёма и кнопка первичной загрузки. */}
+        {collect.status !== 'ready' && (
+          <PlanEstimateBar
+            estimate={estimate}
+            validation={validation}
+            disabled={!validation.ok || collect.status === 'collecting'}
+            onLoad={collectFresh}
+          />
+        )}
+
+        {/* Данные уже собраны — показываем их возраст и даём перезагрузить свежие. */}
+        {collect.status === 'ready' && (
+          <div className="pl-dataline">
+            <span className="pl-data-age">
+              📦 Данные собраны <b>{formatCollectedAt(collect.collectedAt)}</b>
+            </span>
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={!validation.ok}
+              onClick={collectFresh}
+              title="Собрать данные заново на текущий момент"
+            >
+              ↻ Загрузить свежие данные
+            </button>
+          </div>
+        )}
       </div>
 
       {collect.status === 'collecting' && (
