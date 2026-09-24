@@ -2,13 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { type AirportOption } from '../data/airports'
 import type { CollectState, Itinerary, PlannerFilters, PlannerStop } from '../planner/types'
-import { estimatePlan, runMockCollection } from '../planner/mock'
+import { estimatePlan } from '../planner/estimate'
+import { runCollection } from '../planner/api'
 import { validatePlan } from '../planner/validation'
 import { defaultFilters } from '../planner/filtering'
 import { RouteSkeleton } from '../planner/components/RouteSkeleton'
 import { PlanEstimateBar } from '../planner/components/PlanEstimateBar'
 import { CollectProgress } from '../planner/components/CollectProgress'
 import { FiltersPanel } from '../planner/components/FiltersPanel'
+import { RecentSearches } from '../planner/components/RecentSearches'
+import { addRecent, loadRecent, removeRecent, type RecentSearch } from '../planner/recentSearches'
 
 let stopSeq = 0
 const nid = () => `s${stopSeq++}`
@@ -35,6 +38,7 @@ export function PlannerPage() {
   const [stops, setStops] = useState<PlannerStop[]>(initialStops)
   const [collect, setCollect] = useState<CollectState>({ status: 'idle' })
   const [filters, setFilters] = useState<PlannerFilters | null>(null)
+  const [recent, setRecent] = useState<RecentSearch[]>(() => loadRecent())
   const cancelRef = useRef<(() => void) | null>(null)
 
   const estimate = useMemo(() => estimatePlan(stops), [stops])
@@ -66,17 +70,36 @@ export function PlannerPage() {
     resetCollected()
   }
 
+  // Восстановить маршрут из истории: id остановок регенерим (они не переносятся).
+  function restoreRecent(saved: PlannerStop[]) {
+    cancelRef.current?.()
+    cancelRef.current = null
+    setStops(saved.map((s) => ({ ...s, id: nid() })))
+    setCollect({ status: 'idle' })
+    setFilters(null)
+  }
+  function dropRecent(key: string) {
+    setRecent(removeRecent(key))
+  }
+
   function load() {
+    if (!validation.ok) return
     cancelRef.current?.()
     setFilters(null)
+    // Валидный запрос уходит в сбор — фиксируем его в истории.
+    setRecent(addRecent(stops, Date.now()))
     setCollect({ status: 'collecting', progress: 0, total: estimate.requests })
-    cancelRef.current = runMockCollection(
+    cancelRef.current = runCollection(
       stops,
       (progress, total) => setCollect({ status: 'collecting', progress, total }),
       (itineraries: Itinerary[]) => {
         cancelRef.current = null
         setCollect({ status: 'ready', itineraries })
         setFilters(defaultFilters(itineraries, stops.length))
+      },
+      (message: string) => {
+        cancelRef.current = null
+        setCollect({ status: 'error', message })
       },
     )
   }
@@ -111,6 +134,8 @@ export function PlannerPage() {
           onLoad={load}
         />
       </div>
+
+      <RecentSearches items={recent} onRestore={restoreRecent} onRemove={dropRecent} />
 
       {collect.status === 'collecting' && (
         <CollectProgress progress={collect.progress} total={collect.total} />
