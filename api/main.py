@@ -220,7 +220,8 @@ def _covers_request(payload: Dict[str, Any], req: "SearchRequest") -> bool:
 
 def _estimate(params: Dict[str, Any]) -> Dict[str, int]:
     requests = worker.estimate_requests(params)
-    return {"requests": requests, "seconds": round(requests * worker.SECONDS_PER_REQUEST)}
+    seconds = requests * worker.SECONDS_PER_REQUEST * worker.ESTIMATE_TIME_FACTOR
+    return {"requests": requests, "seconds": round(seconds)}
 
 
 def _refresh_estimate(req: "SearchRequest") -> Optional[Dict[str, int]]:

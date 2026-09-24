@@ -8,6 +8,7 @@ import type { Itinerary, ItineraryStop, PlannerEstimate, PlannerStop } from './t
 import { addDays, dateOnly, dayCountBetween, daysInWindow, hasBothWeekendDays } from './dates'
 
 const SECONDS_PER_REQUEST = 0.65 // совпадает с api/worker.py
+const ESTIMATE_TIME_FACTOR = 2 // запас пессимизма в показанной оценке (см. api/worker.py)
 const DEFAULT_START = '2026-11-01' // якорь старта цепочки, если окон нигде нет
 const DEFAULT_LEG_DAYS = 7 // ширина окна плеча, если оба конца без окна (2-остановочный)
 
@@ -69,7 +70,8 @@ export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
     legs.push({ fromLabel: stopLabel(from), toLabel: stopLabel(to), days, requests: reqs, anyLeg })
     requests += reqs
   }
-  return { requests, seconds: Math.round(requests * SECONDS_PER_REQUEST), legs }
+  const seconds = requests * SECONDS_PER_REQUEST * ESTIMATE_TIME_FACTOR
+  return { requests, seconds: Math.round(seconds), legs }
 }
 
 // --- Детерминированный ГПСЧ, чтобы список не «прыгал» между рендерами ---
