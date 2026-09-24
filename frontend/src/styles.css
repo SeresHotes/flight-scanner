@@ -95,6 +95,12 @@ select:disabled{opacity:.4}
 .count b{color:var(--txt)}
 
 .cards{display:flex;flex-direction:column;gap:14px}
+.pl-limitbar{margin:0 2px 14px;color:var(--muted);font-size:14px}
+.pl-limitbar input{width:88px;margin-left:6px;padding:6px 8px;background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:8px;font-size:14px}
+.pl-pager{display:flex;align-items:center;justify-content:center;gap:16px;margin-top:16px;color:var(--muted);font-size:14px}
+.pl-pager button{padding:8px 16px;background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:10px;cursor:pointer;font-size:14px;transition:.15s}
+.pl-pager button:hover:not(:disabled){border-color:var(--txt)}
+.pl-pager button:disabled{opacity:.4;cursor:default}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden;transition:.15s}
 .card:hover{border-color:#3a4356}
 .card .top{display:flex;justify-content:space-between;align-items:center;gap:14px;

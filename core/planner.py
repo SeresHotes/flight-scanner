@@ -28,11 +28,11 @@ DEFAULT_START = "2026-11-01"  # якорь старта, если окон не�
 DEFAULT_LEG_DAYS = 7          # ширина окна плеча, если оба конца без окна
 FINAL_STAY_DAYS = 5           # пребывание в финальном городе (у конца окна нет)
 
-# Ограничители комбинаторного взрыва при сборке цепочек.
-_MAX_ITINERARIES = 40       # сколько цепочек отдаём максимум
-_BEAM = 6                   # сколько онвард-рейсов раскрываем из одной точки
-_PER_CITY = 2               # рейсов на один город-назначение (чтобы был выбор по цене)
-_PER_SEQUENCE = 4           # вариантов (по датам/цене) на одну последовательность городов
+# Собираем ВСЕ цепочки из имеющихся данных (без beam/per-city/per-sequence кэпов).
+# Единственный предел — защитный потолок от катастрофического комбинаторного
+# взрыва: без него DFS на нескольких «any»-остановках может дать столько цепочек,
+# что VM ляжет по памяти. При переполнении сборка останавливается и логируется.
+_MAX_ITINERARIES = 100_000  # защитный потолок числа построенных цепочек
 _INF = float("inf")
 
 
@@ -230,24 +230,12 @@ def _price_of(f: Dict[str, Any]) -> float:
     return p if p is not None else f.get("value", 0)
 
 
-def _pick_onward(flights: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Разнообразие городов-назначений: до _PER_CITY дешёвых на каждый город,
-    затем города по возрастанию цены, всего до _BEAM."""
-    by_dest: Dict[str, List[Dict[str, Any]]] = {}
-    for f in flights:
-        dest = (f.get("destination") or f.get("search_destination") or "").upper()
-        if dest:
-            by_dest.setdefault(dest, []).append(f)
-    for dest in by_dest:
-        by_dest[dest].sort(key=_price_of)
-        by_dest[dest] = by_dest[dest][:_PER_CITY]
-    dests = sorted(by_dest, key=lambda d: _price_of(by_dest[d][0]))
-    picked: List[Dict[str, Any]] = []
-    for dest in dests:
-        picked.extend(by_dest[dest])
-        if len(picked) >= _BEAM:
-            break
-    return picked[:_BEAM]
+def _onward_sorted(flights: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Все онвард-рейсы по возрастанию цены — раскрываем каждый (без beam-обрезки).
+
+    Порядок по цене нужен, чтобы при упоре в защитный потолок первыми набирались
+    дешёвые цепочки, а отсекались дорогие."""
+    return sorted(flights, key=_price_of)
 
 
 def _allowed(stop: Stop) -> Optional[set]:
@@ -267,16 +255,11 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
 
     results: List[Dict[str, Any]] = []
     seq = {"id": 1}
-    seq_counts: Dict[tuple, int] = {}  # вариантов на последовательность городов
 
     def dfs(i: int, city: str, arrive_iso: str, chosen: List[Dict[str, Any]], visited: set):
         if len(results) >= _MAX_ITINERARIES:
             return
         if i == len(stops) - 1:  # дошли до финальной остановки — цепочка готова
-            key = tuple(f["destination"] for f in chosen)
-            if seq_counts.get(key, 0) >= _PER_SEQUENCE:  # не заполняем выдачу одним маршрутом
-                return
-            seq_counts[key] = seq_counts.get(key, 0) + 1
             results.append(_assemble(stops, chosen, builder, city_info, chain_start, seq["id"]))
             seq["id"] += 1
             return
@@ -295,7 +278,7 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
                 continue
             candidates.append(f)
 
-        for f in _pick_onward(candidates):
+        for f in _onward_sorted(candidates):
             if len(results) >= _MAX_ITINERARIES:
                 return
             dest = (f.get("destination") or f.get("search_destination")).upper()

@@ -115,7 +115,9 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
 
         hot.update_job(conn, job_id, status="done",
                        result_json=json.dumps({"itineraries": itineraries}, ensure_ascii=False))
-        print(f"[worker] plan job {job_id} done: {len(itineraries)} цепочек")
+        capped = len(itineraries) >= planner._MAX_ITINERARIES
+        print(f"[worker] plan job {job_id} done: {len(itineraries)} цепочек"
+              + (f" (упор в потолок {planner._MAX_ITINERARIES} — часть дорогих маршрутов обрезана)" if capped else ""))
     except Exception as e:
         hot.update_job(conn, job_id, status="error", error=str(e))
         print(f"[worker] plan job {job_id} error: {e}")
