@@ -20,6 +20,35 @@ MAX_REQUESTS = 150  # предохранитель от слишком широ�
 SECONDS_PER_REQUEST = 0.65  # 0.5с rate-limit sleep + ~сеть — для оценки времени сбора
 ESTIMATE_TIME_FACTOR = 2  # запас пессимизма в показанной оценке длительности сбора
 
+# Свежесть кэша под-запросов (origin, destination, day): источник (Travelpayouts
+# Data API) сам отдаёт кэш цен с задержкой ~суток, поэтому чаще перезапрашивать
+# бессмысленно — те же цифры, впустую сожжённые запросы к API.
+FETCH_CACHE_TTL_SECONDS = 24 * 3600
+
+
+def _make_cached_fetch(conn):
+    """Обёртка над collector.fetch_flights с TTL-кэшем по (origin, destination, day).
+
+    На попадании возвращает сохранённый ответ без обращения к API (и без rate-limit
+    паузы). Сбойные ответы (error=True) и запросы без даты не кэшируем."""
+    def fetch(origin=None, destination=None, departure_at=None, currency="RUB",
+              unique=True, limit=1000, allow_indirect=False):
+        direct = 0 if allow_indirect else 1
+        if departure_at:
+            cached = hot.fetch_cache_get(conn, origin, destination, departure_at,
+                                         direct, FETCH_CACHE_TTL_SECONDS)
+            if cached is not None:
+                return {"data": cached}
+        result = collector.fetch_flights(
+            origin=origin, destination=destination, departure_at=departure_at,
+            currency=currency, unique=unique, limit=limit, allow_indirect=allow_indirect,
+        )
+        if departure_at and not result.get("error"):
+            hot.fetch_cache_put(conn, origin, destination, departure_at, direct,
+                                result.get("data", []))
+        return result
+    return fetch
+
 
 def estimate_requests(params: Dict[str, Any]) -> int:
     return collector.plan_request_count(
@@ -45,7 +74,7 @@ def run_collection(db_path: str, job_id: str, params: Dict[str, Any],
 
         collected = collector.collect_route(
             origin, destination, params["leg1_dates"], params["leg2_dates"],
-            stop_days=STOP_DAYS, progress_cb=cb,
+            stop_days=STOP_DAYS, progress_cb=cb, fetch_fn=_make_cached_fetch(conn),
         )
 
         network = agg.load_airport_network()
@@ -95,7 +124,7 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
             counter["n"] += 1
             hot.update_job(conn, job_id, progress=counter["n"])
 
-        collected = planner.collect_plan(stops, progress_cb=cb)
+        collected = planner.collect_plan(stops, progress_cb=cb, fetch_fn=_make_cached_fetch(conn))
 
         from core.trip_builder import make_city_lookup
         city_info = make_city_lookup(agg.load_airport_network())
