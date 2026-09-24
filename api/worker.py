@@ -18,6 +18,7 @@ from storage import hot, lake
 STOP_DAYS = (2, 7)
 MAX_REQUESTS = 150  # предохранитель от слишком широких диапазонов
 SECONDS_PER_REQUEST = 0.65  # 0.5с rate-limit sleep + ~сеть — для оценки времени сбора
+ESTIMATE_TIME_FACTOR = 2  # запас пессимизма в показанной оценке длительности сбора
 
 
 def estimate_requests(params: Dict[str, Any]) -> int:
