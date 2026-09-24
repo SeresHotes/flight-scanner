@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { plural } from '../../lib/format'
 import type { CityFilter, Itinerary, PlannerFilters, PlannerStop, TransitionFilter } from '../types'
 import { pointLabel } from '../validation'
@@ -29,6 +29,23 @@ export function FiltersPanel({
 }) {
   const bounds = useMemo(() => computeBounds(itineraries), [itineraries])
   const visible = useMemo(() => applyFilters(itineraries, filters), [itineraries, filters])
+
+  // Хард-лимит на число маршрутов (вводом, дефолт 10к) — сколько подходящих
+  // цепочек вообще берём в рассмотрение (visible уже отсортирован по цене).
+  // Внутри лимита листаем страницами по PAGE_SIZE.
+  const DEFAULT_LIMIT = 10000
+  const PAGE_SIZE = 100
+  const [limit, setLimit] = useState(DEFAULT_LIMIT)
+  const [page, setPage] = useState(0)
+
+  const limited = useMemo(() => visible.slice(0, Math.max(1, limit)), [visible, limit])
+  const pageCount = Math.max(1, Math.ceil(limited.length / PAGE_SIZE))
+  const curPage = Math.min(page, pageCount - 1)
+  const pageItems = useMemo(
+    () => limited.slice(curPage * PAGE_SIZE, curPage * PAGE_SIZE + PAGE_SIZE),
+    [limited, curPage],
+  )
+  useEffect(() => setPage(0), [visible, limit]) // сброс на первую страницу при смене выборки
 
   // Города, реально встретившиеся на каждой остановке — из них и выбираем в фильтре.
   const cityOptionsByStop = useMemo<CityOption[][]>(
@@ -62,6 +79,7 @@ export function FiltersPanel({
               title={`${pointLabel(i)} · ${cityName(s)}`}
               filter={filters.cities[i]}
               cityOptions={cityOptionsByStop[i]}
+              stayBounds={bounds.stayDays}
               onChange={(patch) => patchCity(i, patch)}
             />
             {i < stops.length - 1 && (
@@ -85,14 +103,46 @@ export function FiltersPanel({
       <div className="count">
         Подходит <b>{visible.length}</b> из {itineraries.length}{' '}
         {plural(itineraries.length, 'маршрута', 'маршрутов', 'маршрутов')}
+        {limited.length < visible.length && <> · лимит {limited.length}</>}
       </div>
 
-      {visible.length ? (
-        <div className="cards">
-          {visible.map((it) => (
-            <ItineraryCard key={it.id} it={it} />
-          ))}
+      {visible.length > 0 && (
+        <div className="pl-limitbar">
+          <label>
+            Максимум маршрутов:{' '}
+            <input
+              type="number"
+              min={1}
+              max={100000}
+              step={100}
+              value={limit}
+              onChange={(e) => setLimit(Math.max(1, Math.min(100000, Number(e.target.value) || 1)))}
+            />
+          </label>
         </div>
+      )}
+
+      {visible.length ? (
+        <>
+          <div className="cards">
+            {pageItems.map((it) => (
+              <ItineraryCard key={it.id} it={it} />
+            ))}
+          </div>
+          {pageCount > 1 && (
+            <div className="pl-pager">
+              <button type="button" disabled={curPage === 0} onClick={() => setPage(curPage - 1)}>
+                ← Назад
+              </button>
+              <span>
+                Страница {curPage + 1} из {pageCount}
+              </span>
+              <button type="button" disabled={curPage >= pageCount - 1} onClick={() => setPage(curPage + 1)}>
+                Вперёд →
+              </button>
+            </div>
+          )}
+        </>
       ) : (
         <div className="empty">Под текущие фильтры маршрутов нет — ослабьте условия.</div>
       )}

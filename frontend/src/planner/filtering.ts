@@ -31,6 +31,15 @@ export function applyFilters(itineraries: Itinerary[], f: PlannerFilters): Itine
   return itineraries.filter((it) => itineraryMatches(it, f))
 }
 
+// Диапазон дней пребывания в городе по всем остановкам всех цепочек — чтобы
+// дефолт «дней в городе» никого не резал, а слайдер покрывал реальные значения.
+function stayRange(itineraries: Itinerary[]): [number, number] {
+  const stayDays = itineraries.flatMap((it) => it.stops.map((s) => s.days))
+  const min = stayDays.length ? Math.min(...stayDays) : 1
+  const max = stayDays.length ? Math.max(30, ...stayDays) : 30
+  return [min, max]
+}
+
 // Дефолтные (максимально широкие) фильтры под собранный набор цепочек.
 export function defaultFilters(itineraries: Itinerary[], stopCount: number): PlannerFilters {
   const transitionCount = Math.max(0, stopCount - 1)
@@ -38,11 +47,12 @@ export function defaultFilters(itineraries: Itinerary[], stopCount: number): Pla
   const days = itineraries.map((it) => it.total_days)
   const tripMin = days.length ? Math.min(...days) : 1
   const tripMax = days.length ? Math.max(...days) : 60
+  const [stayMin, stayMax] = stayRange(itineraries)
 
   return {
     cities: Array.from({ length: stopCount }, () => ({
-      minStay: 1,
-      maxStay: 30,
+      minStay: stayMin,
+      maxStay: stayMax,
       mustCover: null,
       requireWeekend: false,
       allowedCodes: null,
@@ -59,6 +69,7 @@ export function defaultFilters(itineraries: Itinerary[], stopCount: number): Pla
 export interface FilterBounds {
   maxTravelMinutes: number
   tripLength: [number, number]
+  stayDays: [number, number] // мин/макс дней в городе среди собранных цепочек
 }
 
 export function computeBounds(itineraries: Itinerary[]): FilterBounds {
@@ -66,5 +77,5 @@ export function computeBounds(itineraries: Itinerary[]): FilterBounds {
   const days = itineraries.map((it) => it.total_days)
   const tripMin = days.length ? Math.min(...days) : 1
   const tripMax = days.length ? Math.max(...days) : 60
-  return { maxTravelMinutes: maxTravel, tripLength: [tripMin, tripMax] }
+  return { maxTravelMinutes: maxTravel, tripLength: [tripMin, tripMax], stayDays: stayRange(itineraries) }
 }

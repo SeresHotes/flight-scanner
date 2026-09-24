@@ -14,13 +14,16 @@ export function CityFilterCard({
   title,
   filter,
   cityOptions,
+  stayBounds,
   onChange,
 }: {
   title: string
   filter: CityFilter
   cityOptions: CityOption[]
+  stayBounds: [number, number] // [min, max] дней в городе — границы слайдеров из данных
   onChange: (patch: Partial<CityFilter>) => void
 }) {
+  const [stayMin, stayMax] = stayBounds
   const coverOn = filter.mustCover !== null
   const cover = filter.mustCover ?? ['', '']
 
@@ -64,15 +67,15 @@ export function CityFilterCard({
         <div className="dualrange">
           <input
             type="range"
-            min={1}
-            max={30}
+            min={stayMin}
+            max={stayMax}
             value={filter.minStay}
             onChange={(e) => onChange({ minStay: Math.min(Number(e.target.value), filter.maxStay) })}
           />
           <input
             type="range"
-            min={1}
-            max={30}
+            min={stayMin}
+            max={stayMax}
             value={filter.maxStay}
             onChange={(e) => onChange({ maxStay: Math.max(Number(e.target.value), filter.minStay) })}
           />
