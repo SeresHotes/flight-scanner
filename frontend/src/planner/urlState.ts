@@ -1,57 +1,49 @@
 // Состояние планировщика ↔ query-строка: маршрут (какие данные собираем) и
 // фильтры (как отбираем) кладём в URL, чтобы результат можно было шарить ссылкой
 // и восстанавливать из закладки. Аналог lib/urlParams.ts, но под цепочку остановок.
+//
+// Кодируем компактно и без спецсимволов: разделители '.' и '-' входят в
+// «безопасный» набор application/x-www-form-urlencoded, поэтому URLSearchParams
+// НЕ превращает их в %2E/%2D. По городам храним только IATA-код — названия и
+// флаги подтягиваются из /api/airports при загрузке (см. data/airports.resolveAirports).
 
 import type { AirportOption } from '../data/airports'
 import type { CityFilter, PlannerFilters, PlannerStop, StopKind, TransitionFilter } from './types'
 
-// Разделители. Ни один не встречается в IATA-кодах, названиях городов, метках
-// аэропортов и датах, поэтому разбор однозначен:
-const F = '~' //  поля внутри одной остановки/фильтра
-const A = '|' //  между городами-кандидатами одной остановки
-const AF = '^' // поля одного аэропорта
+const F = '.' // разделитель полей (не встречается в кодах, датах и числах)
+const L = '-' // разделитель списков: города-кандидаты, allowedCodes (в датах '-' — часть значения, но это отдельное поле)
+const ANY_CITIES = '*' // маркер allowedCodes === null (любые города)
 
 // --- Маршрут (stops) ---
 
-function encodeAirport(a: AirportOption): string {
-  // code ^ city ^ flag ^ label
-  return [a.code, a.city, a.flag ?? '', a.label].join(AF)
-}
-
-function decodeAirport(raw: string): AirportOption | null {
-  const [code, city, flag, label] = raw.split(AF)
-  if (!code) return null
-  return { code, city: city ?? '', flag: flag || undefined, label: label || `${city} (${code})` }
-}
-
+// kind . codes . winStart . winEnd   (codes — коды через '-'; окно у концов пустое)
 function encodeStop(s: PlannerStop): string {
-  // kind ~ winStart ~ winEnd ~ airport|airport|…
-  const airports = s.airports.map(encodeAirport).join(A)
-  return [s.kind, s.window[0] ?? '', s.window[1] ?? '', airports].join(F)
+  const kind = s.kind === 'any' ? 'any' : 'c'
+  const codes = s.airports.map((a) => a.code).join(L)
+  return [kind, codes, s.window[0] ?? '', s.window[1] ?? ''].join(F)
 }
 
+// Города восстанавливаем как «заготовки» (только код); имя/флаг дорезолвит страница.
 function decodeStop(raw: string, id: string): PlannerStop | null {
-  const parts = raw.split(F)
-  if (parts.length < 4) return null
-  const [kind, winA, winB, airportsRaw] = parts
+  const [kind, codesRaw, winA, winB] = raw.split(F)
+  if (!kind) return null
   const k: StopKind = kind === 'any' ? 'any' : 'cities'
-  const airports =
-    k === 'cities' && airportsRaw
-      ? airportsRaw.split(A).map(decodeAirport).filter((a): a is AirportOption => a !== null)
+  const airports: AirportOption[] =
+    k === 'cities' && codesRaw
+      ? codesRaw
+          .split(L)
+          .filter(Boolean)
+          .map((code) => ({ code, city: '', label: code }))
       : []
   return { id, kind: k, airports, window: [winA ?? '', winB ?? ''] }
 }
 
 // --- Фильтры ---
 
-// allowedCodes: null — любые города → маркер '*'; массив — коды через запятую
-// (пустой массив «никакие» кодируется пустой строкой).
-const ANY_CITIES = '*'
-
+// minStay . maxStay . coverStart . coverEnd . requireWeekend(1/0) . allowedCodes
 function encodeCity(c: CityFilter): string {
   const cover = c.mustCover ?? ['', '']
-  const allowed = c.allowedCodes === null ? ANY_CITIES : c.allowedCodes.join(',')
-  // minStay ~ maxStay ~ coverStart ~ coverEnd ~ requireWeekend(1/0) ~ allowedCodes
+  const allowed = c.allowedCodes === null ? ANY_CITIES : c.allowedCodes.join(L)
   return [c.minStay, c.maxStay, cover[0], cover[1], c.requireWeekend ? '1' : '0', allowed].join(F)
 }
 
@@ -60,13 +52,13 @@ function decodeCity(raw: string): CityFilter | null {
   if (parts.length < 5) return null
   const [minStay, maxStay, coverA, coverB, weekend, allowedRaw] = parts
   const mustCover: [string, string] | null = coverA && coverB ? [coverA, coverB] : null
-  // Старые ссылки (без 6-го поля) → allowedCodes null (любые города).
+  // Отсутствие поля / '*' → null (любые города); '' → пустой список; иначе коды через '-'.
   const allowedCodes =
     allowedRaw === undefined || allowedRaw === ANY_CITIES
       ? null
       : allowedRaw === ''
         ? []
-        : allowedRaw.split(',')
+        : allowedRaw.split(L)
   return {
     minStay: Number(minStay),
     maxStay: Number(maxStay),
@@ -110,9 +102,8 @@ export interface ParsedPlannerQuery {
 // значения по умолчанию. Фильтры возвращаем, только если они консистентны с
 // числом остановок (иначе применять их не к чему).
 export function parsePlannerQuery(sp: URLSearchParams, nextId: () => string): ParsedPlannerQuery {
-  const rawStops = sp.getAll('st')
   const stops: PlannerStop[] = []
-  for (const raw of rawStops) {
+  for (const raw of sp.getAll('st')) {
     const s = decodeStop(raw, nextId())
     if (s) stops.push(s)
   }
