@@ -3,7 +3,7 @@ import { plural } from '../../lib/format'
 import type { CityFilter, Itinerary, PlannerFilters, PlannerStop, TransitionFilter } from '../types'
 import { pointLabel } from '../validation'
 import { applyFilters, computeBounds } from '../filtering'
-import { CityFilterCard } from './CityFilterCard'
+import { CityFilterCard, type CityOption } from './CityFilterCard'
 import { TransitionFilterCard } from './TransitionFilterCard'
 import { TripLengthFilter } from './TripLengthFilter'
 import { ItineraryCard } from './ItineraryCard'
@@ -30,6 +30,20 @@ export function FiltersPanel({
   const bounds = useMemo(() => computeBounds(itineraries), [itineraries])
   const visible = useMemo(() => applyFilters(itineraries, filters), [itineraries, filters])
 
+  // Города, реально встретившиеся на каждой остановке — из них и выбираем в фильтре.
+  const cityOptionsByStop = useMemo<CityOption[][]>(
+    () =>
+      stops.map((_, i) => {
+        const seen = new Map<string, CityOption>()
+        for (const it of itineraries) {
+          const s = it.stops[i]
+          if (s && !seen.has(s.code)) seen.set(s.code, { code: s.code, city: s.city, flag: s.flag })
+        }
+        return Array.from(seen.values())
+      }),
+    [stops, itineraries],
+  )
+
   const patchCity = (i: number, patch: Partial<CityFilter>) => {
     const cities = filters.cities.map((c, idx) => (idx === i ? { ...c, ...patch } : c))
     onChange({ ...filters, cities })
@@ -47,6 +61,7 @@ export function FiltersPanel({
             <CityFilterCard
               title={`${pointLabel(i)} · ${cityName(s)}`}
               filter={filters.cities[i]}
+              cityOptions={cityOptionsByStop[i]}
               onChange={(patch) => patchCity(i, patch)}
             />
             {i < stops.length - 1 && (
