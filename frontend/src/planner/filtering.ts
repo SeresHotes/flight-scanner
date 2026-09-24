@@ -9,6 +9,7 @@ export function itineraryMatches(it: Itinerary, f: PlannerFilters): boolean {
     const cf = f.cities[i]
     if (!cf) continue
     const s = it.stops[i]
+    if (cf.allowedCodes && !cf.allowedCodes.includes(s.code)) return false
     if (s.days < cf.minStay || s.days > cf.maxStay) return false
     if (cf.mustCover && !coversWindow(s.arrive, s.depart, cf.mustCover)) return false
     if (cf.requireWeekend && !s.weekendCovered) return false
@@ -44,6 +45,7 @@ export function defaultFilters(itineraries: Itinerary[], stopCount: number): Pla
       maxStay: 30,
       mustCover: null,
       requireWeekend: false,
+      allowedCodes: null,
     })),
     transitions: Array.from({ length: transitionCount }, () => ({
       maxTransfers: -1,

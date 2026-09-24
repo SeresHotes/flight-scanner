@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { type AirportOption } from '../data/airports'
 import type { CollectState, Itinerary, PlannerFilters, PlannerStop } from '../planner/types'
-import { estimatePlan, runMockCollection } from '../planner/mock'
+import { estimatePlan } from '../planner/estimate'
+import { runCollection } from '../planner/api'
 import { validatePlan } from '../planner/validation'
 import { defaultFilters } from '../planner/filtering'
 import { buildPlannerQuery, parsePlannerQuery } from '../planner/urlState'
@@ -11,6 +12,8 @@ import { RouteSkeleton } from '../planner/components/RouteSkeleton'
 import { PlanEstimateBar } from '../planner/components/PlanEstimateBar'
 import { CollectProgress } from '../planner/components/CollectProgress'
 import { FiltersPanel } from '../planner/components/FiltersPanel'
+import { RecentSearches } from '../planner/components/RecentSearches'
+import { addRecent, loadRecent, removeRecent, type RecentSearch } from '../planner/recentSearches'
 
 let stopSeq = 0
 const nid = () => `s${stopSeq++}`
@@ -53,6 +56,7 @@ export function PlannerPage() {
   const [stops, setStops] = useState<PlannerStop[]>(() => initial.stops ?? initialStops())
   const [collect, setCollect] = useState<CollectState>({ status: 'idle' })
   const [filters, setFilters] = useState<PlannerFilters | null>(null)
+  const [recent, setRecent] = useState<RecentSearch[]>(() => loadRecent())
   const cancelRef = useRef<(() => void) | null>(null)
   // Фильтры из ссылки ждут своего сбора; правка маршрута их аннулирует.
   const pendingFilters = useRef<PlannerFilters | null>(initial.filters)
@@ -108,13 +112,29 @@ export function PlannerPage() {
     resetCollected()
   }
 
+  // Восстановить маршрут из истории: id остановок регенерим (они не переносятся).
+  function restoreRecent(saved: PlannerStop[]) {
+    cancelRef.current?.()
+    cancelRef.current = null
+    pendingFilters.current = null
+    setStops(saved.map((s) => ({ ...s, id: nid() })))
+    setCollect({ status: 'idle' })
+    setFilters(null)
+  }
+  function dropRecent(key: string) {
+    setRecent(removeRecent(key))
+  }
+
   // Собрать данные под текущий маршрут (первичная загрузка и «свежие данные» —
   // это одно и то же действие). Результат кэшируется с отметкой времени.
   function collectFresh() {
+    if (!validation.ok) return
     cancelRef.current?.()
     const prevFilters = filters // при пересборе сохраняем уже настроенные фильтры
+    // Валидный запрос уходит в сбор — фиксируем его в истории.
+    setRecent(addRecent(stops, Date.now()))
     setCollect({ status: 'collecting', progress: 0, total: estimate.requests })
-    cancelRef.current = runMockCollection(
+    cancelRef.current = runCollection(
       stops,
       (progress, total) => setCollect({ status: 'collecting', progress, total }),
       (itineraries: Itinerary[]) => {
@@ -130,6 +150,10 @@ export function PlannerPage() {
           (prevFilters && filtersFitStops(prevFilters, stops.length) && prevFilters) ||
           defaultFilters(itineraries, stops.length)
         setFilters(reuse)
+      },
+      (message: string) => {
+        cancelRef.current = null
+        setCollect({ status: 'error', message })
       },
     )
   }
@@ -185,6 +209,8 @@ export function PlannerPage() {
           </div>
         )}
       </div>
+
+      <RecentSearches items={recent} onRestore={restoreRecent} onRemove={dropRecent} />
 
       {collect.status === 'collecting' && (
         <CollectProgress progress={collect.progress} total={collect.total} />
