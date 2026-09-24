@@ -153,12 +153,27 @@ def _leg_series(stops: List[Stop], i: int):
     return [(None, city, dates, "origin", allow) for city in to_stop.codes]
 
 
+def _side_codes(flight: Dict[str, Any], side: str) -> set:
+    """Коды рейса на стороне side ∈ {'dest','origin'}: код ГОРОДА и код АЭРОПОРТА.
+
+    Travelpayouts отдаёт направления на уровне города (Сеул → SEL), а конкретный
+    аэропорт кладёт отдельным полем (destination_airport → ICN). Остановку
+    пользователь может задать любым из этих кодов, поэтому стыковку и фильтры
+    матчим по обоим — иначе финальная точка «ICN» не совпадёт ни с одним рейсом,
+    у которого destination='SEL', и цепочка не соберётся."""
+    if side == "dest":
+        city = flight.get("destination") or flight.get("search_destination")
+        airport = flight.get("destination_airport")
+    else:
+        city = flight.get("origin") or flight.get("search_origin")
+        airport = flight.get("origin_airport")
+    return {c.upper() for c in (city, airport) if c}
+
+
 def _keep(flight: Dict[str, Any], side: str, allow: Optional[set]) -> bool:
     if allow is None:
         return True
-    key = "destination" if side == "dest" else "origin"
-    code = (flight.get(key) or flight.get("search_" + ("destination" if side == "dest" else "origin")) or "").upper()
-    return code in allow
+    return bool(_side_codes(flight, side) & allow)
 
 
 def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None) -> Dict[int, List[Dict[str, Any]]]:
@@ -201,12 +216,12 @@ def _has_both_weekend_days(arrive_iso: str, depart_iso: str) -> bool:
 
 
 def _index_leg(flights: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    """Группирует рейсы плеча по городу вылета (для стыковки в цепочке)."""
+    """Группирует рейсы плеча по коду вылета — и городу, и аэропорту (остановка
+    может быть задана любым из них), чтобы стыковка находила рейс по любому коду."""
     by_origin: Dict[str, List[Dict[str, Any]]] = {}
     for f in flights:
-        origin = (f.get("origin") or f.get("search_origin") or "").upper()
-        if origin:
-            by_origin.setdefault(origin, []).append(f)
+        for code in _side_codes(f, "origin"):
+            by_origin.setdefault(code, []).append(f)
     return by_origin
 
 
@@ -276,7 +291,7 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
             dest = (f.get("destination") or f.get("search_destination") or "").upper()
             if not dest or dest == city or dest in visited:  # без петель/повторов
                 continue
-            if allow_next is not None and dest not in allow_next:
+            if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
                 continue
             candidates.append(f)
 
