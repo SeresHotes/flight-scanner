@@ -222,13 +222,26 @@ def plan_request_count(origin, destination, leg1_dates, leg2_dates, stop_days=(2
     return sum(len(dates) for *_, dates, _ in _leg_plan(origin, destination, leg1_dates, leg2_dates, stop_days))
 
 
+def _step_label(o, d, indirect) -> str:
+    label = f"{o or 'любой'} → {d or 'любой'}"
+    return label if indirect else f"{label}, прямые"
+
+
+def route_steps(origin, destination, leg1_dates, leg2_dates, stop_days=(2, 7)) -> List[Dict[str, Any]]:
+    """Шаги сбора маршрута в порядке collect_route: подпись + число запросов (для UI)."""
+    return [{"label": _step_label(o, d, indirect), "requests": len(dates)}
+            for _, _, o, d, dates, indirect in _leg_plan(origin, destination, leg1_dates, leg2_dates, stop_days)]
+
+
 def collect_route(origin: str, destination: str, leg1_dates, leg2_dates,
-                  stop_days=(2, 7), progress_cb=None, fetch_fn=None) -> Dict[str, Dict[str, Any]]:
+                  stop_days=(2, 7), progress_cb=None, fetch_fn=None,
+                  step_cb=None) -> Dict[str, Dict[str, Any]]:
     """Собирает datasets {plain, there, back} для маршрута под core.trip_builder.
 
     Каждый — формата коллектора {leg1_flights, leg2_flights}. progress_cb() вызывается
     после каждого запроса к API (для отслеживания прогресса). fetch_fn позволяет
     подменить обращение к API (например, кэширующей обёрткой из api.worker).
+    step_cb(i) — перед i-м шагом из route_steps (для показа этапа в UI).
     """
     require_token()
     result = {
@@ -236,7 +249,10 @@ def collect_route(origin: str, destination: str, leg1_dates, leg2_dates,
         "there": {"leg1_flights": [], "leg2_flights": []},
         "back": {"leg1_flights": [], "leg2_flights": []},
     }
-    for dataset, leg, o, d, dates, indirect in _leg_plan(origin, destination, leg1_dates, leg2_dates, stop_days):
+    plan = _leg_plan(origin, destination, leg1_dates, leg2_dates, stop_days)
+    for i, (dataset, leg, o, d, dates, indirect) in enumerate(plan):
+        if step_cb:
+            step_cb(i)
         flights = collect_leg_data(o, d, dates, leg, allow_indirect=indirect,
                                    progress_cb=progress_cb, fetch_fn=fetch_fn)
         result[dataset][leg] = flights

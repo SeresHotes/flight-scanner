@@ -189,14 +189,18 @@ def _keep(flight: Dict[str, Any], side: str, allow: Optional[set]) -> bool:
 
 
 def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
-                 fetch_fn=None) -> Dict[int, List[Dict[str, Any]]]:
+                 fetch_fn=None,
+                 leg_cb: Callable[[int], None] = None) -> Dict[int, List[Dict[str, Any]]]:
     """Реально ходит в Travelpayouts: собирает рейсы по каждому переходу.
 
     Возвращает {индекс_перехода: [сырые рейсы]}. allow_indirect=True — чтобы фильтр
-    по числу пересадок на фронте имел смысл. progress_cb() — после каждого запроса.
+    по числу пересадок на фронте имел смысл. progress_cb() — после каждого запроса,
+    leg_cb(i) — перед началом перехода i (для показа этапа в UI).
     fetch_fn позволяет подменить обращение к API (кэширующая обёртка из api.worker)."""
     collected: Dict[int, List[Dict[str, Any]]] = {}
     for i in range(len(stops) - 1):
+        if leg_cb:
+            leg_cb(i)
         leg_flights: List[Dict[str, Any]] = []
         for origin, dest, dates, side, allow in _leg_series(stops, i):
             flights = collect_leg_data(

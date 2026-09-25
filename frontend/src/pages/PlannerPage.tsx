@@ -168,7 +168,7 @@ export function PlannerPage() {
     cancelRef.current = runCollection(
       stops,
       bounds,
-      (progress, total) => setCollect({ status: 'collecting', progress, total }),
+      (progress, total, stage) => setCollect({ status: 'collecting', progress, total, stage }),
       (itineraries: Itinerary[]) => {
         cancelRef.current = null
         const collectedAt = new Date().toISOString()
@@ -280,7 +280,7 @@ export function PlannerPage() {
       <RecentSearches items={recent} onRestore={restoreRecent} onRemove={dropRecent} />
 
       {collect.status === 'collecting' && (
-        <CollectProgress progress={collect.progress} total={collect.total} />
+        <CollectProgress progress={collect.progress} total={collect.total} stage={collect.stage} />
       )}
 
       {collect.status === 'error' && (
