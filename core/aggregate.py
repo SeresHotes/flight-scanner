@@ -164,7 +164,12 @@ def parse_datetime(date_str: str) -> datetime:
                 date_clean = '-'.join(date_clean[:3])
             else:
                 date_clean = date_str.split('+')[0]
-            return datetime.strptime(date_clean, fmt)
+            dt = datetime.strptime(date_clean, fmt)
+            # Всегда возвращаем naive: строковая срезка выше не убирает суффикс
+            # 'Z' (UTC), и тогда %z даёт tz-aware datetime — при сравнении с naive
+            # (напр. якорь даты цепочки) Python бросает "can't compare offset-naive
+            # and offset-aware datetimes". Отбрасываем tz, чтобы все даты были naive.
+            return dt.replace(tzinfo=None)
         except (ValueError, IndexError):
             continue
     raise ValueError(f"Не удалось распарсить дату: {date_str}")
