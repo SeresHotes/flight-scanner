@@ -31,37 +31,61 @@ export function applyFilters(itineraries: Itinerary[], f: PlannerFilters): Itine
   return itineraries.filter((it) => itineraryMatches(it, f))
 }
 
-// Диапазон дней пребывания в городе по всем остановкам всех цепочек — чтобы
-// дефолт «дней в городе» никого не резал, а слайдер покрывал реальные значения.
-function stayRange(itineraries: Itinerary[]): [number, number] {
-  const stayDays = itineraries.flatMap((it) => it.stops.map((s) => s.days))
-  const min = stayDays.length ? Math.min(...stayDays) : 1
-  const max = stayDays.length ? Math.max(30, ...stayDays) : 30
-  return [min, max]
+// Границы набора одним проходом. Важно: НЕ используем Math.max(...arr) со spread —
+// маршрутов могут быть десятки тысяч (кэпы сборки сняты), а spread такого массива
+// в Math.max/min вешает вкладку / бросает "Maximum call stack size exceeded".
+interface SetBounds {
+  maxTravel: number // максимум суммарной длительности перелёта сегмента
+  tripMin: number
+  tripMax: number
+  stayMin: number // мин дней в городе по всем остановкам
+  stayMax: number // макс дней в городе (не ниже 30 — чтобы слайдер имел запас)
+}
+
+function setBounds(itineraries: Itinerary[]): SetBounds {
+  let maxTravel = 60
+  let tripMin = Infinity
+  let tripMax = -Infinity
+  let stayMin = Infinity
+  let stayMax = 30
+  for (const it of itineraries) {
+    for (const s of it.segments) {
+      const d = s.duration || 0
+      if (d > maxTravel) maxTravel = d
+    }
+    if (it.total_days < tripMin) tripMin = it.total_days
+    if (it.total_days > tripMax) tripMax = it.total_days
+    for (const s of it.stops) {
+      if (s.days < stayMin) stayMin = s.days
+      if (s.days > stayMax) stayMax = s.days
+    }
+  }
+  if (!itineraries.length) {
+    tripMin = 1
+    tripMax = 60
+    stayMin = 1
+  }
+  return { maxTravel, tripMin, tripMax, stayMin, stayMax }
 }
 
 // Дефолтные (максимально широкие) фильтры под собранный набор цепочек.
 export function defaultFilters(itineraries: Itinerary[], stopCount: number): PlannerFilters {
   const transitionCount = Math.max(0, stopCount - 1)
-  const maxTravel = Math.max(60, ...itineraries.map((it) => Math.max(0, ...it.segments.map((s) => s.duration || 0))))
-  const days = itineraries.map((it) => it.total_days)
-  const tripMin = days.length ? Math.min(...days) : 1
-  const tripMax = days.length ? Math.max(...days) : 60
-  const [stayMin, stayMax] = stayRange(itineraries)
+  const b = setBounds(itineraries)
 
   return {
     cities: Array.from({ length: stopCount }, () => ({
-      minStay: stayMin,
-      maxStay: stayMax,
+      minStay: b.stayMin,
+      maxStay: b.stayMax,
       mustCover: null,
       requireWeekend: false,
       allowedCodes: null,
     })),
     transitions: Array.from({ length: transitionCount }, () => ({
       maxTransfers: -1,
-      maxTravelMinutes: maxTravel,
+      maxTravelMinutes: b.maxTravel,
     })),
-    tripLength: [tripMin, tripMax],
+    tripLength: [b.tripMin, b.tripMax],
   }
 }
 
@@ -73,9 +97,6 @@ export interface FilterBounds {
 }
 
 export function computeBounds(itineraries: Itinerary[]): FilterBounds {
-  const maxTravel = Math.max(60, ...itineraries.map((it) => Math.max(0, ...it.segments.map((s) => s.duration || 0))))
-  const days = itineraries.map((it) => it.total_days)
-  const tripMin = days.length ? Math.min(...days) : 1
-  const tripMax = days.length ? Math.max(...days) : 60
-  return { maxTravelMinutes: maxTravel, tripLength: [tripMin, tripMax], stayDays: stayRange(itineraries) }
+  const b = setBounds(itineraries)
+  return { maxTravelMinutes: b.maxTravel, tripLength: [b.tripMin, b.tripMax], stayDays: [b.stayMin, b.stayMax] }
 }
