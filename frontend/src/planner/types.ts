@@ -22,6 +22,14 @@ export interface PlannerRequest {
   stops: PlannerStop[]
 }
 
+// Движковые границы стыковки цепочек — уходят на бэк в /api/plan/gather и режут
+// перебор там (а не только показ). maxResults — сколько самых дешёвых цепочек
+// вернуть; maxCost — верхняя граница суммарной цены (null — без ограничения).
+export interface PlannerBounds {
+  maxResults: number
+  maxCost: number | null
+}
+
 // Оценка объёма сбора: одно «плечо» на каждый переход между остановками.
 // Плечо с wildcard-концом собирается как «все направления» (тоже 1 запрос/дата).
 export interface EstimateLeg {
