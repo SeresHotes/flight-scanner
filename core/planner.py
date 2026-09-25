@@ -16,6 +16,7 @@
 - collect_plan(stops, cb)   -> {leg_index: [сырые рейсы]}   (реальные запросы к API)
 - build_itineraries(stops, collected) -> [Itinerary]        (чистая сборка)
 """
+import heapq
 from typing import Any, Callable, Dict, List, Optional
 
 from core import aggregate as agg
@@ -233,14 +234,6 @@ def _price_of(f: Dict[str, Any]) -> float:
     return p if p is not None else f.get("value", 0)
 
 
-def _onward_sorted(flights: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Все онвард-рейсы по возрастанию цены — раскрываем каждый (без beam-обрезки).
-
-    Порядок по цене нужен, чтобы при упоре в защитный потолок первыми набирались
-    дешёвые цепочки, а отсекались дорогие."""
-    return sorted(flights, key=_price_of)
-
-
 def _allowed(stop: Stop) -> Optional[set]:
     """Множество разрешённых городов остановки; None = «любой»."""
     return set(stop.codes) if stop.kind == "cities" else None
@@ -287,16 +280,41 @@ def _completion_lb(stops: List[Stop],
     return lb
 
 
+def _onward_candidates(stops: List[Stop],
+                       legs_by_origin: Dict[int, Dict[str, List[Dict[str, Any]]]],
+                       i: int, city: str, arrive_iso: str, visited: set
+                       ) -> List[Any]:
+    """Валидные онворд-рейсы из `city` на плече i: вылет не раньше прилёта, посадка в
+    разрешённом для следующей остановки городе, без петель/повторов. Возвращает пары
+    (рейс, город_прилёта)."""
+    arrive_day = date_only(arrive_iso)
+    allow_next = _allowed(stops[i + 1])
+    out = []
+    for f in legs_by_origin[i].get(city, []):
+        dep = f.get("departure_at")
+        if not dep or date_only(dep) < arrive_day:  # нельзя вылететь раньше прилёта
+            continue
+        dest = (f.get("destination") or f.get("search_destination") or "").upper()
+        if not dest or dest == city or dest in visited:  # без петель/повторов
+            continue
+        if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
+            continue
+        out.append((f, dest))
+    return out
+
+
 def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]],
                       city_info=None, max_results: Optional[int] = None,
                       max_cost: Optional[float] = None) -> List[Dict[str, Any]]:
     """Собирает цепочки из собранных плеч. Чистая функция (без I/O).
 
-    max_cost — верхняя граница суммарной цены цепочки: движок режет ветку сразу, как
-    только накопленная цена + admissible-оценка минимального «хвоста» (_completion_lb)
-    выходит за бюджет, не разворачивая бесперспективные направления. max_results —
-    сколько самых дешёвых цепочек вернуть (обрезка отсортированного результата). None
-    у обоих — прежний режим «все цепочки без потолка»."""
+    max_results — движковый потолок: сколько САМЫХ ДЕШЁВЫХ цепочек вернуть. Это НЕ
+    обрезка готового списка, а граница самого перебора — best-first (A*) извлекает
+    цепочки по возрастанию цены и ОСТАНАВЛИВАЕТСЯ, набрав N (иначе на плотном графе
+    с несколькими «any»-остановками цепочек экспоненциально много и воркер виснет).
+    max_cost — верхняя граница суммарной цены: ветка режется по admissible-оценке
+    минимального «хвоста» (_completion_lb), не разворачивая бесперспективные
+    направления. max_results=None — прежний режим «все цепочки без потолка»."""
     if city_info is None:
         city_info = make_city_lookup(agg.load_airport_network())
     builder = Builder(None, city_info)  # make_segment использует только city_info
@@ -304,54 +322,90 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
     legs_by_origin = {i: _index_leg(collected.get(i, [])) for i in range(len(stops) - 1)}
     chain_start = _leg_dates(stops, 0)[0]  # первая дата окна нулевого плеча
     last = len(stops) - 1
-    # Нижняя оценка «хвоста» нужна только при заданном бюджете — считаем лениво.
-    lb = _completion_lb(stops, legs_by_origin) if max_cost is not None else None
+    ctx = (stops, legs_by_origin, builder, city_info, chain_start, last)
 
+    if max_results is None:
+        return _enumerate_all(ctx, max_cost)
+    return _search_cheapest(ctx, max_results, max_cost)
+
+
+def _enumerate_all(ctx, max_cost: Optional[float]) -> List[Dict[str, Any]]:
+    """Полный перебор всех цепочек (без потолка числа), сортировка по цене.
+
+    Тяжёлый режим для отладки: на плотном графе может строить огромный список — им
+    пользуются, только когда max_results не задан. max_cost, если задан, режет ветки
+    по нижней оценке «хвоста»."""
+    stops, legs_by_origin, builder, city_info, chain_start, last = ctx
+    lb = _completion_lb(stops, legs_by_origin) if max_cost is not None else None
     results: List[Dict[str, Any]] = []
     seq = {"id": 1}
 
-    def dfs(i: int, city: str, arrive_iso: str, chosen: List[Dict[str, Any]],
-            visited: set, g: float):
-        if i == last:  # дошли до финальной остановки — цепочка готова
+    def dfs(i, city, arrive_iso, chosen, visited, g):
+        if i == last:
             results.append(_assemble(stops, chosen, builder, city_info, chain_start, seq["id"]))
             seq["id"] += 1
             return
-
-        arrive_day = date_only(arrive_iso)
-        allow_next = _allowed(stops[i + 1])
-        candidates = []
-        for f in legs_by_origin[i].get(city, []):
-            dep = f.get("departure_at")
-            if not dep or date_only(dep) < arrive_day:  # нельзя вылететь раньше прилёта
-                continue
-            dest = (f.get("destination") or f.get("search_destination") or "").upper()
-            if not dest or dest == city or dest in visited:  # без петель/повторов
-                continue
-            if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
-                continue
-            candidates.append(f)
-
-        for f in _onward_sorted(candidates):
-            dest = (f.get("destination") or f.get("search_destination")).upper()
+        candidates = _onward_candidates(stops, legs_by_origin, i, city, arrive_iso, visited)
+        for f, dest in sorted(candidates, key=lambda p: _price_of(p[0])):
             g2 = g + _price_of(f)
             if lb is not None:
-                # Минимально возможная цена «хвоста» от dest до конца (только цены).
                 tail = 0.0 if i + 1 == last else lb[i + 1].get(dest)
                 if tail is None or g2 + tail > max_cost:
-                    continue  # даже самый дешёвый хвост выбьет за бюджет — режем ветку
+                    continue
             dfs(i + 1, dest, arrival_of(f), chosen + [f], visited | {dest}, g2)
 
-    for start in stops[0].codes:  # старт — из каждого города-кандидата первой остановки
+    for start in stops[0].codes:
         if lb is not None:
             tail = lb[0].get(start)
             if tail is None or tail > max_cost:
-                continue  # из этого старта дешевле бюджета не собрать ни одной цепочки
+                continue
         dfs(0, start, f"{chain_start}T00:00:00", [], {start}, 0.0)
 
     results.sort(key=lambda it: it["total_price"])
-    if max_results is not None:
-        results = results[:max_results]
     return results
+
+
+def _search_cheapest(ctx, max_results: int, max_cost: Optional[float]) -> List[Dict[str, Any]]:
+    """best-first (A*): извлекает цепочки по возрастанию цены и останавливается на N.
+
+    Эвристика h = _completion_lb (минимальная цена «хвоста») — admissible и
+    consistent (по построению lb[i][city] ≤ price(ребро) + lb[i+1][dest]), поэтому
+    приоритет f = g + h выдаёт готовые цепочки строго по возрастанию суммарной цены:
+    первые N извлечённых = N самых дешёвых. Перебор ограничен фронтиром до N-й цены
+    (+ отсечение по max_cost), а не всем деревом — в этом и суть потолка."""
+    stops, legs_by_origin, builder, city_info, chain_start, last = ctx
+    lb = _completion_lb(stops, legs_by_origin)
+
+    def tail_lb(i, city):
+        return 0.0 if i == last else lb[i].get(city)  # None → из city конца не достичь
+
+    heap: List[Any] = []
+    seq = 0  # tie-breaker: не даём heapq сравнивать полезную нагрузку
+
+    def push(i, city, arrive_iso, chosen, visited, g):
+        nonlocal seq
+        tail = tail_lb(i, city)
+        if tail is None:  # тупик — до конца не добраться
+            return
+        f = g + tail
+        if max_cost is not None and f > max_cost:  # даже минимальный исход вне бюджета
+            return
+        heapq.heappush(heap, (f, seq, i, city, arrive_iso, chosen, visited, g))
+        seq += 1
+
+    for start in stops[0].codes:
+        push(0, start, f"{chain_start}T00:00:00", [], {start}, 0.0)
+
+    results: List[Dict[str, Any]] = []
+    while heap and len(results) < max_results:
+        _, _, i, city, arrive_iso, chosen, visited, g = heapq.heappop(heap)
+        if i == last:  # цепочка готова — и она среди самых дешёвых из оставшихся
+            results.append(_assemble(stops, chosen, builder, city_info, chain_start, len(results) + 1))
+            continue
+        for f, dest in _onward_candidates(stops, legs_by_origin, i, city, arrive_iso, visited):
+            push(i + 1, dest, arrival_of(f), chosen + [f], visited | {dest}, g + _price_of(f))
+
+    return results  # уже по возрастанию цены (f=g в готовой цепочке, h консистентна)
 
 
 def _assemble(stops: List[Stop], chosen: List[Dict[str, Any]], builder: "Builder",
