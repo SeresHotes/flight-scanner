@@ -1,10 +1,12 @@
 // Реальный сбор цепочки через бэк: POST /api/plan/gather заводит джобу, затем
-// поллим GET /api/plan/jobs/{id} до готовности и отдаём собранные Itinerary.
+// поллим GET /api/plan/jobs/{id} до готовности и отдаём компактный результат
+// (см. compact.ts — цепочек бывает до миллиона).
 // Сигнатура повторяет прежний runMockCollection — императивный запуск с функцией
 // отмены (на случай размонтирования / правки маршрута).
 
 import type { JobStage, JobStatus } from '../data/jobsApi'
-import type { Itinerary, PlanGraph, PlannerBounds, PlannerStop } from './types'
+import type { PlannerBounds, PlannerStop } from './types'
+import { isCompactResult, type CompactResult } from './compact'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 const POLL_MS = 1000
@@ -17,8 +19,7 @@ interface GatherResponse {
 }
 
 interface PlanJob extends JobStatus {
-  itineraries?: Itinerary[]
-  graph?: PlanGraph | null // граф рёбер для режима «наборы городов»
+  result?: CompactResult // цепочки + граф рёбер для режима «наборы городов» (result.graph)
 }
 
 // Бэку нужны только коды городов (kind/window). Имена/флаги он подставит из справочника.
@@ -30,7 +31,7 @@ export function runCollection(
   stops: PlannerStop[],
   bounds: PlannerBounds,
   onProgress: (progress: number, total: number, stage?: JobStage | null) => void,
-  onDone: (itineraries: Itinerary[], graph: PlanGraph | null) => void,
+  onDone: (result: CompactResult) => void,
   onError: (message: string) => void,
 ): () => void {
   let cancelled = false
@@ -45,8 +46,12 @@ export function runCollection(
       if (cancelled) return
 
       if (job.status === 'done') {
+        if (!isCompactResult(job.result)) {
+          onError('Результат в устаревшем формате — соберите маршрут заново.')
+          return
+        }
         onProgress(job.total, job.total)
-        onDone(job.itineraries ?? [], job.graph ?? null)
+        onDone(job.result)
         return
       }
       if (job.status === 'error' || job.status === 'not_found') {

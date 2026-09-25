@@ -30,7 +30,7 @@ def _fake_fetch(origin=None, destination=None, departure_at=None, **_):
     return {"data": [_flight("IST", "DST", f"{day}T20:00:00", 100)]}
 
 
-def _run(tmp_path, monkeypatch, max_results=None):
+def _run(tmp_path, monkeypatch, max_results=10):
     db = str(tmp_path / "jobs.db")
     conn = hot.connect(db)
     hot.init_db(conn)
@@ -135,13 +135,13 @@ def test_plan_quotes_failure_keeps_job_done(tmp_path, monkeypatch):
     conn, _ = _run(tmp_path, monkeypatch)
     job = hot.get_job(conn, "j1")
     assert job["status"] == "done", job["error"]
-    assert json.loads(job["result_json"])["itineraries"]
+    assert json.loads(job["result_json"])["count"] > 0
 
 
 def test_cache_hits_are_counted(tmp_path, monkeypatch):
     conn, _ = _run(tmp_path, monkeypatch)  # первый прогон наполняет fetch_cache
     hot.create_job(conn, "j2", {"kind": "plan"}, total=6, stage=worker.initial_stage("plan"))
-    worker.run_plan_collection(str(tmp_path / "jobs.db"), "j2", STOPS)
+    worker.run_plan_collection(str(tmp_path / "jobs.db"), "j2", STOPS, max_results=10)
     stage = json.loads(hot.get_job(conn, "j2")["stage_json"])
     assert stage["cached"] == 6
 

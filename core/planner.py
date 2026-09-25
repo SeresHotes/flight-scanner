@@ -15,8 +15,14 @@
 - estimate_plan(stops)      -> {requests, seconds, legs:[{fromLabel,toLabel,days,requests,anyLeg}]}
 - collect_plan(stops, cb)   -> {leg_index: [сырые рейсы]}   (реальные запросы к API)
 - build_itineraries(stops, collected) -> [Itinerary]        (чистая сборка)
+- build_itineraries_compact(stops, collected, max_results) -> компактный результат
+  (таблица уникальных сегментов + плоские массивы индексов; см. _pack_compact)
 """
 import heapq
+import io
+import json
+from array import array
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional
 
 from core import aggregate as agg
@@ -25,6 +31,7 @@ from core.trip_builder import Builder, arrival_of, date_only, make_city_lookup, 
 
 SECONDS_PER_REQUEST = 0.65  # совпадает с planner/estimate.ts
 MAX_REQUESTS = 200          # предохранитель от слишком широких окон
+MAX_RESULTS = 1_000_000     # потолок max_results: компактный перебор держит его в памяти VM (4 ГБ)
 DEFAULT_START = "2026-11-01"  # якорь старта, если окон нет нигде (совпадает с mock)
 DEFAULT_LEG_DAYS = 7          # ширина окна плеча, если оба конца без окна
 FINAL_STAY_DAYS = 5           # пребывание в финальном городе (у конца окна нет)
@@ -37,7 +44,7 @@ def is_valid_max_results(n: Optional[int]) -> bool:
     приходит от устаревшего закешированного фронта или прямого вызова API — такие
     запросы отклоняем (не зажимаем потолком), чтобы движок физически не уходил в
     безлимит."""
-    return n is not None and n >= 1
+    return n is not None and 1 <= n <= MAX_RESULTS
 
 # Тестовый режим: собираем ВСЕ цепочки из имеющихся данных без потолка
 # (кэпы beam/per-city/per-sequence тоже сняты). Онворды раскрываются по
@@ -346,19 +353,45 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
     воркер останавливает зависшую стыковку — поток Python снаружи не убить).
     on_progress(found, explored) — тоже на каждом шаге: сколько цепочек уже готово
     и сколько вариантов перебрано (для прогресса в UI; частоту записи режет вызывающий)."""
-    if city_info is None:
-        city_info = make_city_lookup(agg.load_airport_network())
-    builder = Builder(None, city_info)  # make_segment использует только city_info
-
-    legs_by_origin = {i: _index_leg(collected.get(i, [])) for i in range(len(stops) - 1)}
-    chain_start = _leg_dates(stops, 0)[0]  # первая дата окна нулевого плеча
-    last = len(stops) - 1
-    ctx = (stops, legs_by_origin, builder, city_info, chain_start, last)
+    ctx = _build_ctx(stops, collected, city_info)
     check = _step_check(should_stop, on_progress)
 
     if max_results is None:
         return _enumerate_all(ctx, max_cost, check)
-    return _search_cheapest(ctx, max_results, max_cost, check)
+    table = _FlightTable(ctx[1])
+    stops, _, builder, city_info, chain_start, _ = ctx
+    chains = _search_cheapest(ctx, table, max_results, max_cost, check)
+    return [_assemble(stops, [table.flights[fi] for fi in chain], builder, city_info, chain_start, n + 1)
+            for n, chain in enumerate(chains)]
+
+
+def build_itineraries_compact(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]],
+                              max_results: int, city_info=None,
+                              max_cost: Optional[float] = None,
+                              should_stop: Optional[Callable[[], bool]] = None,
+                              on_progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+    """То же, что build_itineraries с потолком, но результат компактный (_pack_compact).
+
+    Рассчитан на сотни тысяч – миллион цепочек на VM с 4 ГБ: цепочка в памяти — это
+    несколько int-индексов рейсов в плоском array, а не словарь с копиями сегментов
+    (100k словарей Itinerary + их JSON стоили гигабайты и роняли api по OOM)."""
+    ctx = _build_ctx(stops, collected, city_info)
+    check = _step_check(should_stop, on_progress)
+    table = _FlightTable(ctx[1])
+    chains = array("i")
+    for chain in _search_cheapest(ctx, table, max_results, max_cost, check):
+        chains.extend(chain)
+    return _pack_compact(ctx, table, chains, len(stops) - 1)
+
+
+def _build_ctx(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]], city_info):
+    if city_info is None:
+        city_info = make_city_lookup(agg.load_airport_network())
+    builder = Builder(None, city_info)  # make_segment использует только city_info
+    legs_by_origin = {i: _index_leg(collected.get(i, [])) for i in range(len(stops) - 1)}
+    chain_start = _leg_dates(stops, 0)[0]  # первая дата окна нулевого плеча
+    last = len(stops) - 1
+    return (stops, legs_by_origin, builder, city_info, chain_start, last)
 
 
 def _step_check(should_stop: Optional[Callable[[], bool]],
@@ -415,49 +448,224 @@ def _enumerate_all(ctx, max_cost: Optional[float],
     return results
 
 
-def _search_cheapest(ctx, max_results: int, max_cost: Optional[float],
-                     check: Callable[[int], None]) -> List[Dict[str, Any]]:
-    """best-first (A*): извлекает цепочки по возрастанию цены и останавливается на N.
+class _FlightTable:
+    """Уникальные рейсы всех плеч с предрасчитанными полями стыковки. Перебор
+    оперирует int-индексами в этой таблице, а не словарями рейсов."""
+
+    def __init__(self, legs_by_origin: Dict[int, Dict[str, List[Dict[str, Any]]]]):
+        self.flights: List[Dict[str, Any]] = []
+        self.index: Dict[int, int] = {}  # id(рейс) → индекс (рейс лежит под кодом города И аэропорта)
+        for by_origin in legs_by_origin.values():
+            for flights in by_origin.values():
+                for f in flights:
+                    if id(f) not in self.index:
+                        self.index[id(f)] = len(self.flights)
+                        self.flights.append(f)
+        self.dest = [(f.get("destination") or f.get("search_destination") or "").upper()
+                     for f in self.flights]
+        self.price = [_price_of(f) for f in self.flights]
+        self.dep_day = [date_only(f["departure_at"]) if f.get("departure_at") else None
+                        for f in self.flights]
+        self.arr_day = [date_only(arrival_of(f)) if f.get("departure_at") else None
+                        for f in self.flights]
+
+
+def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optional[float],
+                     check: Callable[[int], None]):
+    """best-first (A*): выдаёт цепочки (кортежи индексов рейсов в table) по
+    возрастанию цены и останавливается на N.
 
     Эвристика h = _completion_lb (минимальная цена «хвоста») — admissible и
     consistent (по построению lb[i][city] ≤ price(ребро) + lb[i+1][dest]), поэтому
     приоритет f = g + h выдаёт готовые цепочки строго по возрастанию суммарной цены:
-    первые N извлечённых = N самых дешёвых. Перебор ограничен фронтиром до N-й цены
-    (+ отсечение по max_cost), а не всем деревом — в этом и суть потолка."""
-    stops, legs_by_origin, builder, city_info, chain_start, last = ctx
+    первые N извлечённых = N самых дешёвых.
+
+    Главное ограничение — память (прод-VM 4 ГБ, N до миллиона), поэтому раскрытие
+    ленивое: онворды города на плече i заранее отсортированы по price + h (список
+    общий для всех узлов — _Candidates), и в куче лежит только ЛУЧШИЙ ещё не
+    выданный ребёнок узла; следующего брата кладём, когда достают текущего. Куча
+    растёт на ≤2 записи за шаг, а не на всех детей сразу. Узел — кортеж, путь —
+    связный список (родитель, рейс) без копирования."""
+    stops, legs_by_origin, _, _, chain_start, last = ctx
     lb = _completion_lb(stops, legs_by_origin)
-
-    def tail_lb(i, city):
-        return 0.0 if i == last else lb[i].get(city)  # None → из city конца не достичь
-
+    cands = _Candidates(stops, legs_by_origin, table, lb)
     heap: List[Any] = []
-    seq = 0  # tie-breaker: не даём heapq сравнивать полезную нагрузку
+    seq = 0  # tie-breaker: не даём heapq сравнивать узлы
 
-    def push(i, city, arrive_iso, chosen, visited, g):
+    def push_next(node, start: int) -> None:
+        """Кладёт в кучу первого валидного ребёнка узла, начиная с позиции start."""
         nonlocal seq
-        tail = tail_lb(i, city)
-        if tail is None:  # тупик — до конца не добраться
+        i, city, arrive_day, visited, g, _ = node
+        keys, idxs = cands.get(i, city)
+        any_next = stops[i + 1].kind == "any"
+        for k in range(start, len(idxs)):
+            f = g + keys[k]
+            if max_cost is not None and f > max_cost:  # список отсортирован — дальше дороже
+                return
+            fi = idxs[k]
+            if table.dep_day[fi] < arrive_day:  # нельзя вылететь раньше прилёта
+                continue
+            if any_next and table.dest[fi] in visited:  # «любой» — не в уже посещённый
+                continue
+            heapq.heappush(heap, (f, seq, node, k))
+            seq += 1
             return
-        f = g + tail
-        if max_cost is not None and f > max_cost:  # даже минимальный исход вне бюджета
-            return
-        heapq.heappush(heap, (f, seq, i, city, arrive_iso, chosen, visited, g))
-        seq += 1
 
+    start_day = chain_start  # прилёт в первый город — начало окна (T00:00)
     for start in stops[0].codes:
-        push(0, start, f"{chain_start}T00:00:00", [], {start}, 0.0)
-
-    results: List[Dict[str, Any]] = []
-    while heap and len(results) < max_results:
-        check(len(results))
-        _, _, i, city, arrive_iso, chosen, visited, g = heapq.heappop(heap)
-        if i == last:  # цепочка готова — и она среди самых дешёвых из оставшихся
-            results.append(_assemble(stops, chosen, builder, city_info, chain_start, len(results) + 1))
+        tail = lb[0].get(start)
+        if tail is None or (max_cost is not None and tail > max_cost):
             continue
-        for f, dest in _onward_candidates(stops, legs_by_origin, i, city, arrive_iso, visited):
-            push(i + 1, dest, arrival_of(f), chosen + [f], visited | {dest}, g + _price_of(f))
+        push_next((0, start, start_day, (start,), 0.0, None), 0)
 
-    return results  # уже по возрастанию цены (f=g в готовой цепочке, h консистентна)
+    found = 0
+    while heap and found < max_results:
+        check(found)
+        _, _, node, k = heapq.heappop(heap)
+        push_next(node, k + 1)  # брат занимает место извлечённого
+        i, city, _, visited, g, path = node
+        fi = cands.get(i, city)[1][k]
+        if i + 1 == last:  # цепочка готова — и она среди самых дешёвых из оставшихся
+            found += 1
+            yield _unwind((path, fi))
+            continue
+        dest = table.dest[fi]
+        push_next((i + 1, dest, table.arr_day[fi], visited + (dest,), g + table.price[fi], (path, fi)), 0)
+
+
+class _Candidates:
+    """Онворд-рейсы (плечо i, город), отсортированные по price + lb хвоста за
+    городом прилёта. Не зависят от времени прилёта и посещённых — поэтому один
+    список на (i, город) делят все узлы. Тупики (хвоста нет), петли и прилёт вне
+    разрешённых городов выкинуты сразу; дату и повторы проверяет push_next."""
+
+    def __init__(self, stops, legs_by_origin, table: _FlightTable, lb):
+        self.stops, self.legs_by_origin, self.table, self.lb = stops, legs_by_origin, table, lb
+        self.last = len(stops) - 1
+        self.cache: Dict[Any, Any] = {}
+
+    def get(self, i: int, city: str):
+        got = self.cache.get((i, city))
+        if got is None:
+            got = self.cache[(i, city)] = self._build(i, city)
+        return got
+
+    def _build(self, i: int, city: str):
+        allow_next = _allowed(self.stops[i + 1])
+        terminal = i + 1 == self.last
+        pairs = []
+        for f in self.legs_by_origin[i].get(city, []):
+            fi = self.table.index[id(f)]
+            dest = self.table.dest[fi]
+            if not dest or dest == city or self.table.dep_day[fi] is None:
+                continue
+            if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
+                continue
+            tail = 0.0 if terminal else self.lb[i + 1].get(dest)
+            if tail is None:
+                continue
+            pairs.append((self.table.price[fi] + tail, fi))
+        pairs.sort()
+        return array("d", (p[0] for p in pairs)), array("i", (p[1] for p in pairs))
+
+
+def _unwind(path) -> tuple:
+    """Связный список (родитель, рейс) → кортеж индексов рейсов от первого плеча."""
+    out = []
+    while path is not None:
+        path, fi = path
+        out.append(fi)
+    return tuple(reversed(out))
+
+
+@lru_cache(maxsize=1 << 18)
+def _stay(arrive_iso: str, depart_iso: str):
+    """(дней между, покрыты ли оба выходных) — мемо: пары дат сильно повторяются."""
+    return stay_between(arrive_iso, depart_iso), _has_both_weekend_days(arrive_iso, depart_iso)
+
+
+def _pack_compact(ctx, table: _FlightTable, chains: array, legs: int) -> Dict[str, Any]:
+    """Компактный результат (контракт — frontend/src/planner/compact.ts).
+
+    segments — уникальные сегменты (make_segment), каждый один раз; chains — плоский
+    массив, по legs индексов сегментов на цепочку (цепочки по возрастанию цены);
+    days — по legs+1 дней в городах; weekend — битовая маска «оба выходных» по
+    остановкам; total_days — длина поездки. Коды, даты и суммы фронт выводит сам."""
+    stops, _, builder, city_info, chain_start, _ = ctx
+    seg_of: Dict[int, int] = {}
+    segments: List[Dict[str, Any]] = []
+    out_chains = array("i")
+    for fi in chains:
+        si = seg_of.get(fi)
+        if si is None:
+            si = seg_of[fi] = len(segments)
+            segments.append(builder.make_segment(table.flights[fi]))
+        out_chains.append(si)
+
+    start_iso = f"{chain_start}T00:00:00"
+    count = len(out_chains) // legs if legs else 0
+    days, weekend, total_days = array("h"), array("i"), array("h")
+    for n in range(count):
+        segs = [segments[out_chains[n * legs + k]] for k in range(legs)]
+        stay_days, mask, final_depart = _chain_stays(segs, start_iso)
+        days.extend(stay_days)
+        weekend.append(mask)
+        total_days.append(max(1, _stay(start_iso, final_depart)[0]))
+
+    codes = {s[key] for s in segments for key in ("origin", "destination")}
+    return {
+        "format": "compact-v1",
+        "count": count,
+        "legs": legs,
+        "chain_start": start_iso,
+        "final_stay_days": FINAL_STAY_DAYS,
+        "any_stops": [s.kind == "any" for s in stops],
+        "cities": {c: [city_info(c)["city"], city_info(c)["flag"]] for c in codes if c},
+        "segments": segments,
+        "chains": out_chains,
+        "days": days,
+        "weekend": weekend,
+        "total_days": total_days,
+    }
+
+
+def _chain_stays(segs: List[Dict[str, Any]], start_iso: str):
+    """Дни в городах и маска выходных по остановкам — та же семантика, что в _assemble."""
+    stay_days: List[int] = []
+    mask = 0
+    arrive = start_iso
+    for k in range(len(segs) + 1):
+        if k < len(segs):
+            depart = segs[k]["departure_at"]
+            d, wk = _stay(arrive, depart)
+        else:
+            depart = f"{_shift(date_only(arrive), FINAL_STAY_DAYS)}T00:00:00"
+            d, wk = _stay(arrive, depart)
+            d = max(1, d)
+        stay_days.append(max(0, d))
+        mask |= int(wk) << k
+        if k < len(segs):
+            arrive = segs[k]["arrival_at"]
+    return stay_days, mask, depart
+
+
+def compact_to_json(result: Dict[str, Any]) -> str:
+    """JSON компактного результата. Массивы пишем кусками: json.dumps(list(array))
+    на миллионе цепочек создал бы миллионы int-объектов разом."""
+    buf = io.StringIO()
+    buf.write("{")
+    for n, (key, val) in enumerate(result.items()):
+        buf.write(("," if n else "") + json.dumps(key) + ":")
+        if isinstance(val, array):
+            buf.write("[")
+            step = 65536
+            for off in range(0, len(val), step):
+                buf.write(("," if off else "") + ",".join(map(str, val[off:off + step])))
+            buf.write("]")
+        else:
+            buf.write(json.dumps(val, ensure_ascii=False, separators=(",", ":")))
+    buf.write("}")
+    return buf.getvalue()
 
 
 # ------------------------- граф для обзора наборов городов --------------------

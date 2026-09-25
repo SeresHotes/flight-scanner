@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { plural } from '../../lib/format'
-import type { CityFilter, Itinerary, PlanGraph, PlannerFilters, PlannerStop, TransitionFilter } from '../types'
+import type { CityFilter, PlanGraph, PlannerFilters, PlannerStop, TransitionFilter } from '../types'
+import type { ItinerarySet } from '../compact'
 import { pointLabel } from '../validation'
 import { applyFilters, computeBounds } from '../filtering'
 import { CityFilterCard, type CityOption } from './CityFilterCard'
@@ -22,22 +23,22 @@ function cityName(s: PlannerStop): string {
 // Зона 3: детальные фильтры (город → переход → город → …), общая длина, результаты.
 export function FiltersPanel({
   stops,
-  itineraries,
+  set,
   graph,
   filters,
   onChange,
   limit,
 }: {
   stops: PlannerStop[]
-  itineraries: Itinerary[]
+  set: ItinerarySet
   graph: PlanGraph | null // весь собранный граф — для режима «наборы городов»
   filters: PlannerFilters
   onChange: (f: PlannerFilters) => void
   limit: number // хард-лимит числа маршрутов (задаётся возле кнопки загрузки)
 }) {
   const [view, setView] = useState<View>('routes')
-  const bounds = useMemo(() => computeBounds(itineraries, graph), [itineraries, graph])
-  const visible = useMemo(() => applyFilters(itineraries, filters), [itineraries, filters])
+  const bounds = useMemo(() => computeBounds(set, graph), [set, graph])
+  const visible = useMemo(() => applyFilters(set, filters), [set, filters])
 
   // Хард-лимит (задан выше, возле кнопки загрузки) отсекает сколько подходящих
   // цепочек берём в рассмотрение (visible отсортирован по цене). Внутри лимита
@@ -45,12 +46,13 @@ export function FiltersPanel({
   const PAGE_SIZE = 100
   const [page, setPage] = useState(0)
 
-  const limited = useMemo(() => visible.slice(0, Math.max(1, limit)), [visible, limit])
+  const limited = useMemo(() => visible.subarray(0, Math.max(1, limit)), [visible, limit])
   const pageCount = Math.max(1, Math.ceil(limited.length / PAGE_SIZE))
   const curPage = Math.min(page, pageCount - 1)
+  // Объекты Itinerary собираем только для показанной страницы.
   const pageItems = useMemo(
-    () => limited.slice(curPage * PAGE_SIZE, curPage * PAGE_SIZE + PAGE_SIZE),
-    [limited, curPage],
+    () => Array.from(limited.subarray(curPage * PAGE_SIZE, curPage * PAGE_SIZE + PAGE_SIZE), (n) => set.materialize(n)),
+    [set, limited, curPage],
   )
   useEffect(() => setPage(0), [visible, limit]) // сброс на первую страницу при смене выборки
 
@@ -60,9 +62,9 @@ export function FiltersPanel({
     const graphCities = graph ? graphCitiesByStop(graph) : []
     return stops.map((_, i) => {
       const seen = new Map<string, CityOption>()
-      for (const it of itineraries) {
-        const s = it.stops[i]
-        if (s && !seen.has(s.code)) seen.set(s.code, { code: s.code, city: s.city, flag: s.flag })
+      for (let n = 0; i < set.stopCount && n < set.count; n++) {
+        const code = set.stopCode(n, i)
+        if (!seen.has(code)) seen.set(code, { code, ...set.cityOf(code) })
       }
       for (const code of graphCities[i] ?? []) {
         const ci = graph?.cities[code]
@@ -70,7 +72,7 @@ export function FiltersPanel({
       }
       return Array.from(seen.values())
     })
-  }, [stops, itineraries, graph])
+  }, [stops, set, graph])
 
   // «Показать маршруты» у набора: фиксируем города на остановках и уходим в список.
   const showComboRoutes = (codes: string[]) => {
@@ -151,8 +153,8 @@ export function FiltersPanel({
       ) : (
         <>
           <div className="count">
-            Подходит <b>{visible.length}</b> из {itineraries.length}{' '}
-            {plural(itineraries.length, 'маршрута', 'маршрутов', 'маршрутов')}
+            Подходит <b>{visible.length}</b> из {set.count}{' '}
+            {plural(set.count, 'маршрута', 'маршрутов', 'маршрутов')}
             {limited.length < visible.length && <> · лимит {limited.length}</>}
           </div>
 

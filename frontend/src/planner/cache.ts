@@ -1,17 +1,16 @@
 // Кэш собранных маршрутов в localStorage: чтобы переход по ссылке (или перезагрузка)
 // показывал уже собранные данные, а не запускал сбор заново. Ключ — маршрут (набор
-// остановок), значение — цепочки + момент сбора. Пока это мок; когда появится
-// backend, кэш заменится реальным «что уже собрано и когда» (см. types.ts контракт).
+// остановок), значение — компактный результат (compact.ts) + момент сбора.
 
-import type { Itinerary, PlanGraph, PlannerBounds, PlannerStop } from './types'
+import type { PlannerBounds, PlannerStop } from './types'
+import { isCompactResult, type CompactResult } from './compact'
 import { buildPlannerQuery } from './urlState'
 
-const KEY = 'planner:collected:v1'
+const KEY = 'planner:collected:v2' // v2 — компактный результат (compact.ts)
 const MAX_ENTRIES = 8 // держим только несколько последних маршрутов
 
 export interface CachedCollection {
-  itineraries: Itinerary[]
-  graph?: PlanGraph | null // нет у записей, сохранённых до режима «наборы городов»
+  result: CompactResult // result.graph нет у записей, сохранённых без графа (квота)
   collectedAt: string // ISO
 }
 
@@ -41,31 +40,42 @@ function writeStore(store: Store): boolean {
   }
 }
 
+// Старый формат (полные Itinerary) только занимает квоту — убираем.
+try {
+  localStorage.removeItem('planner:collected:v1')
+} catch {
+  // localStorage недоступен
+}
+
 export function getCached(stops: PlannerStop[], bounds: PlannerBounds): CachedCollection | null {
-  return readStore()[routeKey(stops, bounds)] ?? null
+  const hit = readStore()[routeKey(stops, bounds)]
+  return hit && isCompactResult(hit.result) ? hit : null
 }
 
 export function putCached(
   stops: PlannerStop[],
   bounds: PlannerBounds,
-  itineraries: Itinerary[],
-  graph: PlanGraph | null,
+  result: CompactResult,
   collectedAt: string,
 ): void {
   const store = readStore()
-  store[routeKey(stops, bounds)] = { itineraries, graph, collectedAt }
+  const key = routeKey(stops, bounds)
+  store[key] = { result, collectedAt }
 
-  // Ограничиваем размер: выкидываем самые старые по времени сбора.
-  const keys = Object.keys(store)
-  if (keys.length > MAX_ENTRIES) {
-    keys.sort((a, b) => store[a].collectedAt.localeCompare(store[b].collectedAt))
-    for (const k of keys.slice(0, keys.length - MAX_ENTRIES)) delete store[k]
+  // Ограничиваем размер: выкидываем самые старые по времени сбора. Большой результат
+  // (сотни тысяч цепочек, широкий граф — мегабайты) может не влезть в квоту
+  // localStorage (~5 МБ): вытесняем старые маршруты по одному, затем граф текущего
+  // (обзор попросит пересбор); не влезло и так — просто не кэшируем.
+  const older = Object.keys(store).filter((k) => k !== key)
+  older.sort((a, b) => store[a].collectedAt.localeCompare(store[b].collectedAt))
+  while (older.length >= MAX_ENTRIES) delete store[older.shift() as string]
+  while (!writeStore(store)) {
+    if (older.length) delete store[older.shift() as string]
+    else if (store[key]?.result.graph) store[key] = { result: { ...result, graph: null }, collectedAt }
+    else {
+      delete store[key]
+      writeStore(store)
+      return
+    }
   }
-  if (writeStore(store)) return
-  // Граф на широких маршрутах крупный — не влез в квоту. Храним графы только у
-  // текущей записи; если и так не влезло — без графов вовсе (обзор попросит пересбор).
-  for (const k of Object.keys(store)) if (k !== routeKey(stops, bounds)) delete store[k].graph
-  if (writeStore(store)) return
-  for (const k of Object.keys(store)) delete store[k].graph
-  writeStore(store)
 }

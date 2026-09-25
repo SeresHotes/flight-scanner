@@ -94,7 +94,7 @@ def test_rescue_unblocks_queue_behind_endless_build(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "HUNG_JOB_SECONDS", 0)
     monkeypatch.setattr(collector, "fetch_flights", _fake_fetch)
     monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
-    real_build = worker.planner.build_itineraries
+    real_build = worker.planner.build_itineraries_compact
 
     def build(stops, collected, **kw):
         if kw.get("max_results") == 1:  # «зависающая» джоба: бесконечный перебор
@@ -103,7 +103,7 @@ def test_rescue_unblocks_queue_behind_endless_build(tmp_path, monkeypatch):
                     raise SearchAborted()
         return real_build(stops, collected, **kw)
 
-    monkeypatch.setattr(worker.planner, "build_itineraries", build)
+    monkeypatch.setattr(worker.planner, "build_itineraries_compact", build)
     pool = ThreadPoolExecutor(max_workers=1)
     for job_id in ("stuck", "next"):
         hot.create_job(conn, job_id, {"kind": "plan"}, stage=worker.initial_stage("plan"))
