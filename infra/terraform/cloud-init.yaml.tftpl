@@ -77,8 +77,16 @@ write_files:
       # (сид качает root-контейнер aws-cli). Иначе SQLite не создать: "unable to open database file".
       chown -R 1000:1000 /opt/flights/data
       cd /opt/flights
+      # Каждый деплой оставлял старый образ (после pull :latest он теряет тег) — за
+      # ~70 деплоев они забили диск 19 ГБ, pull падал "no space left on device", и
+      # прод молча застревал на старой версии. Удаляем только бестеговые (dangling):
+      # текущие :latest и aws-cli остаются. До pull — чтобы цикл сам вылечился после
+      # такого сбоя, после up -d — чтобы сразу убрать только что вытесненный образ.
+      # Сбой уборки не должен валить деплой.
+      docker image prune -f || true
       docker compose pull
       docker compose up -d
+      docker image prune -f || true
 
   - path: /etc/systemd/system/flights.service
     permissions: '0644'
