@@ -4,6 +4,7 @@
 import type { AirportOption } from '../data/airports'
 import type { JobStage } from '../data/jobsApi'
 import type { Segment } from '../types'
+import type { ItinerarySet } from './compact'
 
 export type StopKind = 'cities' | 'any'
 
@@ -95,5 +96,5 @@ export interface Itinerary {
 export type CollectState =
   | { status: 'idle' }
   | { status: 'collecting'; progress: number; total: number; stage?: JobStage | null }
-  | { status: 'ready'; itineraries: Itinerary[]; collectedAt: string } // collectedAt — ISO момента сбора
+  | { status: 'ready'; set: ItinerarySet; collectedAt: string } // collectedAt — ISO момента сбора
   | { status: 'error'; message: string }

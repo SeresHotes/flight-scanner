@@ -253,16 +253,21 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         rep.flights(sum(len(v) for v in collected.values()))
         rep.stage("build")
 
-        itineraries = planner.build_itineraries(
+        # Компактный результат (сегменты один раз + плоские массивы индексов): на
+        # 100k+ цепочек словари Itinerary и их JSON съедали гигабайты → OOM api.
+        result = planner.build_itineraries_compact(
             stops, collected, city_info=city_info, max_results=max_results, max_cost=max_cost,
             should_stop=lambda: is_cancel_requested(job_id),
             on_progress=rep.build_progress(max_results))
 
         if is_cancel_requested(job_id):  # не перетираем статус сброшенной джобы
             raise JobCancelled()
-        hot.update_job(conn, job_id, status="done",
-                       result_json=json.dumps({"itineraries": itineraries}, ensure_ascii=False))
-        print(f"[worker] plan job {job_id} done: {len(itineraries)} цепочек")
+        count = result["count"]
+        result_json = planner.compact_to_json(result)
+        del result
+        hot.update_job(conn, job_id, status="done", result_json=result_json)
+        del result_json
+        print(f"[worker] plan job {job_id} done: {count} цепочек")
 
         # Котировки планировщику не нужны (результат — result_json, повторы — fetch_cache),
         # они копят статистику /api/routes и историю цен в озере. Поэтому пишем их уже

@@ -1,39 +1,48 @@
 // Клиентская фильтрация цепочек по фильтрам городов/переходов/общей длины.
+// Работает по компактному набору (ItinerarySet) и отдаёт индексы подходящих
+// цепочек: объектов Itinerary на миллион цепочек браузер бы не удержал.
 
-import type { Itinerary, PlannerFilters } from './types'
+import type { PlannerFilters } from './types'
+import type { ItinerarySet } from './compact'
 import { coversWindow } from './dates'
 
-export function itineraryMatches(it: Itinerary, f: PlannerFilters): boolean {
+export function itineraryMatches(set: ItinerarySet, n: number, f: PlannerFilters): boolean {
   // Города: длительность, обязательное окно, выходные.
-  for (let i = 0; i < it.stops.length; i++) {
-    const cf = f.cities[i]
+  for (let k = 0; k < set.stopCount; k++) {
+    const cf = f.cities[k]
     if (!cf) continue
-    const s = it.stops[i]
-    if (cf.allowedCodes && !cf.allowedCodes.includes(s.code)) return false
-    if (s.days < cf.minStay || s.days > cf.maxStay) return false
-    if (cf.mustCover && !coversWindow(s.arrive, s.depart, cf.mustCover)) return false
-    if (cf.requireWeekend && !s.weekendCovered) return false
+    if (cf.allowedCodes && !cf.allowedCodes.includes(set.stopCode(n, k))) return false
+    const days = set.stopDays(n, k)
+    if (days < cf.minStay || days > cf.maxStay) return false
+    if (cf.mustCover && !coversWindow(set.arrive(n, k), set.depart(n, k), cf.mustCover)) return false
+    if (cf.requireWeekend && !set.weekendCovered(n, k)) return false
   }
   // Переходы: пересадки и суммарная длительность перелёта.
-  for (let i = 0; i < it.segments.length; i++) {
-    const tf = f.transitions[i]
+  for (let k = 0; k < set.legs; k++) {
+    const tf = f.transitions[k]
     if (!tf) continue
-    const seg = it.segments[i]
+    const seg = set.segment(n, k)
     if (tf.maxTransfers >= 0 && seg.transfers > tf.maxTransfers) return false
     if ((seg.duration || 0) > tf.maxTravelMinutes) return false
   }
   // Общая длина поездки.
-  if (it.total_days < f.tripLength[0] || it.total_days > f.tripLength[1]) return false
+  const total = set.totalDaysOf(n)
+  if (total < f.tripLength[0] || total > f.tripLength[1]) return false
   return true
 }
 
-export function applyFilters(itineraries: Itinerary[], f: PlannerFilters): Itinerary[] {
-  return itineraries.filter((it) => itineraryMatches(it, f))
+// Индексы подходящих цепочек (в порядке цены — как в наборе).
+export function applyFilters(set: ItinerarySet, f: PlannerFilters): Int32Array {
+  const out = new Int32Array(set.count)
+  let m = 0
+  for (let n = 0; n < set.count; n++) {
+    if (itineraryMatches(set, n, f)) out[m++] = n
+  }
+  return out.subarray(0, m)
 }
 
-// Границы набора одним проходом. Важно: НЕ используем Math.max(...arr) со spread —
-// маршрутов могут быть десятки тысяч (кэпы сборки сняты), а spread такого массива
-// в Math.max/min вешает вкладку / бросает "Maximum call stack size exceeded".
+// Границы набора одним проходом (без Math.max(...arr): на больших наборах spread
+// вешает вкладку / бросает "Maximum call stack size exceeded").
 interface SetBounds {
   maxTravel: number // максимум суммарной длительности перелёта сегмента
   tripMin: number
@@ -42,25 +51,27 @@ interface SetBounds {
   stayMax: number // макс дней в городе (не ниже 30 — чтобы слайдер имел запас)
 }
 
-function setBounds(itineraries: Itinerary[]): SetBounds {
+function setBounds(set: ItinerarySet): SetBounds {
   let maxTravel = 60
   let tripMin = Infinity
   let tripMax = -Infinity
   let stayMin = Infinity
   let stayMax = 30
-  for (const it of itineraries) {
-    for (const s of it.segments) {
-      const d = s.duration || 0
-      if (d > maxTravel) maxTravel = d
-    }
-    if (it.total_days < tripMin) tripMin = it.total_days
-    if (it.total_days > tripMax) tripMax = it.total_days
-    for (const s of it.stops) {
-      if (s.days < stayMin) stayMin = s.days
-      if (s.days > stayMax) stayMax = s.days
+  for (const s of set.segments) {
+    const d = s.duration || 0
+    if (d > maxTravel) maxTravel = d
+  }
+  for (let n = 0; n < set.count; n++) {
+    const total = set.totalDaysOf(n)
+    if (total < tripMin) tripMin = total
+    if (total > tripMax) tripMax = total
+    for (let k = 0; k < set.stopCount; k++) {
+      const days = set.stopDays(n, k)
+      if (days < stayMin) stayMin = days
+      if (days > stayMax) stayMax = days
     }
   }
-  if (!itineraries.length) {
+  if (!set.count) {
     tripMin = 1
     tripMax = 60
     stayMin = 1
@@ -69,9 +80,9 @@ function setBounds(itineraries: Itinerary[]): SetBounds {
 }
 
 // Дефолтные (максимально широкие) фильтры под собранный набор цепочек.
-export function defaultFilters(itineraries: Itinerary[], stopCount: number): PlannerFilters {
+export function defaultFilters(set: ItinerarySet, stopCount: number): PlannerFilters {
   const transitionCount = Math.max(0, stopCount - 1)
-  const b = setBounds(itineraries)
+  const b = setBounds(set)
 
   return {
     cities: Array.from({ length: stopCount }, () => ({
@@ -96,7 +107,7 @@ export interface FilterBounds {
   stayDays: [number, number] // мин/макс дней в городе среди собранных цепочек
 }
 
-export function computeBounds(itineraries: Itinerary[]): FilterBounds {
-  const b = setBounds(itineraries)
+export function computeBounds(set: ItinerarySet): FilterBounds {
+  const b = setBounds(set)
   return { maxTravelMinutes: b.maxTravel, tripLength: [b.tripMin, b.tripMax], stayDays: [b.stayMin, b.stayMax] }
 }

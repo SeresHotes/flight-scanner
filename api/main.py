@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
@@ -445,21 +446,22 @@ def plan_gather(req: PlanRequest) -> Dict[str, Any]:
 
 
 @app.get("/api/plan/jobs/{job_id}")
-def plan_job_status(job_id: str) -> Dict[str, Any]:
-    """Прогресс джобы; по завершении — собранные цепочки (itineraries)."""
+def plan_job_status(job_id: str) -> Response:
+    """Прогресс джобы; по завершении — компактный результат (result, см. planner._pack_compact).
+
+    Результат на сотни тысяч цепочек весит десятки МБ, поэтому вклеиваем сохранённый
+    JSON как есть: json.loads + сериализация FastAPI держали бы в памяти ещё пару копий."""
     job = hot.get_job(_conn, job_id)
     if not job:
-        return {"status": "not_found"}
-    out: Dict[str, Any] = {
+        return JSONResponse({"status": "not_found"})
+    meta = json.dumps({
         "status": job["status"],
         "progress": job["progress"],
         "total": job["total"],
         "error": job["error"],
         "stage": _job_stage(job),
-    }
-    if job["status"] == "done" and job["result_json"]:
-        try:
-            out["itineraries"] = json.loads(job["result_json"]).get("itineraries", [])
-        except json.JSONDecodeError:
-            out["itineraries"] = []
-    return out
+    }, ensure_ascii=False)
+    if job["status"] != "done" or not job["result_json"]:
+        return Response(meta, media_type="application/json")
+    body = meta[:-1] + ',"result":' + job["result_json"] + "}"
+    return Response(body, media_type="application/json")

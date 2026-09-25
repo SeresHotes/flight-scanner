@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { resolveAirports, type AirportOption } from '../data/airports'
-import type { CollectState, Itinerary, PlannerBounds, PlannerFilters, PlannerStop } from '../planner/types'
+import type { CollectState, PlannerBounds, PlannerFilters, PlannerStop } from '../planner/types'
+import { ItinerarySet, type CompactResult } from '../planner/compact'
 import { estimatePlan } from '../planner/estimate'
 import { runCollection } from '../planner/api'
 import { validatePlan } from '../planner/validation'
@@ -16,6 +17,8 @@ import { RecentSearches } from '../planner/components/RecentSearches'
 import { addRecent, loadRecent, removeRecent, type RecentSearch } from '../planner/recentSearches'
 
 let stopSeq = 0
+// Потолок числа маршрутов — совпадает с planner.MAX_RESULTS на бэке.
+const MAX_RESULTS = 1_000_000
 const nid = () => `s${stopSeq++}`
 
 // Фильтры из URL применимы, только если их форма совпадает с текущим маршрутом.
@@ -108,11 +111,12 @@ export function PlannerPage() {
     if (!cached) return // нет данных под маршрут+границы — оставляем как есть (idle → приглашение собрать)
     const fromUrl = pendingFilters.current
     pendingFilters.current = null
-    setCollect({ status: 'ready', itineraries: cached.itineraries, collectedAt: cached.collectedAt })
+    const set = new ItinerarySet(cached.result)
+    setCollect({ status: 'ready', set, collectedAt: cached.collectedAt })
     setFilters(
       fromUrl && filtersFitStops(fromUrl, stops.length)
         ? fromUrl
-        : defaultFilters(cached.itineraries, stops.length),
+        : defaultFilters(set, stops.length),
     )
   }, [stops, bounds])
 
@@ -169,18 +173,19 @@ export function PlannerPage() {
       stops,
       bounds,
       (progress, total, stage) => setCollect({ status: 'collecting', progress, total, stage }),
-      (itineraries: Itinerary[]) => {
+      (result: CompactResult) => {
         cancelRef.current = null
         const collectedAt = new Date().toISOString()
-        putCached(stops, bounds, itineraries, collectedAt)
-        setCollect({ status: 'ready', itineraries, collectedAt })
+        putCached(stops, bounds, result, collectedAt)
+        const set = new ItinerarySet(result)
+        setCollect({ status: 'ready', set, collectedAt })
         // Приоритет фильтров: из ссылки (одноразово) → уже настроенные → дефолтные.
         const fromUrl = pendingFilters.current
         pendingFilters.current = null
         const reuse =
           (fromUrl && filtersFitStops(fromUrl, stops.length) && fromUrl) ||
           (prevFilters && filtersFitStops(prevFilters, stops.length) && prevFilters) ||
-          defaultFilters(itineraries, stops.length)
+          defaultFilters(set, stops.length)
         setFilters(reuse)
       },
       (message: string) => {
@@ -249,13 +254,13 @@ export function PlannerPage() {
           <input
             type="number"
             min={1}
-            max={100000}
+            max={MAX_RESULTS}
             step={100}
             value={limit}
             onChange={(e) => {
               // Всегда конечное число: безлимит (None) бэк отклоняет — движок не
               // должен уходить в неограниченный перебор.
-              setLimit(Math.max(1, Math.min(100000, Number(e.target.value) || 1)))
+              setLimit(Math.max(1, Math.min(MAX_RESULTS, Number(e.target.value) || 1)))
               resetCollected()
             }}
           />
@@ -291,7 +296,7 @@ export function PlannerPage() {
       )}
 
       {collect.status === 'ready' && filters && (
-        <FiltersPanel stops={stops} itineraries={collect.itineraries} filters={filters} onChange={setFilters} limit={limit} />
+        <FiltersPanel stops={stops} set={collect.set} filters={filters} onChange={setFilters} limit={limit} />
       )}
     </>
   )
