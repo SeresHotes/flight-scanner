@@ -8,7 +8,7 @@
 // флаги подтягиваются из /api/airports при загрузке (см. data/airports.resolveAirports).
 
 import type { AirportOption } from '../data/airports'
-import type { CityFilter, PlannerFilters, PlannerStop, StopKind, TransitionFilter } from './types'
+import type { CityFilter, PlannerBounds, PlannerFilters, PlannerStop, StopKind, TransitionFilter } from './types'
 
 const F = '.' // разделитель полей (не встречается в кодах, датах и числах)
 const L = '-' // разделитель списков: города-кандидаты, allowedCodes (в датах '-' — часть значения, но это отдельное поле)
@@ -82,9 +82,19 @@ function decodeTransition(raw: string): TransitionFilter | null {
 
 // Собирает query из текущего состояния. Фильтры пишем только если они есть
 // (появляются после сбора) — URL всегда отражает то, что видно на экране.
-export function buildPlannerQuery(stops: PlannerStop[], filters: PlannerFilters | null): URLSearchParams {
+// Границы (mr/mc) входят в ключ данных: от них зависит результат сбора, поэтому
+// они же участвуют в ключе кэша (см. cache.routeKey).
+export function buildPlannerQuery(
+  stops: PlannerStop[],
+  filters: PlannerFilters | null,
+  bounds?: PlannerBounds | null,
+): URLSearchParams {
   const sp = new URLSearchParams()
   for (const s of stops) sp.append('st', encodeStop(s))
+  if (bounds) {
+    sp.set('mr', String(bounds.maxResults))
+    if (bounds.maxCost !== null) sp.set('mc', String(bounds.maxCost))
+  }
   if (filters) {
     for (const c of filters.cities) sp.append('cf', encodeCity(c))
     for (const t of filters.transitions) sp.append('tf', encodeTransition(t))
@@ -96,6 +106,7 @@ export function buildPlannerQuery(stops: PlannerStop[], filters: PlannerFilters 
 export interface ParsedPlannerQuery {
   stops: PlannerStop[] | null
   filters: PlannerFilters | null
+  bounds: PlannerBounds | null
 }
 
 // Разбирает query. stops === null означает «в URL ничего нет» → страница берёт
@@ -129,5 +140,11 @@ export function parsePlannerQuery(sp: URLSearchParams, nextId: () => string): Pa
     }
   }
 
-  return { stops: stops.length ? stops : null, filters }
+  // Границы: maxResults обязателен (движковый потолок), maxCost — опционально.
+  const mrRaw = sp.get('mr')
+  const bounds: PlannerBounds | null = mrRaw
+    ? { maxResults: Number(mrRaw), maxCost: sp.get('mc') !== null ? Number(sp.get('mc')) : null }
+    : null
+
+  return { stops: stops.length ? stops : null, filters, bounds }
 }

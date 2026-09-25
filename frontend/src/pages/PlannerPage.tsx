@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { resolveAirports, type AirportOption } from '../data/airports'
-import type { CollectState, Itinerary, PlannerFilters, PlannerStop } from '../planner/types'
+import type { CollectState, Itinerary, PlannerBounds, PlannerFilters, PlannerStop } from '../planner/types'
 import { estimatePlan } from '../planner/estimate'
 import { runCollection } from '../planner/api'
 import { validatePlan } from '../planner/validation'
@@ -56,7 +56,10 @@ export function PlannerPage() {
   const [stops, setStops] = useState<PlannerStop[]>(() => initial.stops ?? initialStops())
   const [collect, setCollect] = useState<CollectState>({ status: 'idle' })
   const [filters, setFilters] = useState<PlannerFilters | null>(null)
-  const [limit, setLimit] = useState(100) // дефолтный лимит показа маршрутов (можно поднять в input)
+  // Движковые границы: сколько цепочек строить (самые дешёвые) и потолок цены.
+  // Уходят на бэк при сборе; их смена делает собранные данные несвежими.
+  const [limit, setLimit] = useState(initial.bounds?.maxResults ?? 100)
+  const [maxCost, setMaxCost] = useState<number | null>(initial.bounds?.maxCost ?? null)
   const [recent, setRecent] = useState<RecentSearch[]>(() => loadRecent())
   const cancelRef = useRef<(() => void) | null>(null)
   // Фильтры из ссылки ждут своего сбора; правка маршрута их аннулирует.
@@ -64,12 +67,13 @@ export function PlannerPage() {
 
   const estimate = useMemo(() => estimatePlan(stops), [stops])
   const validation = useMemo(() => validatePlan(stops), [stops])
+  const bounds = useMemo<PlannerBounds>(() => ({ maxResults: limit, maxCost }), [limit, maxCost])
 
   // URL всегда отражает то, что на экране: маршрут + активные фильтры.
   useEffect(() => {
     const activeFilters = collect.status === 'ready' ? filters : null
-    setSearchParams(buildPlannerQuery(stops, activeFilters), { replace: true })
-  }, [stops, filters, collect.status, setSearchParams])
+    setSearchParams(buildPlannerQuery(stops, activeFilters, bounds), { replace: true })
+  }, [stops, filters, collect.status, bounds, setSearchParams])
 
   // Дорезолв названий/флагов: из ссылки приходят только коды городов (city пустой).
   // Коды в URL/кэше не меняются, поэтому подстановка карточек не трогает ни URL,
@@ -100,8 +104,8 @@ export function PlannerPage() {
   // Гидрация из кэша: при заходе по ссылке или смене маршрута показываем уже
   // собранные данные вместо повторного сбора. Свежий сбор запускается кнопкой.
   useEffect(() => {
-    const cached = getCached(stops)
-    if (!cached) return // нет данных под маршрут — оставляем как есть (idle → приглашение собрать)
+    const cached = getCached(stops, bounds)
+    if (!cached) return // нет данных под маршрут+границы — оставляем как есть (idle → приглашение собрать)
     const fromUrl = pendingFilters.current
     pendingFilters.current = null
     setCollect({ status: 'ready', itineraries: cached.itineraries, collectedAt: cached.collectedAt })
@@ -110,7 +114,7 @@ export function PlannerPage() {
         ? fromUrl
         : defaultFilters(cached.itineraries, stops.length),
     )
-  }, [stops])
+  }, [stops, bounds])
 
   // Любая правка маршрута сбрасывает собранное — данные надо перезагрузить.
   function resetCollected() {
@@ -163,11 +167,12 @@ export function PlannerPage() {
     setCollect({ status: 'collecting', progress: 0, total: estimate.requests })
     cancelRef.current = runCollection(
       stops,
+      bounds,
       (progress, total) => setCollect({ status: 'collecting', progress, total }),
       (itineraries: Itinerary[]) => {
         cancelRef.current = null
         const collectedAt = new Date().toISOString()
-        putCached(stops, itineraries, collectedAt)
+        putCached(stops, bounds, itineraries, collectedAt)
         setCollect({ status: 'ready', itineraries, collectedAt })
         // Приоритет фильтров: из ссылки (одноразово) → уже настроенные → дефолтные.
         const fromUrl = pendingFilters.current
@@ -236,8 +241,10 @@ export function PlannerPage() {
           </div>
         )}
 
-        {/* Хард-лимит числа маршрутов — виден всегда, рядом с загрузкой данных. */}
-        <label className="pl-limit-row" title="Сколько маршрутов показывать (самые дешёвые)">
+        {/* Движковые границы — видны всегда, рядом с загрузкой данных. Их смена
+            делает собранные данные несвежими (нужен пересбор), т.к. результат
+            строится на бэке под эти границы. */}
+        <label className="pl-limit-row" title="Сколько самых дешёвых маршрутов строить (движковый потолок)">
           Максимум маршрутов:{' '}
           <input
             type="number"
@@ -245,7 +252,25 @@ export function PlannerPage() {
             max={100000}
             step={100}
             value={limit}
-            onChange={(e) => setLimit(Math.max(1, Math.min(100000, Number(e.target.value) || 1)))}
+            onChange={(e) => {
+              setLimit(Math.max(1, Math.min(100000, Number(e.target.value) || 1)))
+              resetCollected()
+            }}
+          />
+        </label>
+        <label className="pl-limit-row" title="Верхняя граница суммарной цены маршрута (пусто — без ограничения). Отсекает бесперспективные направления ещё при сборе.">
+          Максимум цены:{' '}
+          <input
+            type="number"
+            min={0}
+            step={5000}
+            value={maxCost ?? ''}
+            placeholder="без лимита"
+            onChange={(e) => {
+              const raw = e.target.value
+              setMaxCost(raw === '' ? null : Math.max(0, Number(raw) || 0))
+              resetCollected()
+            }}
           />
         </label>
       </div>

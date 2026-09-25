@@ -3,7 +3,7 @@
 // остановок), значение — цепочки + момент сбора. Пока это мок; когда появится
 // backend, кэш заменится реальным «что уже собрано и когда» (см. types.ts контракт).
 
-import type { Itinerary, PlannerStop } from './types'
+import type { Itinerary, PlannerBounds, PlannerStop } from './types'
 import { buildPlannerQuery } from './urlState'
 
 const KEY = 'planner:collected:v1'
@@ -16,10 +16,10 @@ export interface CachedCollection {
 
 type Store = Record<string, CachedCollection>
 
-// Ключ маршрута — та же кодировка остановок, что и в URL (без фильтров): данные
-// зависят только от набора остановок и их дат.
-function routeKey(stops: PlannerStop[]): string {
-  return buildPlannerQuery(stops, null).toString()
+// Ключ маршрута — та же кодировка остановок и границ, что и в URL (без фильтров):
+// данные зависят от набора остановок, их дат И движковых границ (maxResults/maxCost).
+function routeKey(stops: PlannerStop[], bounds: PlannerBounds): string {
+  return buildPlannerQuery(stops, null, bounds).toString()
 }
 
 function readStore(): Store {
@@ -39,13 +39,18 @@ function writeStore(store: Store): void {
   }
 }
 
-export function getCached(stops: PlannerStop[]): CachedCollection | null {
-  return readStore()[routeKey(stops)] ?? null
+export function getCached(stops: PlannerStop[], bounds: PlannerBounds): CachedCollection | null {
+  return readStore()[routeKey(stops, bounds)] ?? null
 }
 
-export function putCached(stops: PlannerStop[], itineraries: Itinerary[], collectedAt: string): void {
+export function putCached(
+  stops: PlannerStop[],
+  bounds: PlannerBounds,
+  itineraries: Itinerary[],
+  collectedAt: string,
+): void {
   const store = readStore()
-  store[routeKey(stops)] = { itineraries, collectedAt }
+  store[routeKey(stops, bounds)] = { itineraries, collectedAt }
 
   // Ограничиваем размер: выкидываем самые старые по времени сбора.
   const keys = Object.keys(store)

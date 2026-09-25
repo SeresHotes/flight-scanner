@@ -3,7 +3,7 @@
 // Сигнатура повторяет прежний runMockCollection — императивный запуск с функцией
 // отмены (на случай размонтирования / правки маршрута).
 
-import type { Itinerary, PlannerStop } from './types'
+import type { Itinerary, PlannerBounds, PlannerStop } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 const POLL_MS = 1000
@@ -30,6 +30,7 @@ function stopsPayload(stops: PlannerStop[]) {
 
 export function runCollection(
   stops: PlannerStop[],
+  bounds: PlannerBounds,
   onProgress: (progress: number, total: number) => void,
   onDone: (itineraries: Itinerary[]) => void,
   onError: (message: string) => void,
@@ -66,7 +67,11 @@ export function runCollection(
       const res = await fetch(`${API_BASE}/plan/gather`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stops: stopsPayload(stops) }),
+        body: JSON.stringify({
+          stops: stopsPayload(stops),
+          max_results: bounds.maxResults,
+          max_cost: bounds.maxCost,
+        }),
       })
       if (!res.ok) throw new Error(String(res.status))
       const data = (await res.json()) as GatherResponse

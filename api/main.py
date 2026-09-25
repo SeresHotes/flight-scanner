@@ -359,6 +359,8 @@ class PlanStop(BaseModel):
 
 class PlanRequest(BaseModel):
     stops: List[PlanStop]
+    max_results: Optional[int] = None  # движковый потолок числа цепочек (самые дешёвые)
+    max_cost: Optional[float] = None   # верхняя граница суммарной цены — режет DFS сбора
 
 
 def _stops_payload(req: "PlanRequest") -> List[Dict[str, Any]]:
@@ -389,8 +391,12 @@ def plan_gather(req: PlanRequest) -> Dict[str, Any]:
                 "estimate": est}
 
     job_id = uuid.uuid4().hex[:12]
-    hot.create_job(_conn, job_id, {"kind": "plan", "stops": raw}, total=est["requests"])
-    _executor.submit(worker.run_plan_collection, hot.DEFAULT_DB, job_id, raw)
+    hot.create_job(_conn, job_id,
+                   {"kind": "plan", "stops": raw,
+                    "max_results": req.max_results, "max_cost": req.max_cost},
+                   total=est["requests"])
+    _executor.submit(worker.run_plan_collection, hot.DEFAULT_DB, job_id, raw,
+                     req.max_results, req.max_cost)
     return {"status": "collecting", "job_id": job_id, "total": est["requests"]}
 
 

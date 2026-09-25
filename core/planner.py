@@ -246,21 +246,73 @@ def _allowed(stop: Stop) -> Optional[set]:
     return set(stop.codes) if stop.kind == "cities" else None
 
 
+def _completion_lb(stops: List[Stop],
+                   legs_by_origin: Dict[int, Dict[str, List[Dict[str, Any]]]]
+                   ) -> List[Dict[str, float]]:
+    """Нижняя оценка стоимости «хвоста» цепочки для отсечения по бюджету.
+
+    lb[i][city] — минимально возможная суммарная цена, чтобы из `city` перед плечом i
+    добраться до финальной остановки, учитывая ТОЛЬКО цены рейсов и разрешённые города
+    остановок (БЕЗ ограничений на время вылета и на повторы городов). Это релаксация
+    задачи, поэтому оценка никогда не завышает реальную стоимость — ветку, где
+    накопленная_цена + lb > бюджета, можно резать, не теряя валидных цепочек
+    (admissible-эвристика).
+
+    Считается обратной динамикой по плечам (от последнего перехода к первому) — это
+    и есть тот самый граф минимальных цен перелётов: город, из которого дешевле
+    бюджета не собрать ни одной цепочки, отсекается целиком, не разворачивая поддерево."""
+    last = len(stops) - 1
+    lb: List[Dict[str, float]] = [dict() for _ in range(len(stops))]
+    for i in range(last - 1, -1, -1):
+        allow_next = _allowed(stops[i + 1])
+        nxt = lb[i + 1]
+        terminal_next = (i + 1 == last)
+        cur = lb[i]
+        for city, flights in legs_by_origin[i].items():
+            best = _INF
+            for f in flights:
+                dest = (f.get("destination") or f.get("search_destination") or "").upper()
+                if not dest or dest == city:
+                    continue
+                if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
+                    continue
+                tail = 0.0 if terminal_next else nxt.get(dest)
+                if tail is None:  # из dest конца не достичь — этот рейс не ведёт к цели
+                    continue
+                cand = _price_of(f) + tail
+                if cand < best:
+                    best = cand
+            if best < _INF:
+                cur[city] = best
+    return lb
+
+
 def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]],
-                      city_info=None) -> List[Dict[str, Any]]:
-    """Собирает цепочки из собранных плеч. Чистая функция (без I/O)."""
+                      city_info=None, max_results: Optional[int] = None,
+                      max_cost: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Собирает цепочки из собранных плеч. Чистая функция (без I/O).
+
+    max_cost — верхняя граница суммарной цены цепочки: движок режет ветку сразу, как
+    только накопленная цена + admissible-оценка минимального «хвоста» (_completion_lb)
+    выходит за бюджет, не разворачивая бесперспективные направления. max_results —
+    сколько самых дешёвых цепочек вернуть (обрезка отсортированного результата). None
+    у обоих — прежний режим «все цепочки без потолка»."""
     if city_info is None:
         city_info = make_city_lookup(agg.load_airport_network())
     builder = Builder(None, city_info)  # make_segment использует только city_info
 
     legs_by_origin = {i: _index_leg(collected.get(i, [])) for i in range(len(stops) - 1)}
     chain_start = _leg_dates(stops, 0)[0]  # первая дата окна нулевого плеча
+    last = len(stops) - 1
+    # Нижняя оценка «хвоста» нужна только при заданном бюджете — считаем лениво.
+    lb = _completion_lb(stops, legs_by_origin) if max_cost is not None else None
 
     results: List[Dict[str, Any]] = []
     seq = {"id": 1}
 
-    def dfs(i: int, city: str, arrive_iso: str, chosen: List[Dict[str, Any]], visited: set):
-        if i == len(stops) - 1:  # дошли до финальной остановки — цепочка готова
+    def dfs(i: int, city: str, arrive_iso: str, chosen: List[Dict[str, Any]],
+            visited: set, g: float):
+        if i == last:  # дошли до финальной остановки — цепочка готова
             results.append(_assemble(stops, chosen, builder, city_info, chain_start, seq["id"]))
             seq["id"] += 1
             return
@@ -281,13 +333,24 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
 
         for f in _onward_sorted(candidates):
             dest = (f.get("destination") or f.get("search_destination")).upper()
-            dfs(i + 1, dest, arrival_of(f), chosen + [f], visited | {dest})
+            g2 = g + _price_of(f)
+            if lb is not None:
+                # Минимально возможная цена «хвоста» от dest до конца (только цены).
+                tail = 0.0 if i + 1 == last else lb[i + 1].get(dest)
+                if tail is None or g2 + tail > max_cost:
+                    continue  # даже самый дешёвый хвост выбьет за бюджет — режем ветку
+            dfs(i + 1, dest, arrival_of(f), chosen + [f], visited | {dest}, g2)
 
     for start in stops[0].codes:  # старт — из каждого города-кандидата первой остановки
-        start_arrive = f"{chain_start}T00:00:00"
-        dfs(0, start, start_arrive, [], {start})
+        if lb is not None:
+            tail = lb[0].get(start)
+            if tail is None or tail > max_cost:
+                continue  # из этого старта дешевле бюджета не собрать ни одной цепочки
+        dfs(0, start, f"{chain_start}T00:00:00", [], {start}, 0.0)
 
     results.sort(key=lambda it: it["total_price"])
+    if max_results is not None:
+        results = results[:max_results]
     return results
 
 
