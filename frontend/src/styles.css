@@ -388,6 +388,29 @@ select:disabled{opacity:.4}
 .pl-check input{width:auto}
 .pl-triplen{margin-bottom:14px}
 
+/* Переключатель «Маршруты / Наборы городов» */
+.pl-viewtabs{display:inline-flex;gap:4px;padding:4px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:12px;margin-bottom:12px}
+.pl-viewtabs button{background:transparent;border:none;color:var(--muted);cursor:pointer;
+  padding:7px 14px;border-radius:9px;font-size:13.5px;font-weight:600}
+.pl-viewtabs button.on{background:var(--panel);color:var(--txt);box-shadow:0 0 0 1px var(--line)}
+
+/* Режим «наборы городов» */
+.pl-combos{transition:opacity .15s}
+.pl-combo-sort{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:13px;
+  color:var(--muted);margin:-6px 2px 12px}
+.pl-combo-sort button{background:var(--panel2);color:var(--muted);border:1px solid var(--line);
+  border-radius:999px;padding:4px 12px;font-size:12.5px;cursor:pointer}
+.pl-combo-sort button.on{color:var(--txt);border-color:var(--accent2)}
+.pl-combo-list{display:flex;flex-direction:column;gap:6px}
+.pl-combo{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 16px;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px}
+.pl-combo-route{font-weight:600;font-size:14px}
+.pl-combo-stats{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;font-size:13px;
+  color:var(--muted);font-variant-numeric:tabular-nums}
+.pl-combo-stats .p{color:var(--txt);font-weight:700;font-size:14px}
+.pl-combo-stats .btn-ghost{padding:5px 10px;font-size:12.5px}
+
 /* Набор городов на остановке (чипсы + добавление) */
 .pl-cities{display:flex;flex-direction:column;gap:8px}
 .pl-chips{display:flex;flex-wrap:wrap;gap:6px}

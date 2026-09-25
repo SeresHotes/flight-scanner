@@ -460,6 +460,68 @@ def _search_cheapest(ctx, max_results: int, max_cost: Optional[float],
     return results  # уже по возрастанию цены (f=g в готовой цепочке, h консистентна)
 
 
+# ------------------------- граф для обзора наборов городов --------------------
+
+def _naive(iso: str) -> str:
+    """ISO без таймзоны (как parse_datetime) — фронт считает дни пребывания так же."""
+    return agg.parse_datetime(iso).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def overview_graph(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]],
+                   city_info=None) -> Dict[str, Any]:
+    """Компактный граф собранных рейсов для режима «наборы городов» на фронте.
+
+    Список цепочек ограничен max_results/max_cost, а обзор должен оценить ВСЕ
+    варианты. Перечислять их нельзя (экспоненциально много), поэтому отдаём сами
+    рёбра, а фронт (planner/overview.ts) динамикой по времени прилёта считает по
+    каждой последовательности городов min-цену и точное число цепочек — с теми же
+    фильтрами, что у списка. Семантика стыковки повторяет _onward_candidates/_assemble:
+    from — город вылета (для первого перехода — только рейсы из стартовых кодов),
+    to — город прилёта; dep/arr — наивное время.
+
+    legs[i] — рёбра перехода i: {from, to, dep, arr, price, transfers, duration}."""
+    if city_info is None:
+        city_info = make_city_lookup(agg.load_airport_network())
+    starts = set(stops[0].codes) if stops[0].kind == "cities" else set()
+    legs: List[List[Dict[str, Any]]] = []
+    codes = set(starts)
+    for i in range(len(stops) - 1):
+        seen = set()
+        edges = []
+        for f in collected.get(i, []):
+            if i == 0 and not (_side_codes(f, "origin") & starts):
+                continue
+            origin = (f.get("origin") or f.get("search_origin") or "").upper()
+            dest = (f.get("destination") or f.get("search_destination") or "").upper()
+            dep = f.get("departure_at")
+            if not origin or not dest or not dep:
+                continue
+            edge = {
+                "from": origin, "to": dest, "dep": _naive(dep), "arr": _naive(arrival_of(f)),
+                "price": _price_of(f) or 0, "transfers": int(f.get("transfers") or 0),
+                "duration": f.get("duration") or 0,
+            }
+            key = tuple(edge.values())
+            if key in seen:  # один и тот же рейс из пересекающихся под-запросов
+                continue
+            seen.add(key)
+            edges.append(edge)
+            codes.update((origin, dest))
+        legs.append(edges)
+    cities = {}
+    for c in sorted(codes):
+        ci = city_info(c)
+        cities[c] = {"city": ci["city"], "flag": ci["flag"]}
+    return {
+        "chain_start": _leg_dates(stops, 0)[0],
+        "final_stay_days": FINAL_STAY_DAYS,
+        "starts": sorted(starts),
+        "any": [s.kind == "any" for s in stops],
+        "legs": legs,
+        "cities": cities,
+    }
+
+
 def _assemble(stops: List[Stop], chosen: List[Dict[str, Any]], builder: "Builder",
               city_info, chain_start: str, itin_id: int) -> Dict[str, Any]:
     """Собирает объект Itinerary из выбранной цепочки рейсов."""

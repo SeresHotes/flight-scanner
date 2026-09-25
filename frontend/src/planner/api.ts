@@ -4,7 +4,7 @@
 // отмены (на случай размонтирования / правки маршрута).
 
 import type { JobStage, JobStatus } from '../data/jobsApi'
-import type { Itinerary, PlannerBounds, PlannerStop } from './types'
+import type { Itinerary, PlanGraph, PlannerBounds, PlannerStop } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 const POLL_MS = 1000
@@ -18,6 +18,7 @@ interface GatherResponse {
 
 interface PlanJob extends JobStatus {
   itineraries?: Itinerary[]
+  graph?: PlanGraph | null // граф рёбер для режима «наборы городов»
 }
 
 // Бэку нужны только коды городов (kind/window). Имена/флаги он подставит из справочника.
@@ -29,7 +30,7 @@ export function runCollection(
   stops: PlannerStop[],
   bounds: PlannerBounds,
   onProgress: (progress: number, total: number, stage?: JobStage | null) => void,
-  onDone: (itineraries: Itinerary[]) => void,
+  onDone: (itineraries: Itinerary[], graph: PlanGraph | null) => void,
   onError: (message: string) => void,
 ): () => void {
   let cancelled = false
@@ -45,7 +46,7 @@ export function runCollection(
 
       if (job.status === 'done') {
         onProgress(job.total, job.total)
-        onDone(job.itineraries ?? [])
+        onDone(job.itineraries ?? [], job.graph ?? null)
         return
       }
       if (job.status === 'error' || job.status === 'not_found') {
