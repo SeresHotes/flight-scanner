@@ -63,8 +63,9 @@ def _forget_cancel(job_id: str) -> None:
 # стыкуются цепочки.
 _ROUTE_STAGES = [("queued", "В очереди"), ("fetch", "Загрузка рейсов"),
                  ("build", "Сборка вариантов"), ("save", "Сохранение")]
+# У планировщика нет этапа «Сохранение»: котировки пишутся уже после done.
 _PLAN_STAGES = [("queued", "В очереди"), ("fetch", "Загрузка рейсов"),
-                ("build", "Стыковка цепочек"), ("save", "Сохранение")]
+                ("build", "Стыковка цепочек")]
 
 
 def initial_stage(kind: str) -> Dict[str, Any]:
@@ -158,6 +159,17 @@ def _make_cached_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None):
     return fetch
 
 
+def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: str) -> None:
+    """Котировки — в горячее хранилище SQLite + дозапись в озеро (если подключено)."""
+    rows = hot.flights_to_quotes(flights, observed_at)
+    hot.upsert_quotes(conn, rows)
+    if lake.available():
+        try:
+            lake.append_quotes(rows, part_id=job_id)
+        except Exception as e:  # озеро не критично для serving
+            print(f"[worker] lake append failed: {e}")
+
+
 def estimate_requests(params: Dict[str, Any]) -> int:
     return collector.plan_request_count(
         params["origin"], params["destination"],
@@ -197,13 +209,7 @@ def run_collection(db_path: str, job_id: str, params: Dict[str, Any],
         flights = []
         for ds in ("plain", "there", "back"):
             flights += collected[ds]["leg1_flights"] + collected[ds]["leg2_flights"]
-        rows = hot.flights_to_quotes(flights, now)
-        hot.upsert_quotes(conn, rows)
-        if lake.available():
-            try:
-                lake.append_quotes(rows, part_id=job_id)
-            except Exception as e:  # озеро не критично для serving
-                print(f"[worker] lake append failed: {e}")
+        _save_quotes(conn, flights, now, job_id)
 
         on_done((origin, destination), payload)
         hot.update_job(conn, job_id, status="done",
@@ -252,22 +258,22 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
             should_stop=lambda: is_cancel_requested(job_id),
             on_progress=rep.build_progress(max_results))
 
-        rep.stage("save")
-        now = datetime.now().isoformat()
-        flights: List[Dict[str, Any]] = []
-        for leg_flights in collected.values():
-            flights += leg_flights
-        rows = hot.flights_to_quotes(flights, now)
-        hot.upsert_quotes(conn, rows)
-        if lake.available():
-            try:
-                lake.append_quotes(rows, part_id=job_id)
-            except Exception as e:  # озеро не критично для serving
-                print(f"[worker] lake append failed: {e}")
-
+        if is_cancel_requested(job_id):  # не перетираем статус сброшенной джобы
+            raise JobCancelled()
         hot.update_job(conn, job_id, status="done",
                        result_json=json.dumps({"itineraries": itineraries}, ensure_ascii=False))
         print(f"[worker] plan job {job_id} done: {len(itineraries)} цепочек")
+
+        # Котировки планировщику не нужны (результат — result_json, повторы — fetch_cache),
+        # они копят статистику /api/routes и историю цен в озере. Поэтому пишем их уже
+        # после done, чтобы пользователь не ждал, и сбой тут не портит готовую джобу.
+        flights: List[Dict[str, Any]] = []
+        for leg_flights in collected.values():
+            flights += leg_flights
+        try:
+            _save_quotes(conn, flights, datetime.now().isoformat(), job_id)
+        except Exception as e:
+            print(f"[worker] plan job {job_id}: save quotes failed: {e}")
     except (JobCancelled, planner.SearchAborted):
         print(f"[worker] plan job {job_id} сброшена как зависшая")
     except Exception as e:
