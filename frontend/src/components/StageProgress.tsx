@@ -74,6 +74,9 @@ function StageDetail({
     )
   }
   const flights = stage.flights != null ? `Загружено рейсов: ${stage.flights}. ` : ''
+  if (stage.key === 'build' && stage.build) {
+    return <BuildDetail flights={flights} build={stage.build} />
+  }
   const what = stage.key === 'build' ? 'Собираем варианты из загруженных рейсов…' : 'Сохраняем котировки…'
   return (
     <>
@@ -84,6 +87,41 @@ function StageDetail({
       <div className="progressbar">
         <div className="progressbar-fill progressbar-indeterminate" />
       </div>
+    </>
+  )
+}
+
+// Стыковка идёт от дешёвых маршрутов к дорогим и останавливается на лимите, поэтому
+// «найдено X из лимита» — реальная доля сделанного. Если вариантов меньше лимита,
+// перебор закончится раньше, чем заполнится полоска.
+function BuildDetail({
+  flights,
+  build,
+}: {
+  flights: string
+  build: NonNullable<JobStage['build']>
+}) {
+  const explored = build.explored.toLocaleString('ru-RU')
+  return (
+    <>
+      <div>{flights}Стыкуем цепочки, от самых дешёвых.</div>
+      <div className="stage-step">
+        Найдено маршрутов: <b>{build.found}</b>
+        {build.limit != null && (
+          <>
+            {' '}
+            из <b>{build.limit}</b>
+          </>
+        )}
+        <span className="stage-cached"> · перебрано вариантов: {explored}</span>
+      </div>
+      {build.limit != null ? (
+        <Bar pct={pctOf(build.found, build.limit)} />
+      ) : (
+        <div className="progressbar">
+          <div className="progressbar-fill progressbar-indeterminate" />
+        </div>
+      )}
     </>
   )
 }

@@ -6,6 +6,7 @@
 """
 import json
 import threading
+import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -25,6 +26,10 @@ ESTIMATE_TIME_FACTOR = 2  # запас пессимизма в показанн�
 # Data API) сам отдаёт кэш цен с задержкой ~суток, поэтому чаще перезапрашивать
 # бессмысленно — те же цифры, впустую сожжённые запросы к API.
 FETCH_CACHE_TTL_SECONDS = 24 * 3600
+
+# Как часто стыковка пишет прогресс в jobs. Заодно держит свежим updated_at — иначе
+# долгая стыковка выглядела бы для /api/jobs/rescue как зависшая джоба.
+BUILD_FLUSH_SECONDS = 0.5
 
 
 # Отмена зависших джоб. Поток Python снаружи не убить, поэтому отмена кооперативная:
@@ -66,7 +71,7 @@ def initial_stage(kind: str) -> Dict[str, Any]:
     """Этап свежесозданной джобы (ждёт своей очереди в однопоточном executor)."""
     stages = _PLAN_STAGES if kind == "plan" else _ROUTE_STAGES
     return {"key": "queued", "stages": [{"key": k, "label": lbl} for k, lbl in stages],
-            "step": None, "cached": 0, "flights": None}
+            "step": None, "cached": 0, "flights": None, "build": None}
 
 
 class StageReporter:
@@ -110,6 +115,20 @@ class StageReporter:
 
     def flights(self, n: int) -> None:
         self.state["flights"] = n
+
+    def build_progress(self, limit: Optional[int]) -> Callable[[int, int], None]:
+        """on_progress для planner.build_itineraries: «найдено X из limit цепочек,
+        перебрано M вариантов». Шагов перебора — десятки тысяч в секунду, поэтому
+        пишем в БД не чаще BUILD_FLUSH_SECONDS (и сразу на первом шаге)."""
+        last_flush = [0.0]
+
+        def report(found: int, explored: int) -> None:
+            self.state["build"] = {"found": found, "limit": limit, "explored": explored}
+            now = time.monotonic()
+            if now - last_flush[0] >= BUILD_FLUSH_SECONDS:
+                last_flush[0] = now
+                self._flush()
+        return report
 
 
 def _make_cached_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None):
@@ -230,7 +249,8 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
 
         itineraries = planner.build_itineraries(
             stops, collected, city_info=city_info, max_results=max_results, max_cost=max_cost,
-            should_stop=lambda: is_cancel_requested(job_id))
+            should_stop=lambda: is_cancel_requested(job_id),
+            on_progress=rep.build_progress(max_results))
 
         rep.stage("save")
         now = datetime.now().isoformat()
