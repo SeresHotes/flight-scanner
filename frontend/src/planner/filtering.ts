@@ -2,9 +2,10 @@
 // Работает по компактному набору (ItinerarySet) и отдаёт индексы подходящих
 // цепочек: объектов Itinerary на миллион цепочек браузер бы не удержал.
 
-import type { PlannerFilters } from './types'
+import type { PlanGraph, PlannerFilters } from './types'
 import type { ItinerarySet } from './compact'
 import { coversWindow } from './dates'
+import { graphBounds } from './overview'
 
 export function itineraryMatches(set: ItinerarySet, n: number, f: PlannerFilters): boolean {
   // Города: длительность, обязательное окно, выходные.
@@ -51,7 +52,9 @@ interface SetBounds {
   stayMax: number // макс дней в городе (не ниже 30 — чтобы слайдер имел запас)
 }
 
-function setBounds(set: ItinerarySet): SetBounds {
+// graph — весь собранный граф (режим «наборы городов»): границы расширяются под него,
+// иначе дефолтные фильтры, выведенные из топ-N цепочек, срезали бы остальные варианты.
+function setBounds(set: ItinerarySet, graph: PlanGraph | null = null): SetBounds {
   let maxTravel = 60
   let tripMin = Infinity
   let tripMax = -Infinity
@@ -71,7 +74,14 @@ function setBounds(set: ItinerarySet): SetBounds {
       if (days > stayMax) stayMax = days
     }
   }
-  if (!set.count) {
+  const gb = graph ? graphBounds(graph) : null
+  if (gb) {
+    maxTravel = Math.max(maxTravel, gb.maxTravel)
+    tripMin = Math.min(tripMin, gb.tripMin)
+    tripMax = Math.max(tripMax, gb.tripMax)
+    stayMin = 0 // в графе пересадка «день в день» возможна всегда
+    stayMax = Math.max(stayMax, gb.stayMax)
+  } else if (!set.count) {
     tripMin = 1
     tripMax = 60
     stayMin = 1
@@ -80,9 +90,13 @@ function setBounds(set: ItinerarySet): SetBounds {
 }
 
 // Дефолтные (максимально широкие) фильтры под собранный набор цепочек.
-export function defaultFilters(set: ItinerarySet, stopCount: number): PlannerFilters {
+export function defaultFilters(
+  set: ItinerarySet,
+  stopCount: number,
+  graph: PlanGraph | null = null,
+): PlannerFilters {
   const transitionCount = Math.max(0, stopCount - 1)
-  const b = setBounds(set)
+  const b = setBounds(set, graph)
 
   return {
     cities: Array.from({ length: stopCount }, () => ({
@@ -107,7 +121,7 @@ export interface FilterBounds {
   stayDays: [number, number] // мин/макс дней в городе среди собранных цепочек
 }
 
-export function computeBounds(set: ItinerarySet): FilterBounds {
-  const b = setBounds(set)
+export function computeBounds(set: ItinerarySet, graph: PlanGraph | null = null): FilterBounds {
+  const b = setBounds(set, graph)
   return { maxTravelMinutes: b.maxTravel, tripLength: [b.tripMin, b.tripMax], stayDays: [b.stayMin, b.stayMax] }
 }

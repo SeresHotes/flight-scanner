@@ -68,6 +68,11 @@ terraform output -raw ci_sa_key_json   # → секрет YC_SA_KEY_JSON
 - SSH: `ssh ubuntu@<vm_external_ip>`.
 - Логи стека: `sudo journalctl -u flights -f` и `cd /opt/flights && sudo docker compose logs -f`.
 - Форсировать апдейт: `sudo systemctl start flights-update`.
+- Старые образы `run.sh` удаляет сам (`docker image prune -f` до pull и после up).
+  Симптом, если диск всё же забит: CI зелёный, а прод на старой версии; в
+  `sudo journalctl -u flights-update -n 25` — `no space left on device`. Проверка: `df -h /`,
+  `sudo docker system df`. cloud-init применяется только при создании VM — правки
+  `run.sh` в шаблоне на живую машину доносить вручную.
 - Данные (SQLite + collected + Parquet-озеро) переживают перезапуски: том `/opt/flights/data`.
 - Секреты бакета для ручной заливки: `terraform output -raw s3_access_key` / `s3_secret_key`.
 

@@ -19,7 +19,7 @@ interface GatherResponse {
 }
 
 interface PlanJob extends JobStatus {
-  result?: CompactResult
+  result?: CompactResult // цепочки + граф рёбер для режима «наборы городов» (result.graph)
 }
 
 // Бэку нужны только коды городов (kind/window). Имена/флаги он подставит из справочника.

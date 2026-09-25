@@ -112,11 +112,12 @@ export function PlannerPage() {
     const fromUrl = pendingFilters.current
     pendingFilters.current = null
     const set = new ItinerarySet(cached.result)
-    setCollect({ status: 'ready', set, collectedAt: cached.collectedAt })
+    const graph = cached.result.graph ?? null
+    setCollect({ status: 'ready', set, graph, collectedAt: cached.collectedAt })
     setFilters(
       fromUrl && filtersFitStops(fromUrl, stops.length)
         ? fromUrl
-        : defaultFilters(set, stops.length),
+        : defaultFilters(set, stops.length, graph),
     )
   }, [stops, bounds])
 
@@ -178,14 +179,15 @@ export function PlannerPage() {
         const collectedAt = new Date().toISOString()
         putCached(stops, bounds, result, collectedAt)
         const set = new ItinerarySet(result)
-        setCollect({ status: 'ready', set, collectedAt })
+        const graph = result.graph ?? null
+        setCollect({ status: 'ready', set, graph, collectedAt })
         // Приоритет фильтров: из ссылки (одноразово) → уже настроенные → дефолтные.
         const fromUrl = pendingFilters.current
         pendingFilters.current = null
         const reuse =
           (fromUrl && filtersFitStops(fromUrl, stops.length) && fromUrl) ||
           (prevFilters && filtersFitStops(prevFilters, stops.length) && prevFilters) ||
-          defaultFilters(set, stops.length)
+          defaultFilters(set, stops.length, graph)
         setFilters(reuse)
       },
       (message: string) => {
@@ -296,7 +298,14 @@ export function PlannerPage() {
       )}
 
       {collect.status === 'ready' && filters && (
-        <FiltersPanel stops={stops} set={collect.set} filters={filters} onChange={setFilters} limit={limit} />
+        <FiltersPanel
+          stops={stops}
+          set={collect.set}
+          graph={collect.graph}
+          filters={filters}
+          onChange={setFilters}
+          limit={limit}
+        />
       )}
     </>
   )

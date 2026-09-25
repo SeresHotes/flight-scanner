@@ -5,7 +5,7 @@
 // Itinerary собирается только для показанной страницы (materialize).
 
 import type { Segment } from '../types'
-import type { Itinerary, ItineraryStop } from './types'
+import type { Itinerary, ItineraryStop, PlanGraph } from './types'
 
 // Как приходит с бэка (и хранится в кэше).
 export interface CompactResult {
@@ -21,6 +21,7 @@ export interface CompactResult {
   days: number[] // count × (legs + 1) дней в городах
   weekend: number[] // count битовых масок «оба выходных» по остановкам
   total_days: number[]
+  graph?: PlanGraph | null // граф рёбер для режима «наборы городов» (planner.overview_graph)
 }
 
 export function isCompactResult(x: unknown): x is CompactResult {

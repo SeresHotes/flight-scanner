@@ -92,9 +92,32 @@ export interface Itinerary {
   travel_minutes: number
 }
 
+// --- Граф рёбер для режима «наборы городов» (core/planner.overview_graph) ---
+
+// Один собранный рейс перехода. from/to — коды городов, dep/arr — время без TZ.
+export interface GraphEdge {
+  from: string
+  to: string
+  dep: string
+  arr: string
+  price: number
+  transfers: number
+  duration: number
+}
+
+export interface PlanGraph {
+  chain_start: string // YYYY-MM-DD — «прилёт» в стартовый город
+  final_stay_days: number // пребывание в финальном городе (у конца окна нет)
+  starts: string[]
+  any: boolean[] // по остановкам: «любой город» (повторы городов там запрещены)
+  legs: GraphEdge[][] // рёбра по переходам
+  cities: Record<string, { city: string; flag?: string }>
+}
+
 // Состояние сбора данных под текущий маршрут.
 export type CollectState =
   | { status: 'idle' }
   | { status: 'collecting'; progress: number; total: number; stage?: JobStage | null }
-  | { status: 'ready'; set: ItinerarySet; collectedAt: string } // collectedAt — ISO момента сбора
+  // collectedAt — ISO момента сбора; graph — null у данных, собранных до режима обзора
+  | { status: 'ready'; set: ItinerarySet; graph: PlanGraph | null; collectedAt: string }
   | { status: 'error'; message: string }

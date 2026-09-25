@@ -1,7 +1,6 @@
 // Кэш собранных маршрутов в localStorage: чтобы переход по ссылке (или перезагрузка)
 // показывал уже собранные данные, а не запускал сбор заново. Ключ — маршрут (набор
-// остановок), значение — цепочки + момент сбора. Пока это мок; когда появится
-// backend, кэш заменится реальным «что уже собрано и когда» (см. types.ts контракт).
+// остановок), значение — компактный результат (compact.ts) + момент сбора.
 
 import type { PlannerBounds, PlannerStop } from './types'
 import { isCompactResult, type CompactResult } from './compact'
@@ -11,7 +10,7 @@ const KEY = 'planner:collected:v2' // v2 — компактный результ
 const MAX_ENTRIES = 8 // держим только несколько последних маршрутов
 
 export interface CachedCollection {
-  result: CompactResult
+  result: CompactResult // result.graph нет у записей, сохранённых без графа (квота)
   collectedAt: string // ISO
 }
 
@@ -60,13 +59,23 @@ export function putCached(
   collectedAt: string,
 ): void {
   const store = readStore()
-  store[routeKey(stops, bounds)] = { result, collectedAt }
+  const key = routeKey(stops, bounds)
+  store[key] = { result, collectedAt }
 
   // Ограничиваем размер: выкидываем самые старые по времени сбора. Большой результат
-  // (сотни тысяч цепочек — мегабайты) может не влезть в квоту localStorage (~5 МБ) —
-  // тогда вытесняем старые маршруты по одному; не влез и один — просто не кэшируем.
-  const keys = Object.keys(store)
-  keys.sort((a, b) => store[a].collectedAt.localeCompare(store[b].collectedAt))
-  while (keys.length > MAX_ENTRIES) delete store[keys.shift() as string]
-  while (!writeStore(store) && keys.length > 0) delete store[keys.shift() as string]
+  // (сотни тысяч цепочек, широкий граф — мегабайты) может не влезть в квоту
+  // localStorage (~5 МБ): вытесняем старые маршруты по одному, затем граф текущего
+  // (обзор попросит пересбор); не влезло и так — просто не кэшируем.
+  const older = Object.keys(store).filter((k) => k !== key)
+  older.sort((a, b) => store[a].collectedAt.localeCompare(store[b].collectedAt))
+  while (older.length >= MAX_ENTRIES) delete store[older.shift() as string]
+  while (!writeStore(store)) {
+    if (older.length) delete store[older.shift() as string]
+    else if (store[key]?.result.graph) store[key] = { result: { ...result, graph: null }, collectedAt }
+    else {
+      delete store[key]
+      writeStore(store)
+      return
+    }
+  }
 }

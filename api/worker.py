@@ -260,6 +260,10 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
             should_stop=lambda: is_cancel_requested(job_id),
             on_progress=rep.build_progress(max_results))
 
+        # Граф рёбер — для режима «наборы городов»: он оценивает ВСЕ варианты, без
+        # движковых границ max_results/max_cost (см. planner.overview_graph).
+        result["graph"] = planner.overview_graph(stops, collected, city_info=city_info)
+
         if is_cancel_requested(job_id):  # не перетираем статус сброшенной джобы
             raise JobCancelled()
         count = result["count"]

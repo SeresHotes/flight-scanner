@@ -33,6 +33,7 @@ def test_done_job_returns_compact_result(tmp_path, monkeypatch):
     assert done["result"]["format"] == "compact-v1"
     assert done["result"]["count"] > 0
     assert len(done["result"]["chains"]) == done["result"]["count"] * done["result"]["legs"]
+    assert done["result"]["graph"]["legs"]  # граф для режима «наборы городов» рядом с цепочками
 
 
 def test_unknown_job(tmp_path, monkeypatch):

@@ -447,7 +447,8 @@ def plan_gather(req: PlanRequest) -> Dict[str, Any]:
 
 @app.get("/api/plan/jobs/{job_id}")
 def plan_job_status(job_id: str) -> Response:
-    """Прогресс джобы; по завершении — компактный результат (result, см. planner._pack_compact).
+    """Прогресс джобы; по завершении — компактный результат (result, см.
+    planner._pack_compact) с графом рёбер для режима «наборы городов» (result.graph).
 
     Результат на сотни тысяч цепочек весит десятки МБ, поэтому вклеиваем сохранённый
     JSON как есть: json.loads + сериализация FastAPI держали бы в памяти ещё пару копий."""

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { plural } from '../../lib/format'
-import type { CityFilter, PlannerFilters, PlannerStop, TransitionFilter } from '../types'
+import type { CityFilter, PlanGraph, PlannerFilters, PlannerStop, TransitionFilter } from '../types'
 import type { ItinerarySet } from '../compact'
 import { pointLabel } from '../validation'
 import { applyFilters, computeBounds } from '../filtering'
@@ -8,6 +8,10 @@ import { CityFilterCard, type CityOption } from './CityFilterCard'
 import { TransitionFilterCard } from './TransitionFilterCard'
 import { TripLengthFilter } from './TripLengthFilter'
 import { ItineraryCard } from './ItineraryCard'
+import { CityCombos } from './CityCombos'
+import { graphCitiesByStop } from '../overview'
+
+type View = 'routes' | 'combos'
 
 function cityName(s: PlannerStop): string {
   if (s.kind === 'any') return 'любой город'
@@ -20,17 +24,20 @@ function cityName(s: PlannerStop): string {
 export function FiltersPanel({
   stops,
   set,
+  graph,
   filters,
   onChange,
   limit,
 }: {
   stops: PlannerStop[]
   set: ItinerarySet
+  graph: PlanGraph | null // весь собранный граф — для режима «наборы городов»
   filters: PlannerFilters
   onChange: (f: PlannerFilters) => void
   limit: number // хард-лимит числа маршрутов (задаётся возле кнопки загрузки)
 }) {
-  const bounds = useMemo(() => computeBounds(set), [set])
+  const [view, setView] = useState<View>('routes')
+  const bounds = useMemo(() => computeBounds(set, graph), [set, graph])
   const visible = useMemo(() => applyFilters(set, filters), [set, filters])
 
   // Хард-лимит (задан выше, возле кнопки загрузки) отсекает сколько подходящих
@@ -50,19 +57,29 @@ export function FiltersPanel({
   useEffect(() => setPage(0), [visible, limit]) // сброс на первую страницу при смене выборки
 
   // Города, реально встретившиеся на каждой остановке — из них и выбираем в фильтре.
-  const cityOptionsByStop = useMemo<CityOption[][]>(
-    () =>
-      stops.map((_, i) => {
-        const seen = new Map<string, CityOption>()
-        if (i >= set.stopCount) return []
-        for (let n = 0; n < set.count; n++) {
-          const code = set.stopCode(n, i)
-          if (!seen.has(code)) seen.set(code, { code, ...set.cityOf(code) })
-        }
-        return Array.from(seen.values())
-      }),
-    [stops, set],
-  )
+  // Граф шире топ-N цепочек списка, поэтому его города тоже в выборе.
+  const cityOptionsByStop = useMemo<CityOption[][]>(() => {
+    const graphCities = graph ? graphCitiesByStop(graph) : []
+    return stops.map((_, i) => {
+      const seen = new Map<string, CityOption>()
+      for (let n = 0; i < set.stopCount && n < set.count; n++) {
+        const code = set.stopCode(n, i)
+        if (!seen.has(code)) seen.set(code, { code, ...set.cityOf(code) })
+      }
+      for (const code of graphCities[i] ?? []) {
+        const ci = graph?.cities[code]
+        if (!seen.has(code)) seen.set(code, { code, city: ci?.city ?? code, flag: ci?.flag })
+      }
+      return Array.from(seen.values())
+    })
+  }, [stops, set, graph])
+
+  // «Показать маршруты» у набора: фиксируем города на остановках и уходим в список.
+  const showComboRoutes = (codes: string[]) => {
+    const cities = filters.cities.map((c, i) => ({ ...c, allowedCodes: codes[i] ? [codes[i]] : c.allowedCodes }))
+    onChange({ ...filters, cities })
+    setView('routes')
+  }
 
   const patchCity = (i: number, patch: Partial<CityFilter>) => {
     const cities = filters.cities.map((c, idx) => (idx === i ? { ...c, ...patch } : c))
@@ -103,35 +120,69 @@ export function FiltersPanel({
         onChange={(tripLength) => onChange({ ...filters, tripLength })}
       />
 
-      <div className="count">
-        Подходит <b>{visible.length}</b> из {set.count}{' '}
-        {plural(set.count, 'маршрута', 'маршрутов', 'маршрутов')}
-        {limited.length < visible.length && <> · лимит {limited.length}</>}
+      <div className="pl-viewtabs" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'routes'}
+          className={view === 'routes' ? 'on' : ''}
+          onClick={() => setView('routes')}
+        >
+          ✈ Маршруты
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'combos'}
+          className={view === 'combos' ? 'on' : ''}
+          onClick={() => setView('combos')}
+          title="Все варианты наборов городов — без лимита маршрутов и цены"
+        >
+          🗺 Наборы городов
+        </button>
       </div>
 
-      {visible.length ? (
-        <>
-          <div className="cards">
-            {pageItems.map((it) => (
-              <ItineraryCard key={it.id} it={it} />
-            ))}
+      {view === 'combos' ? (
+        graph ? (
+          <CityCombos graph={graph} filters={filters} onShowRoutes={showComboRoutes} />
+        ) : (
+          <div className="empty">
+            Эти данные собраны до появления обзора наборов городов — нажмите «↻ Загрузить свежие данные».
           </div>
-          {pageCount > 1 && (
-            <div className="pl-pager">
-              <button type="button" disabled={curPage === 0} onClick={() => setPage(curPage - 1)}>
-                ← Назад
-              </button>
-              <span>
-                Страница {curPage + 1} из {pageCount}
-              </span>
-              <button type="button" disabled={curPage >= pageCount - 1} onClick={() => setPage(curPage + 1)}>
-                Вперёд →
-              </button>
-            </div>
+        )
+      ) : (
+        <>
+          <div className="count">
+            Подходит <b>{visible.length}</b> из {set.count}{' '}
+            {plural(set.count, 'маршрута', 'маршрутов', 'маршрутов')}
+            {limited.length < visible.length && <> · лимит {limited.length}</>}
+          </div>
+
+          {visible.length ? (
+            <>
+              <div className="cards">
+                {pageItems.map((it) => (
+                  <ItineraryCard key={it.id} it={it} />
+                ))}
+              </div>
+              {pageCount > 1 && (
+                <div className="pl-pager">
+                  <button type="button" disabled={curPage === 0} onClick={() => setPage(curPage - 1)}>
+                    ← Назад
+                  </button>
+                  <span>
+                    Страница {curPage + 1} из {pageCount}
+                  </span>
+                  <button type="button" disabled={curPage >= pageCount - 1} onClick={() => setPage(curPage + 1)}>
+                    Вперёд →
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="empty">Под текущие фильтры маршрутов нет — ослабьте условия.</div>
           )}
         </>
-      ) : (
-        <div className="empty">Под текущие фильтры маршрутов нет — ослабьте условия.</div>
       )}
     </div>
   )
