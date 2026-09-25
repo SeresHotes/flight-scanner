@@ -73,3 +73,30 @@ def test_start_pruned_when_below_budget_impossible():
     """Бюджет ниже самой дешёвой цепочки — результат пуст, старт отсекается сразу."""
     itins = build_itineraries(STOPS, COLLECTED, city_info=CITY_INFO, max_cost=150)
     assert itins == []
+
+
+# Три средних города → три цепочки: итого 200, 400, 600.
+COLLECTED3 = {
+    0: [
+        _flight("MOW", "IST", "2026-11-02T10:00:00", price=100),
+        _flight("MOW", "DXB", "2026-11-02T10:00:00", price=100),
+        _flight("MOW", "NYC", "2026-11-02T10:00:00", price=100),
+    ],
+    1: [
+        _flight("IST", "DST", "2026-11-05T10:00:00", price=100),   # итого 200
+        _flight("DXB", "DST", "2026-11-05T10:00:00", price=300),   # итого 400
+        _flight("NYC", "DST", "2026-11-05T10:00:00", price=500),   # итого 600
+    ],
+}
+
+
+def test_best_first_returns_n_cheapest_from_many():
+    """max_results — движковый потолок: N САМЫХ ДЕШЁВЫХ (best-first), не любые N."""
+    itins = build_itineraries(STOPS, COLLECTED3, city_info=CITY_INFO, max_results=2)
+    assert [it["total_price"] for it in itins] == [200, 400]
+
+
+def test_max_results_with_cost_bound():
+    """Потолок числа и бюджет вместе: дорогая (600) отсекается бюджетом, N не добирается."""
+    itins = build_itineraries(STOPS, COLLECTED3, city_info=CITY_INFO, max_results=5, max_cost=400)
+    assert [it["total_price"] for it in itins] == [200, 400]
