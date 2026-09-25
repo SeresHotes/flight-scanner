@@ -362,6 +362,30 @@ def job_status(job_id: str) -> Dict[str, Any]:
     }
 
 
+# Сколько джоба в running может молчать, прежде чем /jobs/rescue сочтёт её
+# зависшей. Загрузка обновляет джобу на каждом запросе (~раз в секунду); стыковка
+# с потолком маршрутов укладывается в секунды — минута тишины = воркер застрял.
+HUNG_JOB_SECONDS = 60
+RESCUED_JOB_ERROR = "Сбор завис и был сброшен. Попробуйте сузить маршрут или даты."
+
+
+@app.post("/api/jobs/rescue")
+def rescue_jobs() -> Dict[str, Any]:
+    """«Починить»: сбрасывает зависшие джобы, чтобы освободить однопоточный воркер.
+
+    Executor один на всех (max_workers=1), поэтому одна застрявшая джоба держит в
+    «В очереди» все остальные. Помечаем её error и просим воркер бросить её
+    (кооперативно, см. worker.request_cancel) — очередь двигается дальше."""
+    with _jobs_lock:
+        hung = hot.find_hung_jobs(_conn, HUNG_JOB_SECONDS)
+        for job_id in hung:
+            worker.request_cancel(job_id)
+            hot.update_job(_conn, job_id, status="error", error=RESCUED_JOB_ERROR)
+    if hung:
+        print(f"[rescue] сброшены зависшие джобы: {', '.join(hung)}")
+    return {"status": "ok", "rescued": hung}
+
+
 # ------------------------- планировщик цепочек A→B→C --------------------------
 
 class PlanStop(BaseModel):

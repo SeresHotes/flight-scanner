@@ -71,6 +71,7 @@ select:disabled{opacity:.4}
   background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin-bottom:10px}
 .fb-info{font-size:13px;color:var(--muted)}
 .fb-info b{color:var(--txt)}
+.fb-note{flex-basis:100%}
 .fb-error{flex-basis:100%;color:#ff6b6f;font-size:12.5px;margin-top:6px}
 .btn-ghost{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:10px;
   padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer}

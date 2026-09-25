@@ -7,7 +7,7 @@ import glob
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -305,6 +305,19 @@ def update_job(conn: sqlite3.Connection, job_id: str, **fields) -> None:
 def get_job(conn: sqlite3.Connection, job_id: str) -> Optional[Dict[str, Any]]:
     row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     return dict(row) if row else None
+
+
+def find_hung_jobs(conn: sqlite3.Connection, idle_seconds: float) -> List[str]:
+    """id джоб в running, которые не обновлялись дольше idle_seconds.
+
+    Живой сбор обновляет джобу на каждом запросе к API (раз в ~0.5–1с), так что
+    долгая тишина = воркер застрял (обычно в переборе стыковки). pending не берём:
+    джоба в очереди молчит законно, пока ждёт свободного воркера."""
+    cutoff = (datetime.now() - timedelta(seconds=idle_seconds)).isoformat()
+    rows = conn.execute(
+        "SELECT id FROM jobs WHERE status='running' AND updated_at < ?", (cutoff,),
+    ).fetchall()
+    return [r[0] for r in rows]
 
 
 def fail_stale_jobs(conn: sqlite3.Connection,
