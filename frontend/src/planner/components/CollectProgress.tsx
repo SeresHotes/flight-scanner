@@ -20,7 +20,9 @@ export function CollectProgress({
   total: number
   stage?: JobStage | null
 }) {
-  const stalled = useStalled(`${progress}|${stage?.key}|${stage?.step?.done}|${stage?.cached}`)
+  const stalled = useStalled(
+    `${progress}|${stage?.key}|${stage?.step?.done}|${stage?.cached}|${stage?.build?.explored}`,
+  )
   return (
     <>
       <StageProgress

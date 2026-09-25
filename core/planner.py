@@ -324,7 +324,8 @@ class SearchAborted(Exception):
 def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]],
                       city_info=None, max_results: Optional[int] = None,
                       max_cost: Optional[float] = None,
-                      should_stop: Optional[Callable[[], bool]] = None) -> List[Dict[str, Any]]:
+                      should_stop: Optional[Callable[[], bool]] = None,
+                      on_progress: Optional[Callable[[int, int], None]] = None) -> List[Dict[str, Any]]:
     """Собирает цепочки из собранных плеч. Чистая функция (без I/O).
 
     max_results — движковый потолок: сколько САМЫХ ДЕШЁВЫХ цепочек вернуть. Это НЕ
@@ -335,7 +336,9 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
     минимального «хвоста» (_completion_lb), не разворачивая бесперспективные
     направления. max_results=None — прежний режим «все цепочки без потолка».
     should_stop() проверяется на каждом шаге перебора: True → SearchAborted (так
-    воркер останавливает зависшую стыковку — поток Python снаружи не убить)."""
+    воркер останавливает зависшую стыковку — поток Python снаружи не убить).
+    on_progress(found, explored) — тоже на каждом шаге: сколько цепочек уже готово
+    и сколько вариантов перебрано (для прогресса в UI; частоту записи режет вызывающий)."""
     if city_info is None:
         city_info = make_city_lookup(agg.load_airport_network())
     builder = Builder(None, city_info)  # make_segment использует только city_info
@@ -344,22 +347,31 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
     chain_start = _leg_dates(stops, 0)[0]  # первая дата окна нулевого плеча
     last = len(stops) - 1
     ctx = (stops, legs_by_origin, builder, city_info, chain_start, last)
-    check = _abort_check(should_stop)
+    check = _step_check(should_stop, on_progress)
 
     if max_results is None:
         return _enumerate_all(ctx, max_cost, check)
     return _search_cheapest(ctx, max_results, max_cost, check)
 
 
-def _abort_check(should_stop: Optional[Callable[[], bool]]) -> Callable[[], None]:
-    def check() -> None:
+def _step_check(should_stop: Optional[Callable[[], bool]],
+                on_progress: Optional[Callable[[int, int], None]]) -> Callable[[int], None]:
+    """Хук шага перебора: check(found) считает шаги, сообщает прогресс и прерывает
+    перебор, если джобу сбросили."""
+    explored = 0
+
+    def check(found: int) -> None:
+        nonlocal explored
+        explored += 1
         if should_stop is not None and should_stop():
             raise SearchAborted()
+        if on_progress is not None:
+            on_progress(found, explored)
     return check
 
 
 def _enumerate_all(ctx, max_cost: Optional[float],
-                   check: Callable[[], None]) -> List[Dict[str, Any]]:
+                   check: Callable[[int], None]) -> List[Dict[str, Any]]:
     """Полный перебор всех цепочек (без потолка числа), сортировка по цене.
 
     Тяжёлый режим для отладки: на плотном графе может строить огромный список — им
@@ -371,7 +383,7 @@ def _enumerate_all(ctx, max_cost: Optional[float],
     seq = {"id": 1}
 
     def dfs(i, city, arrive_iso, chosen, visited, g):
-        check()
+        check(len(results))
         if i == last:
             results.append(_assemble(stops, chosen, builder, city_info, chain_start, seq["id"]))
             seq["id"] += 1
@@ -397,7 +409,7 @@ def _enumerate_all(ctx, max_cost: Optional[float],
 
 
 def _search_cheapest(ctx, max_results: int, max_cost: Optional[float],
-                     check: Callable[[], None]) -> List[Dict[str, Any]]:
+                     check: Callable[[int], None]) -> List[Dict[str, Any]]:
     """best-first (A*): извлекает цепочки по возрастанию цены и останавливается на N.
 
     Эвристика h = _completion_lb (минимальная цена «хвоста») — admissible и
@@ -430,7 +442,7 @@ def _search_cheapest(ctx, max_results: int, max_cost: Optional[float],
 
     results: List[Dict[str, Any]] = []
     while heap and len(results) < max_results:
-        check()
+        check(len(results))
         _, _, i, city, arrive_iso, chosen, visited, g = heapq.heappop(heap)
         if i == last:  # цепочка готова — и она среди самых дешёвых из оставшихся
             results.append(_assemble(stops, chosen, builder, city_info, chain_start, len(results) + 1))

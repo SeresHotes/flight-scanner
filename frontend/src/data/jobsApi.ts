@@ -11,6 +11,9 @@ export interface JobStage {
   step: { index: number; count: number; label: string; done: number; total: number } | null
   cached: number // сколько ответов взято из кэша (без обращения к API)
   flights: number | null // сколько рейсов загружено (после этапа загрузки)
+  // Стыковка цепочек: сколько уже найдено из лимита (limit=null — без потолка) и
+  // сколько вариантов перебрано. Нет у сбора A→B и у джоб до появления счётчика.
+  build?: { found: number; limit: number | null; explored: number } | null
 }
 
 export interface JobStatus {

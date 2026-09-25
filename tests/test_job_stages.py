@@ -29,7 +29,7 @@ def _fake_fetch(origin=None, destination=None, departure_at=None, **_):
     return {"data": [_flight("IST", "DST", f"{day}T20:00:00", 100)]}
 
 
-def _run(tmp_path, monkeypatch):
+def _run(tmp_path, monkeypatch, max_results=None):
     db = str(tmp_path / "jobs.db")
     conn = hot.connect(db)
     hot.init_db(conn)
@@ -46,8 +46,39 @@ def _run(tmp_path, monkeypatch):
         orig_update(c, job_id, **fields)
 
     monkeypatch.setattr(hot, "update_job", spy)
-    worker.run_plan_collection(db, "j1", STOPS)
+    worker.run_plan_collection(db, "j1", STOPS, max_results=max_results)
     return conn, snapshots
+
+
+def test_build_stage_reports_found_of_limit(tmp_path, monkeypatch):
+    """«Стыковка»: сколько цепочек уже найдено из лимита и сколько вариантов перебрано."""
+    monkeypatch.setattr(worker, "BUILD_FLUSH_SECONDS", 0)  # писать каждый шаг
+    conn, snaps = _run(tmp_path, monkeypatch, max_results=2)
+    assert hot.get_job(conn, "j1")["status"] == "done"
+
+    builds = [s["build"] for s in snaps if s["key"] == "build" and s["build"]]
+    assert builds, "на этапе стыковки должен писаться прогресс"
+    assert all(b["limit"] == 2 for b in builds)
+    explored = [b["explored"] for b in builds]
+    found = [b["found"] for b in builds]
+    assert explored == sorted(explored) and explored[-1] > 1
+    assert found == sorted(found) and found[-1] <= 2
+
+
+def test_planner_on_progress_counts_steps():
+    from core.planner import build_itineraries, parse_stops
+
+    calls = []
+    collected = {
+        0: [_flight("MOW", "IST", f"2026-11-0{d}T10:00:00", 100) for d in (1, 2)],
+        1: [_flight("IST", "DST", f"2026-11-0{d}T20:00:00", 100) for d in (1, 2)],
+    }
+    city = lambda code: {"city": code, "country": "", "flag": ""}  # noqa: E731
+    itins = build_itineraries(parse_stops(STOPS), collected, city_info=city, max_results=10,
+                              on_progress=lambda found, explored: calls.append((found, explored)))
+    assert itins
+    assert [e for _, e in calls] == list(range(1, len(calls) + 1))
+    assert calls[-1][0] <= len(itins)
 
 
 def test_initial_stage_is_queued_with_all_stages(tmp_path):
