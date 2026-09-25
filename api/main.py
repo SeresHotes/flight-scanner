@@ -390,13 +390,17 @@ def plan_gather(req: PlanRequest) -> Dict[str, Any]:
                 "message": f"Слишком широкие окна (~{est['requests']} запросов). Сузьте диапазоны.",
                 "estimate": est}
 
+    # Зажимаем число цепочек жёстким потолком уже здесь: None (старый клиент) или
+    # огромное значение → безопасный предел. Воркер дублирует этот зажим.
+    eff_max_results = planner.clamp_max_results(req.max_results)
+
     job_id = uuid.uuid4().hex[:12]
     hot.create_job(_conn, job_id,
                    {"kind": "plan", "stops": raw,
-                    "max_results": req.max_results, "max_cost": req.max_cost},
+                    "max_results": eff_max_results, "max_cost": req.max_cost},
                    total=est["requests"])
     _executor.submit(worker.run_plan_collection, hot.DEFAULT_DB, job_id, raw,
-                     req.max_results, req.max_cost)
+                     eff_max_results, req.max_cost)
     return {"status": "collecting", "job_id": job_id, "total": est["requests"]}
 
 

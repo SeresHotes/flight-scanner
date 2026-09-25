@@ -244,16 +244,18 @@ export function PlannerPage() {
         {/* Движковые границы — видны всегда, рядом с загрузкой данных. Их смена
             делает собранные данные несвежими (нужен пересбор), т.к. результат
             строится на бэке под эти границы. */}
-        <label className="pl-limit-row" title="Сколько самых дешёвых маршрутов строить (движковый потолок)">
+        <label className="pl-limit-row" title="Сколько самых дешёвых маршрутов строить (движковый потолок, максимум 1000)">
           Максимум маршрутов:{' '}
           <input
             type="number"
             min={1}
-            max={100000}
-            step={100}
+            max={1000}
+            step={50}
             value={limit}
             onChange={(e) => {
-              setLimit(Math.max(1, Math.min(100000, Number(e.target.value) || 1)))
+              // Потолок 1000 — совпадает с серверным PLAN_HARD_MAX_RESULTS: больше
+              // строить бессмысленно и опасно (сотни МБ ответа вешают браузер).
+              setLimit(Math.max(1, Math.min(1000, Number(e.target.value) || 1)))
               resetCollected()
             }}
           />

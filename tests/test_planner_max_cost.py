@@ -4,7 +4,14 @@ max_cost должен резать целые бесперспективные �
 минимального «хвоста» (_completion_lb), а не только фильтровать готовый результат.
 max_results — оставлять N самых дешёвых цепочек. Без обеих границ — прежнее «всё».
 """
-from core.planner import Stop, _completion_lb, _index_leg, build_itineraries
+from core.planner import (
+    PLAN_HARD_MAX_RESULTS,
+    Stop,
+    _completion_lb,
+    _index_leg,
+    build_itineraries,
+    clamp_max_results,
+)
 
 CITY_INFO = lambda code: {"city": code, "country": "", "flag": ""}
 
@@ -100,3 +107,16 @@ def test_max_results_with_cost_bound():
     """Потолок числа и бюджет вместе: дорогая (600) отсекается бюджетом, N не добирается."""
     itins = build_itineraries(STOPS, COLLECTED3, city_info=CITY_INFO, max_results=5, max_cost=400)
     assert [it["total_price"] for it in itins] == [200, 400]
+
+
+def test_clamp_max_results_hard_cap():
+    """Жёсткий потолок: None и огромные значения зажимаются, разумные — проходят.
+
+    Регресс на прод-инцидент: запрос без max_results (старый закешированный фронт)
+    уходил в безлимитный перебор → 100000 цепочек, 282 МБ ответа, зависание."""
+    assert clamp_max_results(None) == PLAN_HARD_MAX_RESULTS
+    assert clamp_max_results(100000) == PLAN_HARD_MAX_RESULTS
+    assert clamp_max_results(PLAN_HARD_MAX_RESULTS + 1) == PLAN_HARD_MAX_RESULTS
+    assert clamp_max_results(100) == 100
+    assert clamp_max_results(0) == 1
+    assert clamp_max_results(-5) == 1
