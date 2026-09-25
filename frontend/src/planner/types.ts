@@ -2,6 +2,7 @@
 // Backend реализует ровно эти формы позже: POST /api/plan/estimate, /api/plan/gather.
 
 import type { AirportOption } from '../data/airports'
+import type { JobStage } from '../data/jobsApi'
 import type { Segment } from '../types'
 
 export type StopKind = 'cities' | 'any'
@@ -93,6 +94,6 @@ export interface Itinerary {
 // Состояние сбора данных под текущий маршрут.
 export type CollectState =
   | { status: 'idle' }
-  | { status: 'collecting'; progress: number; total: number }
+  | { status: 'collecting'; progress: number; total: number; stage?: JobStage | null }
   | { status: 'ready'; itineraries: Itinerary[]; collectedAt: string } // collectedAt — ISO момента сбора
   | { status: 'error'; message: string }

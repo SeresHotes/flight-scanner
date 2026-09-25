@@ -26,11 +26,69 @@ ESTIMATE_TIME_FACTOR = 2  # запас пессимизма в показанн�
 FETCH_CACHE_TTL_SECONDS = 24 * 3600
 
 
-def _make_cached_fetch(conn):
+# Этапы сбора для UI. Ключи стабильны (фронт по ним рисует степпер), подписи —
+# под вид джобы: у маршрута A→B после загрузки собираются варианты, у планировщика
+# стыкуются цепочки.
+_ROUTE_STAGES = [("queued", "В очереди"), ("fetch", "Загрузка рейсов"),
+                 ("build", "Сборка вариантов"), ("save", "Сохранение")]
+_PLAN_STAGES = [("queued", "В очереди"), ("fetch", "Загрузка рейсов"),
+                ("build", "Стыковка цепочек"), ("save", "Сохранение")]
+
+
+def initial_stage(kind: str) -> Dict[str, Any]:
+    """Этап свежесозданной джобы (ждёт своей очереди в однопоточном executor)."""
+    stages = _PLAN_STAGES if kind == "plan" else _ROUTE_STAGES
+    return {"key": "queued", "stages": [{"key": k, "label": lbl} for k, lbl in stages],
+            "step": None, "cached": 0, "flights": None}
+
+
+class StageReporter:
+    """Пишет в jobs текущий этап сбора: этап, шаг загрузки (переход i из N и
+    сколько его запросов уже сделано), сколько ответов взято из кэша.
+
+    steps — [{label, requests}] в порядке обхода сборщиком."""
+
+    def __init__(self, conn, job_id: str, kind: str, steps: List[Dict[str, Any]]):
+        self.conn = conn
+        self.job_id = job_id
+        self.steps = steps
+        self.state = initial_stage(kind)
+        self.progress = 0
+
+    def _flush(self, **fields) -> None:
+        hot.update_job(self.conn, self.job_id,
+                       stage_json=json.dumps(self.state, ensure_ascii=False), **fields)
+
+    def stage(self, key: str, **fields) -> None:
+        self.state["key"] = key
+        self.state["step"] = None
+        self._flush(**fields)
+
+    def step(self, index: int) -> None:
+        info = self.steps[index] if index < len(self.steps) else {"label": "", "requests": 0}
+        self.state["step"] = {"index": index, "count": len(self.steps), "label": info["label"],
+                              "done": 0, "total": info["requests"]}
+        self._flush()
+
+    def cache_hit(self) -> None:
+        self.state["cached"] += 1  # попадёт в БД вместе со следующим tick()
+
+    def tick(self) -> None:
+        self.progress += 1
+        if self.state["step"] is not None:
+            self.state["step"]["done"] += 1
+        self._flush(progress=self.progress)
+
+    def flights(self, n: int) -> None:
+        self.state["flights"] = n
+
+
+def _make_cached_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None):
     """Обёртка над collector.fetch_flights с TTL-кэшем по (origin, destination, day).
 
     На попадании возвращает сохранённый ответ без обращения к API (и без rate-limit
-    паузы). Сбойные ответы (error=True) и запросы без даты не кэшируем."""
+    паузы). Сбойные ответы (error=True) и запросы без даты не кэшируем.
+    on_cache_hit() — для счётчика «из кэша» в прогрессе джобы."""
     def fetch(origin=None, destination=None, departure_at=None, currency="RUB",
               unique=True, limit=1000, allow_indirect=False):
         direct = 0 if allow_indirect else 1
@@ -38,6 +96,8 @@ def _make_cached_fetch(conn):
             cached = hot.fetch_cache_get(conn, origin, destination, departure_at,
                                          direct, FETCH_CACHE_TTL_SECONDS)
             if cached is not None:
+                if on_cache_hit:
+                    on_cache_hit()
                 return {"data": cached}
         result = collector.fetch_flights(
             origin=origin, destination=destination, departure_at=departure_at,
@@ -64,18 +124,18 @@ def run_collection(db_path: str, job_id: str, params: Dict[str, Any],
     destination = params["destination"].upper()
     try:
         total = estimate_requests(params)
-        hot.update_job(conn, job_id, status="running", total=total, progress=0)
-
-        counter = {"n": 0}
-
-        def cb():
-            counter["n"] += 1
-            hot.update_job(conn, job_id, progress=counter["n"])
+        steps = collector.route_steps(origin, destination, params["leg1_dates"],
+                                      params["leg2_dates"], STOP_DAYS)
+        rep = StageReporter(conn, job_id, "route", steps)
+        rep.stage("fetch", status="running", total=total, progress=0)
 
         collected = collector.collect_route(
             origin, destination, params["leg1_dates"], params["leg2_dates"],
-            stop_days=STOP_DAYS, progress_cb=cb, fetch_fn=_make_cached_fetch(conn),
+            stop_days=STOP_DAYS, progress_cb=rep.tick,
+            fetch_fn=_make_cached_fetch(conn, rep.cache_hit), step_cb=rep.step,
         )
+        rep.flights(sum(len(collected[ds][leg]) for ds in collected for leg in collected[ds]))
+        rep.stage("build")
 
         network = agg.load_airport_network()
         cfg = make_route_config(origin, destination, stop_days=STOP_DAYS)
@@ -85,6 +145,7 @@ def run_collection(db_path: str, job_id: str, params: Dict[str, Any],
         payload["meta"]["collected_at"] = now
 
         # Сохраняем котировки в горячее хранилище + дозаписываем в озеро.
+        rep.stage("save")
         flights = []
         for ds in ("plain", "there", "back"):
             flights += collected[ds]["leg1_flights"] + collected[ds]["leg2_flights"]
@@ -127,21 +188,23 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
     try:
         stops = planner.parse_stops(raw_stops)
         total = planner.request_count(stops)
-        hot.update_job(conn, job_id, status="running", total=total, progress=0)
-
-        counter = {"n": 0}
-
-        def cb():
-            counter["n"] += 1
-            hot.update_job(conn, job_id, progress=counter["n"])
-
-        collected = planner.collect_plan(stops, progress_cb=cb, fetch_fn=_make_cached_fetch(conn))
-
         from core.trip_builder import make_city_lookup
         city_info = make_city_lookup(agg.load_airport_network())
+        steps = [{"label": f"{leg['fromLabel']} → {leg['toLabel']}", "requests": leg["requests"]}
+                 for leg in planner.estimate_plan(stops, city_info)["legs"]]
+        rep = StageReporter(conn, job_id, "plan", steps)
+        rep.stage("fetch", status="running", total=total, progress=0)
+
+        collected = planner.collect_plan(stops, progress_cb=rep.tick,
+                                         fetch_fn=_make_cached_fetch(conn, rep.cache_hit),
+                                         leg_cb=rep.step)
+        rep.flights(sum(len(v) for v in collected.values()))
+        rep.stage("build")
+
         itineraries = planner.build_itineraries(stops, collected, city_info=city_info,
                                                 max_results=max_results, max_cost=max_cost)
 
+        rep.stage("save")
         now = datetime.now().isoformat()
         flights: List[Dict[str, Any]] = []
         for leg_flights in collected.values():

@@ -330,10 +330,22 @@ def gather(req: SearchRequest) -> Dict[str, Any]:
         if active:
             return {"status": "collecting", "job_id": active}
         job_id = uuid.uuid4().hex[:12]
-        hot.create_job(_conn, job_id, params, total=est["requests"])
+        hot.create_job(_conn, job_id, params, total=est["requests"],
+                       stage=worker.initial_stage("route"))
         _route_jobs[key] = job_id
     _executor.submit(worker.run_collection, hot.DEFAULT_DB, job_id, params, _on_job_done)
     return {"status": "collecting", "job_id": job_id}
+
+
+def _job_stage(job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Текущий этап сбора (см. worker.StageReporter); None у старых джоб без этапа."""
+    raw = job.get("stage_json")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 
 @app.get("/api/jobs/{job_id}")
@@ -346,6 +358,7 @@ def job_status(job_id: str) -> Dict[str, Any]:
         "progress": job["progress"],
         "total": job["total"],
         "error": job["error"],
+        "stage": _job_stage(job),
     }
 
 
@@ -398,7 +411,7 @@ def plan_gather(req: PlanRequest) -> Dict[str, Any]:
     hot.create_job(_conn, job_id,
                    {"kind": "plan", "stops": raw,
                     "max_results": eff_max_results, "max_cost": req.max_cost},
-                   total=est["requests"])
+                   total=est["requests"], stage=worker.initial_stage("plan"))
     _executor.submit(worker.run_plan_collection, hot.DEFAULT_DB, job_id, raw,
                      eff_max_results, req.max_cost)
     return {"status": "collecting", "job_id": job_id, "total": est["requests"]}
@@ -415,6 +428,7 @@ def plan_job_status(job_id: str) -> Dict[str, Any]:
         "progress": job["progress"],
         "total": job["total"],
         "error": job["error"],
+        "stage": _job_stage(job),
     }
     if job["status"] == "done" and job["result_json"]:
         try:

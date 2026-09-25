@@ -3,6 +3,7 @@
 // Сигнатура повторяет прежний runMockCollection — императивный запуск с функцией
 // отмены (на случай размонтирования / правки маршрута).
 
+import type { JobStage, JobStatus } from '../data/jobsApi'
 import type { Itinerary, PlannerBounds, PlannerStop } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
@@ -15,11 +16,7 @@ interface GatherResponse {
   message?: string
 }
 
-interface PlanJob {
-  status: 'pending' | 'running' | 'done' | 'error' | 'not_found'
-  progress: number
-  total: number
-  error?: string | null
+interface PlanJob extends JobStatus {
   itineraries?: Itinerary[]
 }
 
@@ -31,7 +28,7 @@ function stopsPayload(stops: PlannerStop[]) {
 export function runCollection(
   stops: PlannerStop[],
   bounds: PlannerBounds,
-  onProgress: (progress: number, total: number) => void,
+  onProgress: (progress: number, total: number, stage?: JobStage | null) => void,
   onDone: (itineraries: Itinerary[]) => void,
   onError: (message: string) => void,
 ): () => void {
@@ -55,7 +52,7 @@ export function runCollection(
         onError(job.error || 'Сбор не удался — попробуйте ещё раз.')
         return
       }
-      onProgress(job.progress, job.total || 1)
+      onProgress(job.progress, job.total || 1, job.stage)
       timer = setTimeout(() => poll(jobId), POLL_MS)
     } catch {
       if (!cancelled) onError('Потеряна связь с сервером во время сбора.')

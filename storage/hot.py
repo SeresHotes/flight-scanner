@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     total       INTEGER DEFAULT 0,
     result_json TEXT,
     error       TEXT,
+    stage_json  TEXT,       -- текущий этап сбора для UI (см. api.worker.StageReporter)
     created_at  TEXT,
     updated_at  TEXT
 );
@@ -78,7 +79,16 @@ def connect(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _add_column_if_missing(conn, "jobs", "stage_json", "TEXT")
     conn.commit()
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """Мини-миграция: CREATE TABLE IF NOT EXISTS не добавляет колонки в уже
+    существующую таблицу (прод-БД живёт между деплоями)."""
+    cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 # ------------------------------- quotes --------------------------------------
@@ -272,12 +282,13 @@ def fetch_cache_put(conn: sqlite3.Connection, origin: Optional[str],
 # -------------------------------- jobs ---------------------------------------
 
 def create_job(conn: sqlite3.Connection, job_id: str, params: Dict[str, Any],
-               total: int = 0) -> None:
+               total: int = 0, stage: Optional[Dict[str, Any]] = None) -> None:
     now = datetime.now().isoformat()
+    stage_json = json.dumps(stage, ensure_ascii=False) if stage is not None else None
     conn.execute(
-        "INSERT INTO jobs (id, params_json, status, progress, total, created_at, updated_at) "
-        "VALUES (?, ?, 'pending', 0, ?, ?, ?)",
-        (job_id, json.dumps(params, ensure_ascii=False), total, now, now),
+        "INSERT INTO jobs (id, params_json, status, progress, total, stage_json, created_at, updated_at) "
+        "VALUES (?, ?, 'pending', 0, ?, ?, ?, ?)",
+        (job_id, json.dumps(params, ensure_ascii=False), total, stage_json, now, now),
     )
     conn.commit()
 

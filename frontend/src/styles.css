@@ -302,6 +302,21 @@ select:disabled{opacity:.4}
   border:1px solid var(--line);border-radius:999px;overflow:hidden}
 .progressbar-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));
   transition:width .4s ease;border-radius:999px}
+.progressbar-small{height:6px;max-width:320px;margin-top:8px}
+.progressbar-indeterminate{width:35%;animation:pb-slide 1.2s ease-in-out infinite}
+@keyframes pb-slide{0%{margin-left:-35%}100%{margin-left:100%}}
+/* Этапы фонового сбора (StageProgress) */
+.stage-list{list-style:none;display:flex;flex-wrap:wrap;justify-content:center;gap:6px 18px;
+  padding:0;margin:6px 0 16px;font-size:13px}
+.stage{display:flex;align-items:center;gap:6px}
+.stage-mark{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;
+  border-radius:50%;font-size:11px;font-weight:700;border:1px solid var(--line);background:var(--chip)}
+.stage-done{color:var(--ok)}
+.stage-done .stage-mark{border-color:var(--ok);color:var(--ok)}
+.stage-active{color:var(--txt);font-weight:700}
+.stage-active .stage-mark{border-color:var(--accent);background:var(--accent);color:#fff}
+.stage-step{margin-bottom:14px;color:var(--txt)}
+.stage-cached{color:var(--muted)}
 
 /* ---------- Планировщик маршрута (цепочка городов) ---------- */
 .pl-skeleton{margin-bottom:16px}
