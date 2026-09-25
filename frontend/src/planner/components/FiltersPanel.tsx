@@ -21,21 +21,21 @@ export function FiltersPanel({
   itineraries,
   filters,
   onChange,
+  limit,
 }: {
   stops: PlannerStop[]
   itineraries: Itinerary[]
   filters: PlannerFilters
   onChange: (f: PlannerFilters) => void
+  limit: number // хард-лимит числа маршрутов (задаётся возле кнопки загрузки)
 }) {
   const bounds = useMemo(() => computeBounds(itineraries), [itineraries])
   const visible = useMemo(() => applyFilters(itineraries, filters), [itineraries, filters])
 
-  // Хард-лимит на число маршрутов (вводом, дефолт 10к) — сколько подходящих
-  // цепочек вообще берём в рассмотрение (visible уже отсортирован по цене).
-  // Внутри лимита листаем страницами по PAGE_SIZE.
-  const DEFAULT_LIMIT = 10000
+  // Хард-лимит (задан выше, возле кнопки загрузки) отсекает сколько подходящих
+  // цепочек берём в рассмотрение (visible отсортирован по цене). Внутри лимита
+  // листаем страницами по PAGE_SIZE.
   const PAGE_SIZE = 100
-  const [limit, setLimit] = useState(DEFAULT_LIMIT)
   const [page, setPage] = useState(0)
 
   const limited = useMemo(() => visible.slice(0, Math.max(1, limit)), [visible, limit])
@@ -105,22 +105,6 @@ export function FiltersPanel({
         {plural(itineraries.length, 'маршрута', 'маршрутов', 'маршрутов')}
         {limited.length < visible.length && <> · лимит {limited.length}</>}
       </div>
-
-      {visible.length > 0 && (
-        <div className="pl-limitbar">
-          <label>
-            Максимум маршрутов:{' '}
-            <input
-              type="number"
-              min={1}
-              max={100000}
-              step={100}
-              value={limit}
-              onChange={(e) => setLimit(Math.max(1, Math.min(100000, Number(e.target.value) || 1)))}
-            />
-          </label>
-        </div>
-      )}
 
       {visible.length ? (
         <>

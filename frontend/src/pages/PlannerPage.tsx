@@ -56,6 +56,7 @@ export function PlannerPage() {
   const [stops, setStops] = useState<PlannerStop[]>(() => initial.stops ?? initialStops())
   const [collect, setCollect] = useState<CollectState>({ status: 'idle' })
   const [filters, setFilters] = useState<PlannerFilters | null>(null)
+  const [limit, setLimit] = useState(10000) // хард-лимит числа показываемых маршрутов
   const [recent, setRecent] = useState<RecentSearch[]>(() => loadRecent())
   const cancelRef = useRef<(() => void) | null>(null)
   // Фильтры из ссылки ждут своего сбора; правка маршрута их аннулирует.
@@ -223,6 +224,17 @@ export function PlannerPage() {
             <span className="pl-data-age">
               📦 Данные собраны <b>{formatCollectedAt(collect.collectedAt)}</b>
             </span>
+            <label className="pl-limit-inline" title="Сколько маршрутов показывать (самые дешёвые)">
+              Максимум маршрутов:{' '}
+              <input
+                type="number"
+                min={1}
+                max={100000}
+                step={100}
+                value={limit}
+                onChange={(e) => setLimit(Math.max(1, Math.min(100000, Number(e.target.value) || 1)))}
+              />
+            </label>
             <button
               type="button"
               className="btn-ghost"
@@ -250,7 +262,7 @@ export function PlannerPage() {
       )}
 
       {collect.status === 'ready' && filters && (
-        <FiltersPanel stops={stops} itineraries={collect.itineraries} filters={filters} onChange={setFilters} />
+        <FiltersPanel stops={stops} itineraries={collect.itineraries} filters={filters} onChange={setFilters} limit={limit} />
       )}
     </>
   )
