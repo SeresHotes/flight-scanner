@@ -1,5 +1,6 @@
-"""Этапы сбора в jobs.stage_json: очередь → загрузка (переход i из N) → стыковка →
-сохранение. По ним фронт рисует степпер «на каком этапе и сколько сделано»."""
+"""Этапы сбора в jobs.stage_json: очередь → загрузка (переход i из N) → стыковка.
+По ним фронт рисует степпер «на каком этапе и сколько сделано». Котировки
+планировщик пишет уже после done — отдельного этапа «Сохранение» у него нет."""
 import json
 
 from api import worker
@@ -87,7 +88,7 @@ def test_initial_stage_is_queued_with_all_stages(tmp_path):
     hot.create_job(conn, "j0", {}, total=1, stage=worker.initial_stage("plan"))
     stage = json.loads(hot.get_job(conn, "j0")["stage_json"])
     assert stage["key"] == "queued"
-    assert [s["key"] for s in stage["stages"]] == ["queued", "fetch", "build", "save"]
+    assert [s["key"] for s in stage["stages"]] == ["queued", "fetch", "build"]
 
 
 def test_plan_job_walks_stages_and_counts_steps(tmp_path, monkeypatch):
@@ -97,7 +98,7 @@ def test_plan_job_walks_stages_and_counts_steps(tmp_path, monkeypatch):
 
     # Этапы идут по порядку без пропусков.
     keys = [s["key"] for s in snaps]
-    assert [k for i, k in enumerate(keys) if i == 0 or keys[i - 1] != k] == ["fetch", "build", "save"]
+    assert [k for i, k in enumerate(keys) if i == 0 or keys[i - 1] != k] == ["fetch", "build"]
 
     # Два перехода по 3 дня окна; на каждом счётчик доходит до total.
     fetch_steps = [s["step"] for s in snaps if s["key"] == "fetch" and s["step"]]
@@ -109,6 +110,32 @@ def test_plan_job_walks_stages_and_counts_steps(tmp_path, monkeypatch):
 
     assert snaps[-1]["flights"] == 6
     assert job["progress"] == 6
+
+
+def test_plan_quotes_saved_after_done(tmp_path, monkeypatch):
+    """Котировки пишутся уже после done: пользователь не ждёт записи в хранилище."""
+    status_at_save = []
+    orig_upsert = hot.upsert_quotes
+
+    def spy(c, rows):
+        status_at_save.append(hot.get_job(c, "j1")["status"])
+        return orig_upsert(c, rows)
+
+    monkeypatch.setattr(hot, "upsert_quotes", spy)
+    conn, _ = _run(tmp_path, monkeypatch)
+    assert status_at_save == ["done"]
+    assert hot.count_quotes(conn) == 6
+
+
+def test_plan_quotes_failure_keeps_job_done(tmp_path, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(hot, "upsert_quotes", boom)
+    conn, _ = _run(tmp_path, monkeypatch)
+    job = hot.get_job(conn, "j1")
+    assert job["status"] == "done", job["error"]
+    assert json.loads(job["result_json"])["itineraries"]
 
 
 def test_cache_hits_are_counted(tmp_path, monkeypatch):
