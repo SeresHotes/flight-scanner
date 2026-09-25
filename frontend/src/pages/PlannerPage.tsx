@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { resolveAirports, type AirportOption } from '../data/airports'
-import type { CollectState, Itinerary, PlannerBounds, PlannerFilters, PlannerStop } from '../planner/types'
+import type { CollectState, Itinerary, PlanGraph, PlannerBounds, PlannerFilters, PlannerStop } from '../planner/types'
 import { estimatePlan } from '../planner/estimate'
 import { runCollection } from '../planner/api'
 import { validatePlan } from '../planner/validation'
@@ -108,11 +108,12 @@ export function PlannerPage() {
     if (!cached) return // нет данных под маршрут+границы — оставляем как есть (idle → приглашение собрать)
     const fromUrl = pendingFilters.current
     pendingFilters.current = null
-    setCollect({ status: 'ready', itineraries: cached.itineraries, collectedAt: cached.collectedAt })
+    const graph = cached.graph ?? null
+    setCollect({ status: 'ready', itineraries: cached.itineraries, graph, collectedAt: cached.collectedAt })
     setFilters(
       fromUrl && filtersFitStops(fromUrl, stops.length)
         ? fromUrl
-        : defaultFilters(cached.itineraries, stops.length),
+        : defaultFilters(cached.itineraries, stops.length, graph),
     )
   }, [stops, bounds])
 
@@ -169,18 +170,18 @@ export function PlannerPage() {
       stops,
       bounds,
       (progress, total, stage) => setCollect({ status: 'collecting', progress, total, stage }),
-      (itineraries: Itinerary[]) => {
+      (itineraries: Itinerary[], graph: PlanGraph | null) => {
         cancelRef.current = null
         const collectedAt = new Date().toISOString()
-        putCached(stops, bounds, itineraries, collectedAt)
-        setCollect({ status: 'ready', itineraries, collectedAt })
+        putCached(stops, bounds, itineraries, graph, collectedAt)
+        setCollect({ status: 'ready', itineraries, graph, collectedAt })
         // Приоритет фильтров: из ссылки (одноразово) → уже настроенные → дефолтные.
         const fromUrl = pendingFilters.current
         pendingFilters.current = null
         const reuse =
           (fromUrl && filtersFitStops(fromUrl, stops.length) && fromUrl) ||
           (prevFilters && filtersFitStops(prevFilters, stops.length) && prevFilters) ||
-          defaultFilters(itineraries, stops.length)
+          defaultFilters(itineraries, stops.length, graph)
         setFilters(reuse)
       },
       (message: string) => {
@@ -291,7 +292,14 @@ export function PlannerPage() {
       )}
 
       {collect.status === 'ready' && filters && (
-        <FiltersPanel stops={stops} itineraries={collect.itineraries} filters={filters} onChange={setFilters} limit={limit} />
+        <FiltersPanel
+          stops={stops}
+          itineraries={collect.itineraries}
+          graph={collect.graph}
+          filters={filters}
+          onChange={setFilters}
+          limit={limit}
+        />
       )}
     </>
   )

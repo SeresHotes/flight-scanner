@@ -3,7 +3,7 @@
 // остановок), значение — цепочки + момент сбора. Пока это мок; когда появится
 // backend, кэш заменится реальным «что уже собрано и когда» (см. types.ts контракт).
 
-import type { Itinerary, PlannerBounds, PlannerStop } from './types'
+import type { Itinerary, PlanGraph, PlannerBounds, PlannerStop } from './types'
 import { buildPlannerQuery } from './urlState'
 
 const KEY = 'planner:collected:v1'
@@ -11,6 +11,7 @@ const MAX_ENTRIES = 8 // держим только несколько после
 
 export interface CachedCollection {
   itineraries: Itinerary[]
+  graph?: PlanGraph | null // нет у записей, сохранённых до режима «наборы городов»
   collectedAt: string // ISO
 }
 
@@ -31,11 +32,12 @@ function readStore(): Store {
   }
 }
 
-function writeStore(store: Store): void {
+function writeStore(store: Store): boolean {
   try {
     localStorage.setItem(KEY, JSON.stringify(store))
+    return true
   } catch {
-    // Переполнение квоты или приватный режим — молча пропускаем.
+    return false // переполнение квоты или приватный режим
   }
 }
 
@@ -47,10 +49,11 @@ export function putCached(
   stops: PlannerStop[],
   bounds: PlannerBounds,
   itineraries: Itinerary[],
+  graph: PlanGraph | null,
   collectedAt: string,
 ): void {
   const store = readStore()
-  store[routeKey(stops, bounds)] = { itineraries, collectedAt }
+  store[routeKey(stops, bounds)] = { itineraries, graph, collectedAt }
 
   // Ограничиваем размер: выкидываем самые старые по времени сбора.
   const keys = Object.keys(store)
@@ -58,5 +61,11 @@ export function putCached(
     keys.sort((a, b) => store[a].collectedAt.localeCompare(store[b].collectedAt))
     for (const k of keys.slice(0, keys.length - MAX_ENTRIES)) delete store[k]
   }
+  if (writeStore(store)) return
+  // Граф на широких маршрутах крупный — не влез в квоту. Храним графы только у
+  // текущей записи; если и так не влезло — без графов вовсе (обзор попросит пересбор).
+  for (const k of Object.keys(store)) if (k !== routeKey(stops, bounds)) delete store[k].graph
+  if (writeStore(store)) return
+  for (const k of Object.keys(store)) delete store[k].graph
   writeStore(store)
 }

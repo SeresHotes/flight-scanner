@@ -446,7 +446,7 @@ def plan_gather(req: PlanRequest) -> Dict[str, Any]:
 
 @app.get("/api/plan/jobs/{job_id}")
 def plan_job_status(job_id: str) -> Dict[str, Any]:
-    """Прогресс джобы; по завершении — собранные цепочки (itineraries)."""
+    """Прогресс джобы; по завершении — собранные цепочки (itineraries) и граф рёбер (graph)."""
     job = hot.get_job(_conn, job_id)
     if not job:
         return {"status": "not_found"}
@@ -459,7 +459,9 @@ def plan_job_status(job_id: str) -> Dict[str, Any]:
     }
     if job["status"] == "done" and job["result_json"]:
         try:
-            out["itineraries"] = json.loads(job["result_json"]).get("itineraries", [])
+            result = json.loads(job["result_json"])
         except json.JSONDecodeError:
-            out["itineraries"] = []
+            result = {}
+        out["itineraries"] = result.get("itineraries", [])
+        out["graph"] = result.get("graph")  # None у джоб, собранных до режима обзора
     return out

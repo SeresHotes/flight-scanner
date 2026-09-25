@@ -258,10 +258,15 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
             should_stop=lambda: is_cancel_requested(job_id),
             on_progress=rep.build_progress(max_results))
 
+        # Граф рёбер — для режима «наборы городов»: он оценивает ВСЕ варианты, без
+        # движковых границ max_results/max_cost (см. planner.overview_graph).
+        graph = planner.overview_graph(stops, collected, city_info=city_info)
+
         if is_cancel_requested(job_id):  # не перетираем статус сброшенной джобы
             raise JobCancelled()
         hot.update_job(conn, job_id, status="done",
-                       result_json=json.dumps({"itineraries": itineraries}, ensure_ascii=False))
+                       result_json=json.dumps({"itineraries": itineraries, "graph": graph},
+                                              ensure_ascii=False))
         print(f"[worker] plan job {job_id} done: {len(itineraries)} цепочек")
 
         # Котировки планировщику не нужны (результат — result_json, повторы — fetch_cache),
