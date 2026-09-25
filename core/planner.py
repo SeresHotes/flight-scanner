@@ -300,7 +300,12 @@ def _onward_candidates(stops: List[Stop],
                        ) -> List[Any]:
     """Валидные онворд-рейсы из `city` на плече i: вылет не раньше прилёта, посадка в
     разрешённом для следующей остановки городе, без петель/повторов. Возвращает пары
-    (рейс, город_прилёта)."""
+    (рейс, город_прилёта).
+
+    Запрет повторов — только для «любой»-остановок: явно заданный город пользователь
+    выбрал сам, и повтор там осмыслен (кольцо MOW → … → MOW). Иначе финал, совпадающий
+    со стартом, не собирался никогда, а _completion_lb (не знает про visited) держал
+    такие ветки живыми — A* перебирал бесконечно, не находя ни одной цепочки."""
     arrive_day = date_only(arrive_iso)
     allow_next = _allowed(stops[i + 1])
     out = []
@@ -309,7 +314,9 @@ def _onward_candidates(stops: List[Stop],
         if not dep or date_only(dep) < arrive_day:  # нельзя вылететь раньше прилёта
             continue
         dest = (f.get("destination") or f.get("search_destination") or "").upper()
-        if not dest or dest == city or dest in visited:  # без петель/повторов
+        if not dest or dest == city:  # без петель
+            continue
+        if allow_next is None and dest in visited:  # «любой» не разрешаем в уже посещённый
             continue
         if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
             continue
