@@ -224,17 +224,6 @@ export function PlannerPage() {
             <span className="pl-data-age">
               📦 Данные собраны <b>{formatCollectedAt(collect.collectedAt)}</b>
             </span>
-            <label className="pl-limit-inline" title="Сколько маршрутов показывать (самые дешёвые)">
-              Максимум маршрутов:{' '}
-              <input
-                type="number"
-                min={1}
-                max={100000}
-                step={100}
-                value={limit}
-                onChange={(e) => setLimit(Math.max(1, Math.min(100000, Number(e.target.value) || 1)))}
-              />
-            </label>
             <button
               type="button"
               className="btn-ghost"
@@ -246,6 +235,19 @@ export function PlannerPage() {
             </button>
           </div>
         )}
+
+        {/* Хард-лимит числа маршрутов — виден всегда, рядом с загрузкой данных. */}
+        <label className="pl-limit-row" title="Сколько маршрутов показывать (самые дешёвые)">
+          Максимум маршрутов:{' '}
+          <input
+            type="number"
+            min={1}
+            max={100000}
+            step={100}
+            value={limit}
+            onChange={(e) => setLimit(Math.max(1, Math.min(100000, Number(e.target.value) || 1)))}
+          />
+        </label>
       </div>
 
       <RecentSearches items={recent} onRestore={restoreRecent} onRemove={dropRecent} />
