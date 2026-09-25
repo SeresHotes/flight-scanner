@@ -28,14 +28,12 @@ DEFAULT_START = "2026-11-01"  # якорь старта, если окон не�
 DEFAULT_LEG_DAYS = 7          # ширина окна плеча, если оба конца без окна
 FINAL_STAY_DAYS = 5           # пребывание в финальном городе (у конца окна нет)
 
-# Собираем цепочки из имеющихся данных (без beam/per-city/per-sequence кэпов),
-# но с потолком: DFS набирает до _MAX_ITINERARIES САМЫХ ДЕШЁВЫХ (онворды
-# раскрываются по возрастанию цены) и останавливается. Потолок 100k оказался
-# неподъёмным для прод-VM — построение _assemble + сортировка + сериализация
-# в JSON стольких цепочек вешали воркер на десятки минут. Показ всё равно идёт
-# страницами по 100, маршруты отсортированы по цене, так что нескольких тысяч
-# самых дешёвых с запасом хватает для листания.
-_MAX_ITINERARIES = 5000  # защитный потолок числа построенных цепочек
+# Тестовый режим: собираем ВСЕ цепочки из имеющихся данных без потолка
+# (кэпы beam/per-city/per-sequence тоже сняты). Онворды раскрываются по
+# возрастанию цены, показ на фронте — страницами (дефолт 100). ВНИМАНИЕ: на
+# плотном графе с несколькими «any»-остановками число цепочек может быть
+# огромным и подвесить воркер/память — предел сознательно убран под ручную
+# отладку. Если начнёт зависать — вернуть потолок здесь.
 _INF = float("inf")
 
 
@@ -262,8 +260,6 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
     seq = {"id": 1}
 
     def dfs(i: int, city: str, arrive_iso: str, chosen: List[Dict[str, Any]], visited: set):
-        if len(results) >= _MAX_ITINERARIES:
-            return
         if i == len(stops) - 1:  # дошли до финальной остановки — цепочка готова
             results.append(_assemble(stops, chosen, builder, city_info, chain_start, seq["id"]))
             seq["id"] += 1
@@ -284,8 +280,6 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
             candidates.append(f)
 
         for f in _onward_sorted(candidates):
-            if len(results) >= _MAX_ITINERARIES:
-                return
             dest = (f.get("destination") or f.get("search_destination")).upper()
             dfs(i + 1, dest, arrival_of(f), chosen + [f], visited | {dest})
 

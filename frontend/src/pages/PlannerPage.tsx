@@ -56,7 +56,7 @@ export function PlannerPage() {
   const [stops, setStops] = useState<PlannerStop[]>(() => initial.stops ?? initialStops())
   const [collect, setCollect] = useState<CollectState>({ status: 'idle' })
   const [filters, setFilters] = useState<PlannerFilters | null>(null)
-  const [limit, setLimit] = useState(10000) // хард-лимит числа показываемых маршрутов
+  const [limit, setLimit] = useState(100) // дефолтный лимит показа маршрутов (можно поднять в input)
   const [recent, setRecent] = useState<RecentSearch[]>(() => loadRecent())
   const cancelRef = useRef<(() => void) | null>(null)
   // Фильтры из ссылки ждут своего сбора; правка маршрута их аннулирует.
