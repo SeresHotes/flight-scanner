@@ -90,3 +90,12 @@ export function runCollection(
     if (timer) clearTimeout(timer)
   }
 }
+
+// «Починить»: сбрасывает зависшие на сервере сборы (running без обновлений > минуты),
+// освобождая однопоточный воркер. Отдаёт id сброшенных джоб (пусто — зависших нет).
+export async function rescueJobs(): Promise<string[]> {
+  const res = await fetch(`${API_BASE}/jobs/rescue`, { method: 'POST' })
+  if (!res.ok) throw new Error(String(res.status))
+  const data = (await res.json()) as { rescued?: string[] }
+  return data.rescued ?? []
+}

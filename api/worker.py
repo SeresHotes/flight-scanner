@@ -5,8 +5,9 @@
 Запускается в отдельном потоке (collector синхронный, с rate-limit sleep).
 """
 import json
+import threading
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from core import aggregate as agg
 from core import collector
@@ -24,6 +25,32 @@ ESTIMATE_TIME_FACTOR = 2  # запас пессимизма в показанн�
 # Data API) сам отдаёт кэш цен с задержкой ~суток, поэтому чаще перезапрашивать
 # бессмысленно — те же цифры, впустую сожжённые запросы к API.
 FETCH_CACHE_TTL_SECONDS = 24 * 3600
+
+
+# Отмена зависших джоб. Поток Python снаружи не убить, поэтому отмена кооперативная:
+# /api/jobs/rescue кладёт id сюда, а воркер проверяет флаг на каждом запросе к API
+# (StageReporter) и на каждом шаге стыковки (planner.build_itineraries).
+_cancel_requests: Set[str] = set()
+_cancel_lock = threading.Lock()
+
+
+class JobCancelled(Exception):
+    """Джобу сбросили извне — воркер бросает сбор, статус уже выставлен сбросившим."""
+
+
+def request_cancel(job_id: str) -> None:
+    with _cancel_lock:
+        _cancel_requests.add(job_id)
+
+
+def is_cancel_requested(job_id: str) -> bool:
+    with _cancel_lock:
+        return job_id in _cancel_requests
+
+
+def _forget_cancel(job_id: str) -> None:
+    with _cancel_lock:
+        _cancel_requests.discard(job_id)
 
 
 # Этапы сбора для UI. Ключи стабильны (фронт по ним рисует степпер), подписи —
@@ -56,6 +83,8 @@ class StageReporter:
         self.progress = 0
 
     def _flush(self, **fields) -> None:
+        if is_cancel_requested(self.job_id):  # не перетираем статус сброшенной джобы
+            raise JobCancelled()
         hot.update_job(self.conn, self.job_id,
                        stage_json=json.dumps(self.state, ensure_ascii=False), **fields)
 
@@ -161,10 +190,13 @@ def run_collection(db_path: str, job_id: str, params: Dict[str, Any],
         hot.update_job(conn, job_id, status="done",
                        result_json=json.dumps({"trips": payload["meta"]["counts"]["total"]}))
         print(f"[worker] job {job_id} done: {payload['meta']['counts']['total']} плеч")
+    except JobCancelled:
+        print(f"[worker] job {job_id} сброшена как зависшая")
     except Exception as e:
         hot.update_job(conn, job_id, status="error", error=str(e))
         print(f"[worker] job {job_id} error: {e}")
     finally:
+        _forget_cancel(job_id)
         conn.close()
 
 
@@ -196,8 +228,9 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         rep.flights(sum(len(v) for v in collected.values()))
         rep.stage("build")
 
-        itineraries = planner.build_itineraries(stops, collected, city_info=city_info,
-                                                max_results=max_results, max_cost=max_cost)
+        itineraries = planner.build_itineraries(
+            stops, collected, city_info=city_info, max_results=max_results, max_cost=max_cost,
+            should_stop=lambda: is_cancel_requested(job_id))
 
         rep.stage("save")
         now = datetime.now().isoformat()
@@ -215,8 +248,11 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         hot.update_job(conn, job_id, status="done",
                        result_json=json.dumps({"itineraries": itineraries}, ensure_ascii=False))
         print(f"[worker] plan job {job_id} done: {len(itineraries)} цепочек")
+    except (JobCancelled, planner.SearchAborted):
+        print(f"[worker] plan job {job_id} сброшена как зависшая")
     except Exception as e:
         hot.update_job(conn, job_id, status="error", error=str(e))
         print(f"[worker] plan job {job_id} error: {e}")
     finally:
+        _forget_cancel(job_id)
         conn.close()
