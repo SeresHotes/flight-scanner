@@ -5,12 +5,11 @@ max_cost должен резать целые бесперспективные �
 max_results — оставлять N самых дешёвых цепочек. Без обеих границ — прежнее «всё».
 """
 from core.planner import (
-    PLAN_HARD_MAX_RESULTS,
     Stop,
     _completion_lb,
     _index_leg,
     build_itineraries,
-    clamp_max_results,
+    is_valid_max_results,
 )
 
 CITY_INFO = lambda code: {"city": code, "country": "", "flag": ""}
@@ -109,14 +108,16 @@ def test_max_results_with_cost_bound():
     assert [it["total_price"] for it in itins] == [200, 400]
 
 
-def test_clamp_max_results_hard_cap():
-    """Жёсткий потолок: None и огромные значения зажимаются, разумные — проходят.
+def test_is_valid_max_results_rejects_none():
+    """Отказ вместо потолка: None (устаревший клиент / прямой API) невалиден, чтобы
+    движок не уходил в безлимитный перебор. Конечные положительные — валидны, без
+    верхнего предела.
 
-    Регресс на прод-инцидент: запрос без max_results (старый закешированный фронт)
-    уходил в безлимитный перебор → 100000 цепочек, 282 МБ ответа, зависание."""
-    assert clamp_max_results(None) == PLAN_HARD_MAX_RESULTS
-    assert clamp_max_results(100000) == PLAN_HARD_MAX_RESULTS
-    assert clamp_max_results(PLAN_HARD_MAX_RESULTS + 1) == PLAN_HARD_MAX_RESULTS
-    assert clamp_max_results(100) == 100
-    assert clamp_max_results(0) == 1
-    assert clamp_max_results(-5) == 1
+    Регресс на прод-инцидент: запрос без max_results уходил в безлимит →
+    100000 цепочек, 282 МБ ответа, зависание браузера."""
+    assert is_valid_max_results(None) is False
+    assert is_valid_max_results(0) is False
+    assert is_valid_max_results(-5) is False
+    assert is_valid_max_results(1) is True
+    assert is_valid_max_results(100) is True
+    assert is_valid_max_results(100000) is True  # без верхнего потолка

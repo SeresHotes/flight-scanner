@@ -177,13 +177,8 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
     кладёт готовые Itinerary в jobs.result_json. Котировки — в SQLite + озеро.
 
     max_results/max_cost — движковые границы стыковки (см. planner.build_itineraries):
-    режут перебор по бюджету цены и числу самых дешёвых цепочек."""
-    # Жёсткий потолок числа цепочек — единственный choke point перед стыковкой в
-    # проде. Защищает от безлимитного перебора (None шлёт старый закешированный фронт
-    # или прямой вызов API): без него на плотном графе строятся сотни тысяч Itinerary
-    # → сотни МБ ответа → зависание браузера и почти-OOM на 4-ГБ VM.
-    max_results = planner.clamp_max_results(max_results)
-
+    режут перебор по бюджету цены и числу самых дешёвых цепочек. max_results=None
+    (безлимит) отклоняется на уровне API (см. plan_gather), сюда не доходит."""
     conn = hot.connect(db_path)
     try:
         stops = planner.parse_stops(raw_stops)
