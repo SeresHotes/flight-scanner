@@ -27,8 +27,8 @@ function groupCountries(options: CityOption[]): Map<string, Country> {
 }
 
 // Выбор городов остановки в фильтрах: чипсы выбранного + поиск (как в скелете
-// маршрута). Над списком городов — ряд флагов стран: флаг добавляет все города
-// страны разом, и пока выбраны все её города, она показана одним чипом.
+// маршрута). Над списком городов — ряд стран (флаг + название): страна добавляет
+// все свои города разом, и пока выбраны все её города, она показана одним чипом.
 // Ничего не выбрано — подходит любой город. В модели — список разрешённых кодов (allowedCodes).
 export function CityPicker({
   options,
@@ -70,7 +70,7 @@ export function CityPicker({
     const covered = new Set<string>()
     for (const c of countries.values()) {
       if (c.iso2 && c.codes.length > 1 && c.codes.every((code) => selectedSet.has(code))) {
-        out.push({ key: `country-${c.iso2}`, label: c.flag ?? '', hint: cityCount(c.codes.length), title: c.name, codes: c.codes })
+        out.push({ key: `country-${c.iso2}`, label: `${c.flag ? `${c.flag} ` : ''}${c.name}`, hint: cityCount(c.codes.length), codes: c.codes })
         c.codes.forEach((code) => covered.add(code))
       }
     }
@@ -82,7 +82,7 @@ export function CityPicker({
     return out
   }, [countries, selected, selectedSet, byCode])
 
-  // Подсказки: флаги стран (ещё не выбранных целиком) и города; выбранное скрываем.
+  // Подсказки: страны (ещё не выбранных целиком) и города; выбранное скрываем.
   const q = normalizeSearch(text.trim())
   const flagItems = useMemo<Country[]>(
     () =>
@@ -194,13 +194,13 @@ export function CityPicker({
                   <button
                     key={c.iso2}
                     type="button"
-                    title={`${c.name} — ${cityCount(c.codes.length)}`}
+                    title={`Все города: ${cityCount(c.codes.length)}`}
                     onMouseDown={(e) => {
                       e.preventDefault()
                       pick(c.codes)
                     }}
                   >
-                    {c.flag}
+                    {c.flag} {c.name} <span className="pl-cp-cnt">{c.codes.length}</span>
                   </button>
                 ))}
               </div>
