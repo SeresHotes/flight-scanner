@@ -1,5 +1,6 @@
 import { durFmt } from '../../lib/format'
 import type { TransitionFilter } from '../types'
+import { RangeSlider } from './RangeSlider'
 
 const TRANSFER_OPTS: { v: number; l: string }[] = [
   { v: -1, l: 'Любые' },
@@ -8,7 +9,7 @@ const TRANSFER_OPTS: { v: number; l: string }[] = [
   { v: 0, l: 'прямой' },
 ]
 
-// Фильтры перехода между городами: пересадки и суммарная длительность перелёта.
+// Фильтры перехода между городами одной строкой: пересадки и длительность перелёта.
 export function TransitionFilterCard({
   title,
   filter,
@@ -21,11 +22,11 @@ export function TransitionFilterCard({
   onChange: (patch: Partial<TransitionFilter>) => void
 }) {
   return (
-    <div className="legpanel pl-transition">
-      <div className="legtitle">✈ {title}</div>
+    <div className="pl-frow pl-transition">
+      <div className="pl-ficon">✈</div>
+      <div className="pl-fname">{title}</div>
 
-      <div className="fsub">
-        <span>Пересадки</span>
+      <div className="pl-fcell">
         <div className="segbtns">
           {TRANSFER_OPTS.map((o) => (
             <button
@@ -40,20 +41,17 @@ export function TransitionFilterCard({
         </div>
       </div>
 
-      <div className="fsub">
-        <span>
-          Длительность перелёта: до <span className="rangeval">{durFmt(filter.maxTravelMinutes)}</span>
-        </span>
-        <div className="dualrange">
-          <input
-            type="range"
-            min={60}
-            max={maxBound}
-            step={30}
-            value={filter.maxTravelMinutes}
-            onChange={(e) => onChange({ maxTravelMinutes: Number(e.target.value) })}
-          />
+      <div className="pl-fcell">
+        <div className="pl-flabel">
+          Перелёт: до <span className="rangeval">{durFmt(filter.maxTravelMinutes)}</span>
         </div>
+        <RangeSlider
+          min={60}
+          max={maxBound}
+          step={30}
+          value={filter.maxTravelMinutes}
+          onChange={(maxTravelMinutes) => onChange({ maxTravelMinutes })}
+        />
       </div>
     </div>
   )

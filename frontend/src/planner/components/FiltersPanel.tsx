@@ -96,7 +96,8 @@ export function FiltersPanel({
         {stops.map((s, i) => (
           <div key={s.id} style={{ display: 'contents' }}>
             <CityFilterCard
-              title={`${pointLabel(i)} · ${cityName(s)}`}
+              point={pointLabel(i)}
+              name={cityName(s)}
               filter={filters.cities[i]}
               cityOptions={cityOptionsByStop[i]}
               stayBounds={bounds.stayDays}
@@ -105,7 +106,7 @@ export function FiltersPanel({
             />
             {i < stops.length - 1 && (
               <TransitionFilterCard
-                title={`Переход ${pointLabel(i)} → ${pointLabel(i + 1)}`}
+                title={`${pointLabel(i)} → ${pointLabel(i + 1)}`}
                 filter={filters.transitions[i]}
                 maxBound={bounds.maxTravelMinutes}
                 onChange={(patch) => patchTransition(i, patch)}
@@ -113,13 +114,12 @@ export function FiltersPanel({
             )}
           </div>
         ))}
+        <TripLengthFilter
+          value={filters.tripLength}
+          bounds={bounds.tripLength}
+          onChange={(tripLength) => onChange({ ...filters, tripLength })}
+        />
       </div>
-
-      <TripLengthFilter
-        value={filters.tripLength}
-        bounds={bounds.tripLength}
-        onChange={(tripLength) => onChange({ ...filters, tripLength })}
-      />
 
       <div className="pl-viewtabs" role="tablist">
         <button

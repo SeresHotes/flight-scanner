@@ -1,6 +1,7 @@
 import { dayW } from '../../lib/format'
+import { RangeSlider } from './RangeSlider'
 
-// Общий фильтр: длина всей поездки, дни (диапазон).
+// Общий фильтр одной строкой: длина всей поездки, дни (диапазон).
 export function TripLengthFilter({
   value,
   bounds,
@@ -13,30 +14,15 @@ export function TripLengthFilter({
   const [lo, hi] = value
   const [minB, maxB] = bounds
   return (
-    <div className="filterbar pl-triplen">
-      <div className="fgroup">
-        <div className="flabel">🧳 Длина всей поездки</div>
-        <div className="fsub">
-          <span>
-            <span className="rangeval">{lo}–{hi} {dayW(hi)}</span>
-          </span>
-          <div className="dualrange">
-            <input
-              type="range"
-              min={minB}
-              max={maxB}
-              value={lo}
-              onChange={(e) => onChange([Math.min(Number(e.target.value), hi), hi])}
-            />
-            <input
-              type="range"
-              min={minB}
-              max={maxB}
-              value={hi}
-              onChange={(e) => onChange([lo, Math.max(Number(e.target.value), lo)])}
-            />
-          </div>
+    <div className="pl-frow pl-triplen">
+      <div className="pl-ficon">🧳</div>
+      <div className="pl-fname">Вся поездка</div>
+      <div className="pl-fcell" />
+      <div className="pl-fcell">
+        <div className="pl-flabel">
+          Длина: <span className="rangeval">{lo}–{hi} {dayW(hi)}</span>
         </div>
+        <RangeSlider min={minB} max={maxB} value={value} onChange={onChange} />
       </div>
     </div>
   )
