@@ -58,6 +58,17 @@ function TransferDots({ seg }: { seg: Segment }) {
   )
 }
 
+// Подпись под линией: весь путь и — при пересадках — чистое время в воздухе.
+function LegDuration({ seg }: { seg: Segment }) {
+  const air = seg.layover_minutes ? seg.duration - seg.layover_minutes : null
+  return (
+    <div className="pl-dur">
+      🕓 {durFmt(seg.duration)} в пути
+      {air ? <span className="pl-dur-air"> · ✈ {durFmt(air)} в воздухе</span> : null}
+    </div>
+  )
+}
+
 function LegRow({ seg }: { seg: Segment }) {
   return (
     <div className="leg pl-leg">
@@ -68,9 +79,9 @@ function LegRow({ seg }: { seg: Segment }) {
           <TransferDots seg={seg} />
           <span className="pl-track-end">🛬</span>
         </div>
+        <LegDuration seg={seg} />
         <div className="info2">
           <TransferBadge seg={seg} />
-          <span className="i">🕓 {durFmt(seg.duration)}</span>
           {(seg.transfers || 0) >= 2 && seg.layover_minutes ? (
             <span className="i">⏳ на пересадках: {durFmt(seg.layover_minutes)}</span>
           ) : null}
