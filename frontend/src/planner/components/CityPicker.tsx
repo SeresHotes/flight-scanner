@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { plural } from '../../lib/format'
-import { countryName, flagToIso2 } from '../countries'
+import { countryName, countrySearchText, flagToIso2, normalizeSearch } from '../countries'
 import type { CityOption } from './CityFilterCard'
 
 type Mode = 'include' | 'exclude'
@@ -8,6 +8,7 @@ type Mode = 'include' | 'exclude'
 interface Country {
   iso2: string
   name: string
+  search: string // en + ru + синонимы + ISO2, нормализовано
   flag?: string
   codes: string[]
 }
@@ -21,7 +22,7 @@ function groupCountries(options: CityOption[]): Map<string, Country> {
   for (const o of options) {
     const iso2 = flagToIso2(o.flag)
     let c = byIso.get(iso2)
-    if (!c) byIso.set(iso2, (c = { iso2, name: countryName(iso2), flag: o.flag, codes: [] }))
+    if (!c) byIso.set(iso2, (c = { iso2, name: countryName(iso2), search: countrySearchText(iso2), flag: o.flag, codes: [] }))
     c.codes.push(o.code)
   }
   return byIso
@@ -55,8 +56,8 @@ export function CityPicker({
 
   const countries = useMemo(() => groupCountries(options), [options])
   const byCode = useMemo(() => new Map(options.map((o) => [o.code, o])), [options])
-  const countryNameOf = useMemo(
-    () => new Map(options.map((o) => [o.code, countries.get(flagToIso2(o.flag))?.name ?? ''])),
+  const countryOfCode = useMemo(
+    () => new Map(options.map((o) => [o.code, countries.get(flagToIso2(o.flag))])),
     [options, countries],
   )
 
@@ -117,23 +118,23 @@ export function CityPicker({
 
   // Подсказки: сперва страны (с >1 городом), затем города; уже выбранное скрываем.
   const items = useMemo<Item[]>(() => {
-    const q = text.trim().toLowerCase()
+    const q = normalizeSearch(text.trim())
     const countryItems: Item[] = [...countries.values()]
       .filter((c) => c.codes.length > 1 && !c.codes.every((code) => selectedSet.has(code)))
-      .filter((c) => !q || c.name.toLowerCase().includes(q) || c.iso2.toLowerCase() === q)
+      .filter((c) => !q || c.search.includes(q))
       .sort((a, b) => b.codes.length - a.codes.length || a.name.localeCompare(b.name, 'ru'))
       .map((country) => ({ kind: 'country', country }))
     const cityItems: Item[] = options
       .filter((o) => !selectedSet.has(o.code))
       .filter((o) => {
         if (!q) return true
-        const cn = countryNameOf.get(o.code)?.toLowerCase() ?? ''
-        return o.city.toLowerCase().includes(q) || o.code.toLowerCase().startsWith(q) || cn.includes(q)
+        const cs = countryOfCode.get(o.code)?.search ?? ''
+        return normalizeSearch(o.city).includes(q) || o.code.toLowerCase().startsWith(q) || cs.includes(q)
       })
       .sort((a, b) => a.city.localeCompare(b.city, 'ru'))
-      .map((city) => ({ kind: 'city', city, countryName: countryNameOf.get(city.code) ?? '' }))
+      .map((city) => ({ kind: 'city', city, countryName: countryOfCode.get(city.code)?.name ?? '' }))
     return [...countryItems, ...cityItems].slice(0, MAX_ITEMS)
-  }, [text, countries, options, selectedSet, countryNameOf])
+  }, [text, countries, options, selectedSet, countryOfCode])
 
   useEffect(() => setActive(0), [text])
 

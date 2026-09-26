@@ -1,6 +1,6 @@
 // Страна города для фильтров планировщика. Отдельного поля страны в данных нет,
 // но у каждого города есть флаг-эмодзи (бэк строит его из ISO2 страны) — из него
-// ISO2 и восстанавливаем, а русское название берём из Intl.
+// ISO2 и восстанавливаем, а названия берём из Intl.
 
 const REGIONAL_A = 0x1f1e6
 
@@ -12,16 +12,39 @@ export function flagToIso2(flag: string | undefined): string {
   return cps.map((cp) => String.fromCharCode(cp - REGIONAL_A + 65)).join('')
 }
 
-let names: Intl.DisplayNames | null | undefined
+const cache = new Map<string, Intl.DisplayNames | null>()
 
-export function countryName(iso2: string): string {
-  if (!iso2) return 'Без страны'
-  if (names === undefined) {
+function regionName(lang: string, iso2: string): string {
+  if (!cache.has(lang)) {
     try {
-      names = new Intl.DisplayNames(['ru'], { type: 'region' })
+      cache.set(lang, new Intl.DisplayNames([lang], { type: 'region' }))
     } catch {
-      names = null
+      cache.set(lang, null)
     }
   }
-  return names?.of(iso2) ?? iso2
+  return cache.get(lang)?.of(iso2) ?? iso2
+}
+
+// Показываем по-английски — как и названия городов в данных.
+export function countryName(iso2: string): string {
+  return iso2 ? regionName('en', iso2) : 'No country'
+}
+
+// Привычные названия, которых нет в Intl (там «Türkiye», «ОАЭ»).
+const ALIASES: Record<string, string> = {
+  TR: 'turkey',
+  AE: 'uae emirates эмираты',
+  GB: 'uk britain великобритания англия',
+  US: 'usa сша америка',
+}
+
+// Нижний регистр без диакритики: «Türkiye» → «turkiye».
+export function normalizeSearch(text: string): string {
+  return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+}
+
+// Строка для поиска: английское и русское название, синонимы и ISO2.
+export function countrySearchText(iso2: string): string {
+  if (!iso2) return ''
+  return normalizeSearch(`${regionName('en', iso2)} ${regionName('ru', iso2)} ${ALIASES[iso2] ?? ''} ${iso2}`)
 }
