@@ -1,6 +1,7 @@
 import { DateRangePicker } from '../../components/DateRangePicker'
 import { dayW } from '../../lib/format'
 import type { CityFilter } from '../types'
+import { CityPicker } from './CityPicker'
 
 // Города, встретившиеся на этой остановке среди собранных цепочек.
 export interface CityOption {
@@ -9,8 +10,8 @@ export interface CityOption {
   flag?: string
 }
 
-// Фильтры одного города: список городов, мин/макс дней, обязательное окно, оба выходных.
-// У концов маршрута (endpoint) — только список городов: пребывание там не учитывается.
+// Фильтры одного города: выбор городов/стран, мин/макс дней, обязательное окно, оба выходных.
+// У концов маршрута (endpoint) — только выбор городов: пребывание там не учитывается.
 export function CityFilterCard({
   title,
   filter,
@@ -26,17 +27,6 @@ export function CityFilterCard({
   endpoint: boolean
   onChange: (patch: Partial<CityFilter>) => void
 }) {
-  // Город включён, если фильтр не задан (null == любой) либо код в списке.
-  const isOn = (code: string) => filter.allowedCodes === null || filter.allowedCodes.includes(code)
-
-  const toggleCity = (code: string) => {
-    const allCodes = cityOptions.map((c) => c.code)
-    const current = filter.allowedCodes ?? allCodes
-    const next = current.includes(code) ? current.filter((c) => c !== code) : [...current, code]
-    // Все выбраны обратно → снова «любой» (null), иначе — явный список.
-    onChange({ allowedCodes: next.length === allCodes.length ? null : next })
-  }
-
   return (
     <div className="legpanel">
       <div className="legtitle">🏙 {title}</div>
@@ -44,18 +34,11 @@ export function CityFilterCard({
       {cityOptions.length > 1 && (
         <div className="fsub">
           <span>Города на этой остановке</span>
-          <div className="citychips">
-            {cityOptions.map((c) => (
-              <button
-                key={c.code}
-                type="button"
-                className={isOn(c.code) ? 'active' : ''}
-                onClick={() => toggleCity(c.code)}
-              >
-                {c.flag ? `${c.flag} ` : ''}{c.city}
-              </button>
-            ))}
-          </div>
+          <CityPicker
+            options={cityOptions}
+            allowed={filter.allowedCodes}
+            onChange={(allowedCodes) => onChange({ allowedCodes })}
+          />
         </div>
       )}
 
