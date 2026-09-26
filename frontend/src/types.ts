@@ -51,6 +51,7 @@ export interface Segment {
   transfers: number
   direct: boolean
   transfer_points?: TransferPoint[]
+  layover_minutes?: number | null // суммарно на земле на всех пересадках (источник не разбивает)
   airline?: string
   flight_number?: string
   price: number

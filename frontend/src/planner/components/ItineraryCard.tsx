@@ -15,36 +15,74 @@ function TransferBadge({ seg }: { seg: Segment }) {
   )
 }
 
-function LegRow({ seg }: { seg: Segment }) {
-  const dep = fmtDT(seg.departure_at)
-  const arr = fmtDT(seg.arrival_at)
+// Конец перелёта: код города, аэропорт (если отличается от кода города), дата и время.
+function LegPoint({ code, city, airport, iso }: { code: string; city?: string; airport?: string; iso: string }) {
+  const t = fmtDT(iso)
   return (
-    <div className="leg">
-      <div className="pt">
-        <div className="code">{seg.origin}</div>
-        <div className="cty">{seg.origin_city || ''}</div>
-        <div className="when">{dep.d}</div>
-        <div className="clock">{dep.t}</div>
+    <div className="pt">
+      <div className="code">
+        {code}
+        {airport && airport !== code && <span className="apt"> · {airport}</span>}
       </div>
+      <div className="cty">{city || ''}</div>
+      <div className="when">{t.d}</div>
+      <div className="clock">{t.t}</div>
+    </div>
+  )
+}
+
+// Точки пересадок на линии перелёта. Если города не распарсились из ссылки —
+// рисуем столько же безымянных точек. Ожидание источник отдаёт только суммой по
+// всем пересадкам, поэтому под точкой оно — лишь когда пересадка одна.
+function TransferDots({ seg }: { seg: Segment }) {
+  const n = seg.transfers || 0
+  if (!n) return null
+  const pts = seg.transfer_points || []
+  const known = pts.length === n
+  const wait = n === 1 && seg.layover_minutes ? durFmt(seg.layover_minutes) : null
+  return (
+    <div className="pl-dots">
+      {Array.from({ length: n }, (_, i) => {
+        const p = known ? pts[i] : null
+        const title = (p ? `${p.city} (${p.code})` : 'город — на Aviasales') + (wait ? `, ожидание ${wait}` : '')
+        return (
+          <div key={i} className="pl-dot" title={title}>
+            <span className="pl-dot-code">{p ? p.code : '?'}</span>
+            <span className="pl-dot-mark" />
+            <span className="pl-dot-city">{p ? p.city : ''}</span>
+            {wait && <span className="pl-dot-wait">⏳ {wait}</span>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function LegRow({ seg }: { seg: Segment }) {
+  return (
+    <div className="leg pl-leg">
+      <LegPoint code={seg.origin} city={seg.origin_city} airport={seg.origin_airport} iso={seg.departure_at} />
       <div className="mid">
-        <div className="line">
-          <span>вылет</span>
-          <span className="track"></span>🛬<span>прилёт</span>
-        </div>
-        <div className="dest">
-          🛬 <b>{seg.destination}</b>
-          {seg.destination_city ? ' · ' + seg.destination_city : ''}
-          <span style={{ color: 'var(--muted)' }}>
-            {' '}
-            — {arr.d} {arr.t}
-          </span>
+        <div className="pl-track">
+          <span className="pl-track-line" />
+          <TransferDots seg={seg} />
+          <span className="pl-track-end">🛬</span>
         </div>
         <div className="info2">
           <TransferBadge seg={seg} />
           <span className="i">🕓 {durFmt(seg.duration)}</span>
+          {(seg.transfers || 0) >= 2 && seg.layover_minutes ? (
+            <span className="i">⏳ на пересадках: {durFmt(seg.layover_minutes)}</span>
+          ) : null}
           {seg.airline && <span className="i">🛩 {seg.airline}</span>}
         </div>
       </div>
+      <LegPoint
+        code={seg.destination}
+        city={seg.destination_city}
+        airport={seg.destination_airport}
+        iso={seg.arrival_at}
+      />
       <div className="buy">
         {seg.link ? (
           <a href={seg.link} target="_blank" rel="noopener">
