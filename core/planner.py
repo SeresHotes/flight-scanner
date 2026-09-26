@@ -30,11 +30,17 @@ from core.collector import collect_leg_data, get_date_range
 from core.trip_builder import Builder, arrival_of, date_only, make_city_lookup, stay_between
 
 SECONDS_PER_REQUEST = 0.65  # совпадает с planner/estimate.ts
-MAX_REQUESTS = 200          # предохранитель от слишком широких окон
+MAX_REQUESTS = 400          # предохранитель от слишком широких окон (2 запроса на день, см. FETCH_MODES)
 MAX_RESULTS = 1_000_000     # потолок max_results: компактный перебор держит его в памяти VM (4 ГБ)
 DEFAULT_START = "2026-11-01"  # якорь старта, если окон нет нигде (совпадает с mock)
 DEFAULT_LEG_DAYS = 7          # ширина окна плеча, если оба конца без окна
 FINAL_STAY_DAYS = 5           # пребывание в финальном городе (у конца окна нет)
+
+# Режимы запроса на каждый день (значения allow_indirect). prices_for_dates с
+# direct=false отдаёт по направлению лишь САМЫЙ ДЕШЁВЫЙ билет на дату — обычно
+# стыковочный, и прямой рейс чуть дороже в ответ не попадает (а потом фильтр
+# «только прямые» выкидывает и стыковочный). Поэтому прямые запрашиваем отдельно.
+FETCH_MODES = (True, False)
 
 
 def is_valid_max_results(n: Optional[int]) -> bool:
@@ -121,11 +127,11 @@ def _stop_label(stop: Stop, city_info) -> str:
 
 
 def _leg_requests(stops: List[Stop], i: int) -> int:
-    """Запросов на плечо i = (меньшая мощность конца) × дней окна."""
+    """Запросов на плечо i = (меньшая мощность конца) × дней окна × режимов запроса."""
     anchor = min(stops[i].cardinality(), stops[i + 1].cardinality())
     win = _leg_window(stops, i)
     days = len(get_date_range(win[0], win[1])) if win[0] and win[1] else DEFAULT_LEG_DAYS
-    return int(anchor) * days
+    return int(anchor) * days * len(FETCH_MODES)
 
 
 def estimate_plan(stops: List[Stop], city_info=None) -> Dict[str, Any]:
@@ -195,13 +201,23 @@ def _keep(flight: Dict[str, Any], side: str, allow: Optional[set]) -> bool:
     return bool(_side_codes(flight, side) & allow)
 
 
+def _flight_key(flight: Dict[str, Any]) -> tuple:
+    """Идентичность билета: один и тот же прямой рейс приходит и в ответе с
+    пересадками (если он самый дешёвый), и в ответе direct=true."""
+    return tuple(flight.get(k) for k in (
+        "origin_airport", "destination_airport", "departure_at",
+        "airline", "flight_number", "transfers", "price"))
+
+
 def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
                  fetch_fn=None,
                  leg_cb: Callable[[int], None] = None) -> Dict[int, List[Dict[str, Any]]]:
     """Реально ходит в Travelpayouts: собирает рейсы по каждому переходу.
 
-    Возвращает {индекс_перехода: [сырые рейсы]}. allow_indirect=True — чтобы фильтр
-    по числу пересадок на фронте имел смысл. progress_cb() — после каждого запроса,
+    Возвращает {индекс_перехода: [сырые рейсы]}. На каждый день — два запроса
+    (FETCH_MODES): с пересадками, чтобы фильтр по их числу на фронте имел смысл, и
+    только прямые, которые иначе теряются за более дешёвым стыковочным билетом.
+    progress_cb() — после каждого запроса,
     leg_cb(i) — перед началом перехода i (для показа этапа в UI).
     fetch_fn позволяет подменить обращение к API (кэширующая обёртка из api.worker)."""
     collected: Dict[int, List[Dict[str, Any]]] = {}
@@ -209,12 +225,19 @@ def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
         if leg_cb:
             leg_cb(i)
         leg_flights: List[Dict[str, Any]] = []
+        seen = set()
         for origin, dest, dates, side, allow in _leg_series(stops, i):
-            flights = collect_leg_data(
-                origin, dest, dates, leg_name=f"leg{i}",
-                allow_indirect=True, progress_cb=progress_cb, fetch_fn=fetch_fn,
-            )
-            leg_flights += [f for f in flights if _keep(f, side, allow)]
+            for allow_indirect in FETCH_MODES:
+                flights = collect_leg_data(
+                    origin, dest, dates, leg_name=f"leg{i}",
+                    allow_indirect=allow_indirect, progress_cb=progress_cb, fetch_fn=fetch_fn,
+                )
+                for f in flights:
+                    key = _flight_key(f)
+                    if key in seen or not _keep(f, side, allow):
+                        continue
+                    seen.add(key)
+                    leg_flights.append(f)
         collected[i] = leg_flights
     return collected
 

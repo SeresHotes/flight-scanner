@@ -1,13 +1,15 @@
 // Клиентская оценка объёма сбора цепочки — чистая арифметика по окнам дат,
 // считается мгновенно на каждый ввод (без round-trip к беку). Формула совпадает
 // с core/planner.estimate_plan: якорим сторону с МЕНЬШИМ числом городов и
-// запрашиваем «все направления» через неё (1 запрос/день на якорный город).
+// запрашиваем «все направления» через неё (2 запроса/день на якорный город:
+// с пересадками и только прямые — см. core/planner.FETCH_MODES).
 
 import type { PlannerEstimate, PlannerStop } from './types'
 import { daysInWindow } from './dates'
 
 const SECONDS_PER_REQUEST = 0.65 // совпадает с core/planner.SECONDS_PER_REQUEST
 const DEFAULT_LEG_DAYS = 7 // ширина окна плеча, если оба конца без окна
+const REQUESTS_PER_DAY = 2 // = len(core/planner.FETCH_MODES)
 
 export function stopLabel(s: PlannerStop): string {
   if (s.kind === 'any') return 'Любой город'
@@ -40,7 +42,7 @@ export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
     const days = daysInWindow(win) || DEFAULT_LEG_DAYS
     const anyLeg = from.kind === 'any' || to.kind === 'any'
     const anchor = Math.min(cardinality(from), cardinality(to))
-    const reqs = anchor * days
+    const reqs = anchor * days * REQUESTS_PER_DAY
     legs.push({ fromLabel: stopLabel(from), toLabel: stopLabel(to), days, requests: reqs, anyLeg })
     requests += reqs
   }
