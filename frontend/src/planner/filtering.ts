@@ -5,7 +5,7 @@
 import type { PlanGraph, PlannerFilters } from './types'
 import type { ItinerarySet } from './compact'
 import { coversWindow } from './dates'
-import { graphBounds } from './overview'
+import { graphBounds, isLayoverLongEnough } from './overview'
 
 // Первая и последняя остановки — концы маршрута: сколько мы там до вылета / после
 // прилёта, к поездке не относится. Фильтры пребывания (дни, окно, выходные) у них
@@ -26,13 +26,14 @@ export function itineraryMatches(set: ItinerarySet, n: number, f: PlannerFilters
     if (cf.mustCover && !coversWindow(set.arrive(n, k), set.depart(n, k), cf.mustCover)) return false
     if (cf.requireWeekend && !set.weekendCovered(n, k)) return false
   }
-  // Переходы: пересадки и суммарная длительность перелёта.
+  // Переходы: пересадки, их длительность и суммарная длительность перелёта.
   for (let k = 0; k < set.legs; k++) {
     const tf = f.transitions[k]
     if (!tf) continue
     const seg = set.segment(n, k)
     if (tf.maxTransfers >= 0 && seg.transfers > tf.maxTransfers) return false
     if ((seg.duration || 0) > tf.maxTravelMinutes) return false
+    if (!isLayoverLongEnough(seg.transfers || 0, seg.layover_minutes, tf.minLayoverMinutes || 0)) return false
   }
   // Общая длина поездки.
   const total = set.totalDaysOf(n)
@@ -117,6 +118,7 @@ export function defaultFilters(
     transitions: Array.from({ length: transitionCount }, () => ({
       maxTransfers: -1,
       maxTravelMinutes: b.maxTravel,
+      minLayoverMinutes: 0,
     })),
     tripLength: [b.tripMin, b.tripMax],
   }

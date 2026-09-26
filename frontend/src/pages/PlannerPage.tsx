@@ -70,6 +70,8 @@ export function PlannerPage() {
   // Фильтры, настроенные до правки маршрута (+ дефолты их набора): после пересбора
   // или гидрации из кэша переносим их на новые данные, а не сбрасываем.
   const carried = useRef<{ filters: PlannerFilters; defaults: PlannerFilters } | null>(null)
+  // Поколение гидрации из кэша: устаревшие асинхронные ответы отбрасываются.
+  const hydrateSeq = useRef(0)
 
   const estimate = useMemo(() => estimatePlan(stops), [stops])
   const validation = useMemo(() => validatePlan(stops), [stops])
@@ -109,19 +111,24 @@ export function PlannerPage() {
 
   // Гидрация из кэша: при заходе по ссылке или смене маршрута показываем уже
   // собранные данные вместо повторного сбора. Свежий сбор запускается кнопкой.
+  // Кэш асинхронный (IndexedDB): ответ применяем, только если за это время не
+  // сменился маршрут и не запустили сбор (hydrateSeq сдвигается при любом из них).
   useEffect(() => {
-    const cached = getCached(stops, bounds)
-    if (!cached) return // нет данных под маршрут+границы — оставляем как есть (idle → приглашение собрать)
-    const fromUrl = pendingFilters.current
-    pendingFilters.current = null
-    const set = new ItinerarySet(cached.result)
-    const graph = cached.result.graph ?? null
-    setCollect({ status: 'ready', set, graph, collectedAt: cached.collectedAt })
-    setFilters(
-      fromUrl && filtersFitStops(fromUrl, stops.length)
-        ? fromUrl
-        : carriedOrDefault(set, graph),
-    )
+    const seq = ++hydrateSeq.current
+    getCached(stops, bounds).then((cached) => {
+      if (seq !== hydrateSeq.current) return
+      if (!cached) return // нет данных под маршрут+границы — оставляем как есть (idle → приглашение собрать)
+      const fromUrl = pendingFilters.current
+      pendingFilters.current = null
+      const set = new ItinerarySet(cached.result)
+      const graph = cached.result.graph ?? null
+      setCollect({ status: 'ready', set, graph, collectedAt: cached.collectedAt })
+      setFilters(
+        fromUrl && filtersFitStops(fromUrl, stops.length)
+          ? fromUrl
+          : carriedOrDefault(set, graph),
+      )
+    })
   }, [stops, bounds])
 
   // Фильтры под новый набор: перенесённые с прошлого (если форма маршрута та же) или дефолтные.
@@ -189,6 +196,7 @@ export function PlannerPage() {
   function collectFresh() {
     if (!validation.ok) return
     cancelRef.current?.()
+    hydrateSeq.current++ // запоздавший ответ кэша не должен перебить сбор
     const prevFilters = filters // при пересборе сохраняем уже настроенные фильтры
     // Валидный запрос уходит в сбор — фиксируем его в истории.
     setRecent(addRecent(stops, Date.now()))
@@ -200,7 +208,7 @@ export function PlannerPage() {
       (result: CompactResult) => {
         cancelRef.current = null
         const collectedAt = new Date().toISOString()
-        putCached(stops, bounds, result, collectedAt)
+        void putCached(stops, bounds, result, collectedAt)
         const set = new ItinerarySet(result)
         const graph = result.graph ?? null
         setCollect({ status: 'ready', set, graph, collectedAt })

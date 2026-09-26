@@ -61,6 +61,7 @@ export interface CityFilter {
 export interface TransitionFilter {
   maxTransfers: number // 0 — только прямые, N — до N пересадок, -1 — любое
   maxTravelMinutes: number // верхняя граница суммарной длительности перелёта
+  minLayoverMinutes: number // пересадка не короче (0 — без ограничения), см. isLayoverLongEnough
 }
 
 export interface PlannerFilters {
@@ -103,6 +104,7 @@ export interface GraphEdge {
   price: number
   transfers: number
   duration: number
+  layover?: number | null // суммарно на земле на пересадках (нет в старом кэше)
 }
 
 export interface PlanGraph {

@@ -92,6 +92,7 @@ interface Edge {
   price: number
   transfers: number
   duration: number
+  layover: number | null
 }
 
 export interface PreparedGraph {
@@ -122,6 +123,7 @@ export function prepareGraph(g: PlanGraph): PreparedGraph {
           price: e.price,
           transfers: e.transfers,
           duration: e.duration || 0,
+          layover: e.layover ?? null,
         }
       })
       .sort((a, b) => a.dep - b.dep),
@@ -189,17 +191,32 @@ function merge(a: Agg | undefined, b: Agg): Agg {
   }
 }
 
+// Пересадка не короче minLayover. Источник отдаёт только суммарное ожидание по всем
+// пересадкам билета, поэтому при N ≥ 2 проверяем среднее: сумма ≥ N × minLayover.
+// Прямые рейсы проходят всегда; пересадочный с неизвестным ожиданием при активном
+// фильтре отсекаем — короткую стыковку не исключить.
+export function isLayoverLongEnough(
+  transfers: number,
+  layover: number | null | undefined,
+  minLayover: number,
+): boolean {
+  if (!minLayover || !transfers) return true
+  if (!layover) return false
+  return layover >= transfers * minLayover
+}
+
 type LegIndex = Map<string, Map<string, Edge[]>> // from → to → рёбра (по возрастанию вылета)
 type Arrivals = Map<number, Agg> // момент прилёта → агрегат
 type State = Map<number, Arrivals> // день первого вылета → прилёты
 
-// Рёбра перехода, прошедшие фильтр перехода (пересадки, длительность), по from/to.
+// Рёбра перехода, прошедшие фильтр перехода (пересадки, их длительность, длительность перелёта), по from/to.
 function indexLeg(edges: Edge[], f: PlannerFilters, i: number): LegIndex {
   const tf = f.transitions[i]
   const idx: LegIndex = new Map()
   for (const e of edges) {
     if (tf && tf.maxTransfers >= 0 && e.transfers > tf.maxTransfers) continue
     if (tf && e.duration > tf.maxTravelMinutes) continue
+    if (tf && !isLayoverLongEnough(e.transfers, e.layover, tf.minLayoverMinutes || 0)) continue
     let byTo = idx.get(e.from)
     if (!byTo) idx.set(e.from, (byTo = new Map()))
     const list = byTo.get(e.to)
