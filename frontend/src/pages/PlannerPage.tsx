@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { resolveAirports, type AirportOption } from '../data/airports'
-import type { CollectState, PlannerBounds, PlannerFilters, PlannerStop } from '../planner/types'
+import type { CollectState, PlanGraph, PlannerBounds, PlannerFilters, PlannerStop } from '../planner/types'
 import { ItinerarySet, type CompactResult } from '../planner/compact'
 import { estimatePlan } from '../planner/estimate'
 import { runCollection } from '../planner/api'
 import { validatePlan } from '../planner/validation'
-import { defaultFilters } from '../planner/filtering'
+import { carryFilters, defaultFilters } from '../planner/filtering'
 import { buildPlannerQuery, parsePlannerQuery } from '../planner/urlState'
 import { getCached, putCached } from '../planner/cache'
 import { RouteSkeleton } from '../planner/components/RouteSkeleton'
@@ -67,6 +67,9 @@ export function PlannerPage() {
   const cancelRef = useRef<(() => void) | null>(null)
   // Фильтры из ссылки ждут своего сбора; правка маршрута их аннулирует.
   const pendingFilters = useRef<PlannerFilters | null>(initial.filters)
+  // Фильтры, настроенные до правки маршрута (+ дефолты их набора): после пересбора
+  // или гидрации из кэша переносим их на новые данные, а не сбрасываем.
+  const carried = useRef<{ filters: PlannerFilters; defaults: PlannerFilters } | null>(null)
   // Поколение гидрации из кэша: устаревшие асинхронные ответы отбрасываются.
   const hydrateSeq = useRef(0)
 
@@ -123,16 +126,29 @@ export function PlannerPage() {
       setFilters(
         fromUrl && filtersFitStops(fromUrl, stops.length)
           ? fromUrl
-          : defaultFilters(set, stops.length, graph),
+          : carriedOrDefault(set, graph),
       )
     })
   }, [stops, bounds])
+
+  // Фильтры под новый набор: перенесённые с прошлого (если форма маршрута та же) или дефолтные.
+  function carriedOrDefault(set: ItinerarySet, graph: PlanGraph | null): PlannerFilters {
+    const next = defaultFilters(set, stops.length, graph)
+    const prev = carried.current
+    if (!prev || !filtersFitStops(prev.filters, stops.length)) return next
+    return carryFilters(prev.filters, prev.defaults, next)
+  }
 
   // Любая правка маршрута сбрасывает собранное — данные надо перезагрузить.
   function resetCollected() {
     cancelRef.current?.()
     cancelRef.current = null
     pendingFilters.current = null
+    // Запоминаем только фильтры поверх готовых данных: повторная правка до
+    // пересбора не должна затирать их пустыми.
+    if (collect.status === 'ready' && filters) {
+      carried.current = { filters, defaults: defaultFilters(collect.set, stops.length, collect.graph) }
+    }
     setCollect({ status: 'idle' })
     setFilters(null)
   }
@@ -140,6 +156,12 @@ export function PlannerPage() {
   function updateStop(index: number, patch: Partial<PlannerStop>) {
     setStops((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)))
     resetCollected()
+    // Сменили города остановки — прежний выбор городов в её фильтре уже не про неё.
+    const prev = carried.current
+    if (prev && ('airports' in patch || 'kind' in patch)) {
+      const cities = prev.filters.cities.map((c, i) => (i === index ? { ...c, allowedCodes: null } : c))
+      carried.current = { ...prev, filters: { ...prev.filters, cities } }
+    }
   }
   function addStop() {
     setStops((prev) => {
@@ -160,6 +182,7 @@ export function PlannerPage() {
     cancelRef.current?.()
     cancelRef.current = null
     pendingFilters.current = null
+    carried.current = null // другой маршрут — прежние фильтры к нему не относятся
     setStops(saved.map((s) => ({ ...s, id: nid() })))
     setCollect({ status: 'idle' })
     setFilters(null)
@@ -189,13 +212,13 @@ export function PlannerPage() {
         const set = new ItinerarySet(result)
         const graph = result.graph ?? null
         setCollect({ status: 'ready', set, graph, collectedAt })
-        // Приоритет фильтров: из ссылки (одноразово) → уже настроенные → дефолтные.
+        // Приоритет фильтров: из ссылки (одноразово) → уже настроенные → перенесённые → дефолтные.
         const fromUrl = pendingFilters.current
         pendingFilters.current = null
         const reuse =
           (fromUrl && filtersFitStops(fromUrl, stops.length) && fromUrl) ||
           (prevFilters && filtersFitStops(prevFilters, stops.length) && prevFilters) ||
-          defaultFilters(set, stops.length, graph)
+          carriedOrDefault(set, graph)
         setFilters(reuse)
       },
       (message: string) => {

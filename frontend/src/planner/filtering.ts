@@ -135,3 +135,42 @@ export function computeBounds(set: ItinerarySet, graph: PlanGraph | null = null)
   const b = setBounds(set, graph)
   return { maxTravelMinutes: b.maxTravel, tripLength: [b.tripMin, b.tripMax], stayDays: [b.stayMin, b.stayMax] }
 }
+
+// Перенос настроенных фильтров на пересобранный набор (сменили окно дат, лимиты…).
+// prevDefaults — дефолты старого набора, next — дефолты нового. Нетронутая граница
+// диапазона (равна старому дефолту) переезжает на новую, сдвинутая пользователем —
+// сохраняется, но не выходит за новые границы. Галочки, окна и выбор городов — как есть.
+export function carryFilters(prev: PlannerFilters, prevDefaults: PlannerFilters, next: PlannerFilters): PlannerFilters {
+  return {
+    cities: next.cities.map((n, k) => {
+      const p = prev.cities[k]
+      const [minStay, maxStay] = carryRange(
+        [p.minStay, p.maxStay],
+        [prevDefaults.cities[k].minStay, prevDefaults.cities[k].maxStay],
+        [n.minStay, n.maxStay],
+      )
+      return { ...p, minStay, maxStay }
+    }),
+    transitions: next.transitions.map((n, k) => {
+      const p = prev.transitions[k]
+      const [, maxTravelMinutes] = carryRange(
+        [0, p.maxTravelMinutes],
+        [0, prevDefaults.transitions[k].maxTravelMinutes],
+        [0, n.maxTravelMinutes],
+      )
+      return { ...p, maxTravelMinutes }
+    }),
+    tripLength: carryRange(prev.tripLength, prevDefaults.tripLength, next.tripLength),
+  }
+}
+
+function carryRange(
+  value: [number, number],
+  prevBounds: [number, number],
+  nextBounds: [number, number],
+): [number, number] {
+  const clamp = (v: number) => Math.min(nextBounds[1], Math.max(nextBounds[0], v))
+  const lo = value[0] === prevBounds[0] ? nextBounds[0] : clamp(value[0])
+  const hi = value[1] === prevBounds[1] ? nextBounds[1] : clamp(value[1])
+  return lo <= hi ? [lo, hi] : nextBounds
+}
