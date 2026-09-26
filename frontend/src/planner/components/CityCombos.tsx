@@ -1,7 +1,8 @@
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { makeMoney, plural } from '../../lib/format'
 import type { PlanGraph, PlannerFilters } from '../types'
-import { computeOverview, type CityCombo } from '../overview'
+import type { CityCombo } from '../overview'
+import { useOverview } from '../useOverview'
 
 const money = makeMoney('RUB')
 const PAGE_SIZE = 100
@@ -25,22 +26,28 @@ export function CityCombos({
   filters: PlannerFilters
   onShowRoutes: (codes: string[]) => void
 }) {
-  // Пересчёт по всему графу — отложенный, чтобы слайдеры фильтров не подтормаживали.
-  const deferredFilters = useDeferredValue(filters)
-  const overview = useMemo(() => computeOverview(graph, deferredFilters), [graph, deferredFilters])
+  // Пересчёт по всему графу — в воркере; пока он идёт, показываем прошлый результат.
+  const { overview, pending } = useOverview(graph, filters)
   const [sort, setSort] = useState<SortKey>('price')
   const [shown, setShown] = useState(PAGE_SIZE)
 
-  const sorted = useMemo(() => [...overview.combos].sort(SORTS[sort]), [overview, sort])
-  const stale = deferredFilters !== filters
+  const sorted = useMemo(() => (overview ? [...overview.combos].sort(SORTS[sort]) : []), [overview, sort])
 
   const cityLabel = (code: string) => {
     const ci = graph.cities[code]
     return `${ci?.flag ? ci.flag + ' ' : ''}${ci?.city || code}`
   }
 
+  if (!overview) {
+    return (
+      <div className="pl-combos">
+        <div className="empty">Считаем наборы городов…</div>
+      </div>
+    )
+  }
+
   return (
-    <div className="pl-combos" style={{ opacity: stale ? 0.6 : 1 }}>
+    <div className="pl-combos" style={{ opacity: pending ? 0.6 : 1 }}>
       <div className="count">
         <b>{overview.combos.length}</b> {plural(overview.combos.length, 'набор', 'набора', 'наборов')} городов ·{' '}
         <b>{overview.totalCount.toLocaleString('ru-RU')}</b>{' '}
