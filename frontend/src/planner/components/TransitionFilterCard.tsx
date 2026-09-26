@@ -3,10 +3,10 @@ import type { TransitionFilter } from '../types'
 import { RangeSlider } from './RangeSlider'
 
 const TRANSFER_OPTS: { v: number; l: string }[] = [
-  { v: -1, l: 'Любые' },
-  { v: 2, l: 'до 2' },
-  { v: 1, l: 'до 1' },
-  { v: 0, l: 'прямой' },
+  { v: -1, l: 'Пересадки: любые' },
+  { v: 2, l: 'До 2 пересадок' },
+  { v: 1, l: 'До 1 пересадки' },
+  { v: 0, l: 'Только прямые' },
 ]
 
 // Фильтры перехода между городами одной строкой: пересадки и длительность перелёта.
@@ -27,18 +27,17 @@ export function TransitionFilterCard({
       <div className="pl-fname">{title}</div>
 
       <div className="pl-fcell">
-        <div className="segbtns">
+        <select
+          aria-label="Пересадки"
+          value={filter.maxTransfers}
+          onChange={(e) => onChange({ maxTransfers: Number(e.target.value) })}
+        >
           {TRANSFER_OPTS.map((o) => (
-            <button
-              key={o.v}
-              type="button"
-              className={filter.maxTransfers === o.v ? 'active' : ''}
-              onClick={() => onChange({ maxTransfers: o.v })}
-            >
+            <option key={o.v} value={o.v}>
               {o.l}
-            </button>
+            </option>
           ))}
-        </div>
+        </select>
       </div>
 
       <div className="pl-fcell">
