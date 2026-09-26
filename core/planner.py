@@ -607,10 +607,10 @@ def _pack_compact(ctx, table: _FlightTable, chains: array, legs: int) -> Dict[st
     days, weekend, total_days = array("h"), array("i"), array("h")
     for n in range(count):
         segs = [segments[out_chains[n * legs + k]] for k in range(legs)]
-        stay_days, mask, final_depart = _chain_stays(segs, start_iso)
+        stay_days, mask = _chain_stays(segs, start_iso)
         days.extend(stay_days)
         weekend.append(mask)
-        total_days.append(max(1, _stay(start_iso, final_depart)[0]))
+        total_days.append(_trip_days(segs))
 
     codes = {s[key] for s in segments for key in ("origin", "destination")}
     return {
@@ -646,7 +646,16 @@ def _chain_stays(segs: List[Dict[str, Any]], start_iso: str):
         mask |= int(wk) << k
         if k < len(segs):
             arrive = segs[k]["arrival_at"]
-    return stay_days, mask, depart
+    return stay_days, mask
+
+
+def _trip_days(segs: List[Dict[str, Any]]) -> int:
+    """Длина поездки — от даты первого вылета до даты последнего прилёта. Сколько мы
+    были в стартовом городе до вылета и сколько пробудем в финальном после прилёта,
+    к поездке не относится (дни на концах — условность: начало окна / FINAL_STAY_DAYS)."""
+    if not segs:
+        return 1
+    return max(1, stay_between(date_only(segs[0]["departure_at"]), date_only(segs[-1]["arrival_at"])))
 
 
 def compact_to_json(result: Dict[str, Any]) -> str:
@@ -761,8 +770,7 @@ def _assemble(stops: List[Stop], chosen: List[Dict[str, Any]], builder: "Builder
     total_price = sum(s["price"] or 0 for s in segments)
     total_transfers = sum(s["transfers"] or 0 for s in segments)
     travel_minutes = sum(s["duration"] or 0 for s in segments)
-    first, last = itin_stops[0], itin_stops[-1]
-    total_days = max(1, stay_between(first["arrive"], last["depart"]))
+    total_days = _trip_days(segments)
 
     return {
         "id": itin_id,

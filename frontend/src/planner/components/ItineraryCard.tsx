@@ -58,15 +58,21 @@ function LegRow({ seg }: { seg: Segment }) {
   )
 }
 
-function StayBar({ stop }: { stop: ItineraryStop }) {
+// endpoint — старт/финиш: сколько мы там до вылета / после прилёта, не показываем.
+function StayBar({ stop, endpoint = false }: { stop: ItineraryStop; endpoint?: boolean }) {
   return (
     <div className="stopstay region">
-      🏙 {stop.flag} {stop.city}:{' '}
-      <b>
-        &nbsp;{stop.days} {dayW(stop.days)}
-      </b>
+      🏙 {stop.flag} {stop.city}
+      {!endpoint && (
+        <>
+          :{' '}
+          <b>
+            &nbsp;{stop.days} {dayW(stop.days)}
+          </b>
+        </>
+      )}
       {stop.resolvedFromAny && <span className="pl-anytag">&nbsp;· подобран</span>}
-      {stop.weekendCovered && <span className="pl-wknd">&nbsp;· выходные ✓</span>}
+      {!endpoint && stop.weekendCovered && <span className="pl-wknd">&nbsp;· выходные ✓</span>}
     </div>
   )
 }
@@ -96,11 +102,11 @@ export function ItineraryCard({ it }: { it: Itinerary }) {
         </span>
       </div>
       <div className="legs">
-        <StayBar stop={it.stops[0]} />
+        <StayBar stop={it.stops[0]} endpoint />
         {it.segments.map((s, i) => (
           <div key={i} style={{ display: 'contents' }}>
             <LegRow seg={s} />
-            {it.stops[i + 1] && <StayBar stop={it.stops[i + 1]} />}
+            {it.stops[i + 1] && <StayBar stop={it.stops[i + 1]} endpoint={i + 1 === it.segments.length} />}
           </div>
         ))}
       </div>

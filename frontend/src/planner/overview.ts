@@ -5,13 +5,13 @@
 //
 // Цепочки не перечисляются (их экспоненциально много). Все фильтры локальны:
 // пребывание в городе зависит только от пары соседних рейсов, длина поездки — от
-// последнего. Поэтому для фиксированной последовательности городов хватает динамики
-// по времени прилёта: состояние — «прилёт в текущий город в момент T» → агрегат
-// (min цена, число цепочек). Семантика стыковки повторяет core/planner.py
+// первого вылета и последнего прилёта. Поэтому для фиксированной последовательности
+// городов хватает динамики: состояние — «первый вылет в день D, прилёт в текущий
+// город в момент T» → агрегат (min цена, число цепочек). Семантика стыковки повторяет core/planner.py
 // (_onward_candidates/_assemble), фильтры — filtering.ts/itineraryMatches.
 
 import type { GraphEdge, PlanGraph, PlannerFilters } from './types'
-import { addDays, coversWindow, dateOnly, hasBothWeekendDays } from './dates'
+import { coversWindow, dateOnly, hasBothWeekendDays } from './dates'
 
 const DAY_MS = 24 * 3600 * 1000
 
@@ -46,18 +46,18 @@ function stayDays(arriveIso: string, departIso: string): number {
   return Math.floor((naiveMs(departIso) - naiveMs(arriveIso)) / DAY_MS)
 }
 
-function finalDepart(g: PlanGraph, arriveIso: string): string {
-  return `${addDays(dateOnly(arriveIso), g.final_stay_days)}T00:00:00`
+// Длина поездки — от даты первого вылета до даты последнего прилёта (как _trip_days на бэке).
+function tripDays(firstDepDay: string, lastArriveIso: string): number {
+  return Math.max(1, stayDays(firstDepDay, dateOnly(lastArriveIso)))
 }
 
-// Проверка фильтра города k для пребывания [arrive..depart] (кроме allowedCodes —
-// он проверяется на уровне последовательности).
-function stopFits(f: PlannerFilters, k: number, arrive: string, depart: string, isLast: boolean): boolean {
+// Проверка фильтра ПРОМЕЖУТОЧНОГО города k для пребывания [arrive..depart] (кроме
+// allowedCodes — он проверяется на уровне последовательности). У концов маршрута
+// фильтров пребывания нет (см. filtering.ts/isEndpoint).
+function stopFits(f: PlannerFilters, k: number, arrive: string, depart: string): boolean {
   const cf = f.cities[k]
   if (!cf) return true
-  let days = stayDays(arrive, depart)
-  if (isLast) days = Math.max(1, days)
-  days = Math.max(0, days)
+  const days = Math.max(0, stayDays(arrive, depart))
   if (days < cf.minStay || days > cf.maxStay) return false
   if (cf.mustCover && !coversWindow(arrive, depart, cf.mustCover)) return false
   if (cf.requireWeekend && !hasBothWeekendDays(arrive, depart)) return false
@@ -76,6 +76,8 @@ function merge(a: Agg | undefined, b: Agg): Agg {
 }
 
 type LegIndex = Map<string, Map<string, GraphEdge[]>> // from → to → рёбра
+type Arrivals = Map<string, Agg> // момент прилёта → агрегат
+type State = Map<string, Arrivals> // день первого вылета → прилёты
 
 // Рёбра перехода, прошедшие фильтр перехода (пересадки, длительность), по from/to.
 function indexLeg(edges: GraphEdge[], f: PlannerFilters, i: number): LegIndex {
@@ -117,11 +119,35 @@ function reachability(legs: LegIndex[], f: PlannerFilters): Set<string>[] {
   return reach
 }
 
+// Первый переход: вылет из стартового города (не раньше начала окна, как на бэке).
+function departFirst(g: PlanGraph, edges: GraphEdge[]): State {
+  const next: State = new Map()
+  for (const e of edges) {
+    const depDay = dateOnly(e.dep)
+    if (depDay < g.chain_start) continue
+    let arrivals = next.get(depDay)
+    if (!arrivals) next.set(depDay, (arrivals = new Map()))
+    const agg: Agg = { price: e.price, transfersAtMin: e.transfers, minTransfers: e.transfers, count: 1 }
+    arrivals.set(e.arr, merge(arrivals.get(e.arr), agg))
+  }
+  return next
+}
+
+// Переход i ≥ 1 — отдельно для каждого дня первого вылета.
+function extendState(state: State, edges: GraphEdge[], f: PlannerFilters, i: number): State {
+  const next: State = new Map()
+  for (const [firstDep, arrivals] of state) {
+    const ext = extend(arrivals, edges, f, i)
+    if (ext.size) next.set(firstDep, ext)
+  }
+  return next
+}
+
 // Переход i: из состояний «прилёт в город в момент a» по рёбрам в следующий город.
 // Для каждого момента вылета совместимые прилёты сворачиваются один раз.
-function extend(state: Map<string, Agg>, edges: GraphEdge[], f: PlannerFilters, i: number): Map<string, Agg> {
+function extend(state: Arrivals, edges: GraphEdge[], f: PlannerFilters, i: number): Arrivals {
   const byDep = new Map<string, Agg | null>()
-  const next = new Map<string, Agg>()
+  const next: Arrivals = new Map()
   for (const e of edges) {
     let acc = byDep.get(e.dep)
     if (acc === undefined) {
@@ -129,7 +155,7 @@ function extend(state: Map<string, Agg>, edges: GraphEdge[], f: PlannerFilters, 
       const depDay = dateOnly(e.dep)
       for (const [arrive, agg] of state) {
         if (depDay < dateOnly(arrive)) continue // нельзя вылететь раньше прилёта
-        if (!stopFits(f, i, arrive, e.dep, false)) continue
+        if (!stopFits(f, i, arrive, e.dep)) continue
         acc = merge(acc ?? undefined, agg)
       }
       byDep.set(e.dep, acc)
@@ -146,16 +172,15 @@ function extend(state: Map<string, Agg>, edges: GraphEdge[], f: PlannerFilters, 
   return next
 }
 
-// Закрытие цепочки в финальном городе: фильтр финала и общей длины поездки.
-function finish(g: PlanGraph, f: PlannerFilters, state: Map<string, Agg>, last: number): Agg | undefined {
-  const start = `${g.chain_start}T00:00:00`
+// Закрытие цепочки в финальном городе: фильтр общей длины поездки.
+function finish(f: PlannerFilters, state: State): Agg | undefined {
   let total: Agg | undefined
-  for (const [arrive, agg] of state) {
-    const depart = finalDepart(g, arrive)
-    if (!stopFits(f, last, arrive, depart, true)) continue
-    const tripDays = Math.max(1, stayDays(start, depart))
-    if (tripDays < f.tripLength[0] || tripDays > f.tripLength[1]) continue
-    total = merge(total, agg)
+  for (const [firstDep, arrivals] of state) {
+    for (const [arrive, agg] of arrivals) {
+      const days = tripDays(firstDep, arrive)
+      if (days < f.tripLength[0] || days > f.tripLength[1]) continue
+      total = merge(total, agg)
+    }
   }
   return total
 }
@@ -166,13 +191,9 @@ export function computeOverview(g: PlanGraph, f: PlannerFilters): OverviewResult
   if (last === 0) return { combos, totalCount: 0 }
   const legs = g.legs.map((edges, i) => indexLeg(edges, f, i))
   const reach = reachability(legs, f)
-  const startState = new Map<string, Agg>([
-    [`${g.chain_start}T00:00:00`, { price: 0, transfersAtMin: 0, minTransfers: 0, count: 1 }],
-  ])
-
-  const dfs = (i: number, city: string, state: Map<string, Agg>, codes: string[], visited: Set<string>) => {
+  const dfs = (i: number, city: string, state: State, codes: string[], visited: Set<string>) => {
     if (i === last) {
-      const agg = finish(g, f, state, last)
+      const agg = finish(f, state)
       if (agg) combos.push({ key: codes.join('>'), codes, ...aggFields(agg) })
       return
     }
@@ -180,7 +201,7 @@ export function computeOverview(g: PlanGraph, f: PlannerFilters): OverviewResult
       if (to === city) continue // без петель
       if (g.any[i + 1] && visited.has(to)) continue // «любой» не ведём в уже посещённый
       if (!isAllowed(f, i + 1, to) || !reach[i + 1].has(to)) continue
-      const next = extend(state, edges, f, i)
+      const next = i === 0 ? departFirst(g, edges) : extendState(state, edges, f, i)
       if (next.size === 0) continue
       dfs(i + 1, to, next, [...codes, to], new Set(visited).add(to))
     }
@@ -188,7 +209,7 @@ export function computeOverview(g: PlanGraph, f: PlannerFilters): OverviewResult
 
   for (const start of legs[0].keys()) {
     if (!isAllowed(f, 0, start) || !reach[0].has(start)) continue
-    dfs(0, start, startState, [start], new Set([start]))
+    dfs(0, start, new Map(), [start], new Set([start]))
   }
 
   combos.sort((a, b) => a.minPrice - b.minPrice)
@@ -222,15 +243,13 @@ export function graphBounds(g: PlanGraph): GraphBounds | null {
       if (e.dep > latest) latest = e.dep
     }
   }
-  let tripMin = Infinity
-  let tripMax = -Infinity
-  for (const e of lastLeg) {
-    const days = Math.max(1, stayDays(start, finalDepart(g, e.arr)))
-    if (days < tripMin) tripMin = days
-    if (days > tripMax) tripMax = days
-  }
-  // Дольше, чем от старта до самого позднего вылета (или финального пребывания), не пробыть.
-  const stayMax = Math.max(stayDays(start, latest), g.final_stay_days, 0)
+  // Длина поездки: охватывающий диапазон по крайним первым вылетам и последним прилётам.
+  const firstDeps = g.legs[0].map((e) => dateOnly(e.dep)).sort()
+  const lastArrs = lastLeg.map((e) => e.arr).sort()
+  const tripMin = tripDays(firstDeps[firstDeps.length - 1] ?? g.chain_start, lastArrs[0])
+  const tripMax = tripDays(firstDeps[0] ?? g.chain_start, lastArrs[lastArrs.length - 1])
+  // Дольше, чем от старта до самого позднего вылета, в промежуточном городе не пробыть.
+  const stayMax = Math.max(stayDays(start, latest), 0)
   return { maxTravel, tripMin, tripMax, stayMax }
 }
 
