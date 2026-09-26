@@ -49,7 +49,9 @@ def make_city_lookup(network: dict):
     def city_info(code: str) -> dict:
         info = network.get(code, {})
         name = info.get("municipality") or info.get("name")
-        country = info.get("iso_country") or ""
+        # build_airport_network кладёт ISO2 страны в "country" (iso_country — поле
+        # исходного CSV); раньше читали только его, и у городов из сети не было флага.
+        country = info.get("country") or info.get("iso_country") or ""
         if not name:
             entry = _CITY_BY_CODE.get(code)
             if entry:
