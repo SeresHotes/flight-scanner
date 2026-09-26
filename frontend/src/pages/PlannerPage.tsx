@@ -77,9 +77,15 @@ export function PlannerPage() {
   const validation = useMemo(() => validatePlan(stops), [stops])
   const bounds = useMemo<PlannerBounds>(() => ({ maxResults: limit, maxCost }), [limit, maxCost])
 
-  // URL всегда отражает то, что на экране: маршрут + активные фильтры.
+  // Ключ собранных данных: коды + окна + границы. Дорезолв названий городов
+  // меняет объекты stops, но не этот ключ — гидрация из-за него не повторяется.
+  const dataKey = useMemo(() => buildPlannerQuery(stops, null, bounds).toString(), [stops, bounds])
+
+  // URL всегда отражает то, что на экране: маршрут + активные фильтры. Пока
+  // фильтры из ссылки ждут данных — держим в URL их, иначе ссылка теряет их
+  // сразу при открытии.
   useEffect(() => {
-    const activeFilters = collect.status === 'ready' ? filters : null
+    const activeFilters = collect.status === 'ready' ? filters : pendingFilters.current
     setSearchParams(buildPlannerQuery(stops, activeFilters, bounds), { replace: true })
   }, [stops, filters, collect.status, bounds, setSearchParams])
 
@@ -129,7 +135,8 @@ export function PlannerPage() {
           : carriedOrDefault(set, graph),
       )
     })
-  }, [stops, bounds])
+    // stops/bounds входят в dataKey: смена только названий городов гидрацию не повторяет.
+  }, [dataKey])
 
   // Фильтры под новый набор: перенесённые с прошлого (если форма маршрута та же) или дефолтные.
   function carriedOrDefault(set: ItinerarySet, graph: PlanGraph | null): PlannerFilters {
