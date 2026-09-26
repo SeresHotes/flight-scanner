@@ -455,8 +455,12 @@ select:disabled{opacity:.4}
 .pl-cp-reset{background:transparent;border:none;color:var(--accent2);cursor:pointer;font-size:12px;padding:0}
 .pl-cp-reset:hover{text-decoration:underline}
 .pl-citypicker .combobox input{padding:8px 9px;font-size:13px}
-.combo-list li .ac-country{color:var(--muted);font-size:12px}
-.combo-list li.active .ac-country{color:#fff}
+.pl-cp-drop ul{list-style:none;margin:0;padding:0}
+.pl-cp-flags{display:flex;flex-wrap:wrap;gap:2px;padding:4px 4px 6px;margin-bottom:4px;
+  border-bottom:1px solid var(--line)}
+.pl-cp-flags button{background:transparent;border:1px solid transparent;border-radius:6px;
+  font-size:18px;line-height:1;padding:3px 4px;cursor:pointer}
+.pl-cp-flags button:hover{background:var(--panel);border-color:var(--line)}
 /* Дата-пикер занимает всю ширину ячейки; у концов — заметка о выводе дат */
 .pl-window .drp,.pl-window .drp-trigger{width:100%}
 /* Дата-пикер в карточке фильтра города — на всю ширину */

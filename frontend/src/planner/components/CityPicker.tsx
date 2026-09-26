@@ -11,9 +11,9 @@ interface Country {
   codes: string[]
 }
 
-type Item = { kind: 'country'; country: Country } | { kind: 'city'; city: CityOption; countryName: string }
+const MAX_CITIES = 40
 
-const MAX_ITEMS = 40
+const cityCount = (n: number) => `${n} ${plural(n, 'город', 'города', 'городов')}`
 
 function groupCountries(options: CityOption[]): Map<string, Country> {
   const byIso = new Map<string, Country>()
@@ -26,10 +26,10 @@ function groupCountries(options: CityOption[]): Map<string, Country> {
   return byIso
 }
 
-// Выбор городов остановки в фильтрах: чипсы выбранного + поиск по городам и
-// странам (как в скелете маршрута). Страна добавляет все свои города разом и
-// показывается одним чипом, пока выбраны все её города. Ничего не выбрано —
-// подходит любой город. В модели — список разрешённых кодов (allowedCodes).
+// Выбор городов остановки в фильтрах: чипсы выбранного + поиск (как в скелете
+// маршрута). Над списком городов — ряд флагов стран: флаг добавляет все города
+// страны разом, и пока выбраны все её города, она показана одним чипом.
+// Ничего не выбрано — подходит любой город. В модели — список разрешённых кодов (allowedCodes).
 export function CityPicker({
   options,
   allowed,
@@ -46,8 +46,8 @@ export function CityPicker({
 
   const countries = useMemo(() => groupCountries(options), [options])
   const byCode = useMemo(() => new Map(options.map((o) => [o.code, o])), [options])
-  const countryOfCode = useMemo(
-    () => new Map(options.map((o) => [o.code, countries.get(flagToIso2(o.flag))])),
+  const countrySearchOf = useMemo(
+    () => new Map(options.map((o) => [o.code, countries.get(flagToIso2(o.flag))?.search ?? ''])),
     [options, countries],
   )
 
@@ -66,16 +66,11 @@ export function CityPicker({
 
   // Чипсы: страна целиком (если выбраны все её города и их больше одного), иначе города.
   const chips = useMemo(() => {
-    const out: { key: string; label: string; hint?: string; codes: string[] }[] = []
+    const out: { key: string; label: string; hint?: string; title?: string; codes: string[] }[] = []
     const covered = new Set<string>()
     for (const c of countries.values()) {
-      if (c.codes.length > 1 && c.codes.every((code) => selectedSet.has(code))) {
-        out.push({
-          key: `country-${c.iso2}`,
-          label: `${c.flag ? `${c.flag} ` : ''}${c.name}`,
-          hint: `${c.codes.length} ${plural(c.codes.length, 'город', 'города', 'городов')}`,
-          codes: c.codes,
-        })
+      if (c.iso2 && c.codes.length > 1 && c.codes.every((code) => selectedSet.has(code))) {
+        out.push({ key: `country-${c.iso2}`, label: c.flag ?? '', hint: cityCount(c.codes.length), title: c.name, codes: c.codes })
         c.codes.forEach((code) => covered.add(code))
       }
     }
@@ -87,25 +82,31 @@ export function CityPicker({
     return out
   }, [countries, selected, selectedSet, byCode])
 
-  // Подсказки: сперва страны (с >1 городом), затем города; уже выбранное скрываем.
-  const items = useMemo<Item[]>(() => {
-    const q = normalizeSearch(text.trim())
-    const countryItems: Item[] = [...countries.values()]
-      .filter((c) => c.codes.length > 1 && !c.codes.every((code) => selectedSet.has(code)))
-      .filter((c) => !q || c.search.includes(q))
-      .sort((a, b) => b.codes.length - a.codes.length || a.name.localeCompare(b.name, 'ru'))
-      .map((country) => ({ kind: 'country', country }))
-    const cityItems: Item[] = options
-      .filter((o) => !selectedSet.has(o.code))
-      .filter((o) => {
-        if (!q) return true
-        const cs = countryOfCode.get(o.code)?.search ?? ''
-        return normalizeSearch(o.city).includes(q) || o.code.toLowerCase().startsWith(q) || cs.includes(q)
-      })
-      .sort((a, b) => a.city.localeCompare(b.city, 'ru'))
-      .map((city) => ({ kind: 'city', city, countryName: countryOfCode.get(city.code)?.name ?? '' }))
-    return [...countryItems, ...cityItems].slice(0, MAX_ITEMS)
-  }, [text, countries, options, selectedSet, countryOfCode])
+  // Подсказки: флаги стран (ещё не выбранных целиком) и города; выбранное скрываем.
+  const q = normalizeSearch(text.trim())
+  const flagItems = useMemo<Country[]>(
+    () =>
+      [...countries.values()]
+        .filter((c) => c.iso2 && !c.codes.every((code) => selectedSet.has(code)))
+        .filter((c) => !q || c.search.includes(q))
+        .sort((a, b) => b.codes.length - a.codes.length || a.name.localeCompare(b.name)),
+    [countries, selectedSet, q],
+  )
+  const items = useMemo<CityOption[]>(
+    () =>
+      options
+        .filter((o) => !selectedSet.has(o.code))
+        .filter(
+          (o) =>
+            !q ||
+            normalizeSearch(o.city).includes(q) ||
+            o.code.toLowerCase().startsWith(q) ||
+            (countrySearchOf.get(o.code) ?? '').includes(q),
+        )
+        .sort((a, b) => a.city.localeCompare(b.city))
+        .slice(0, MAX_CITIES),
+    [options, selectedSet, q, countrySearchOf],
+  )
 
   useEffect(() => setActive(0), [text])
 
@@ -118,8 +119,8 @@ export function CityPicker({
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [])
 
-  const pick = (it: Item) => {
-    add(it.kind === 'country' ? it.country.codes : [it.city.code])
+  const pick = (codes: string[]) => {
+    add(codes)
     setText('')
   }
 
@@ -137,7 +138,7 @@ export function CityPicker({
       setActive((a) => Math.max(a - 1, 0))
     } else if (e.key === 'Enter') {
       e.preventDefault()
-      pick(items[Math.min(active, items.length - 1)])
+      pick([items[Math.min(active, items.length - 1)].code])
     } else if (e.key === 'Escape') {
       setOpen(false)
     }
@@ -163,7 +164,7 @@ export function CityPicker({
       {chips.length > 0 && (
         <div className="pl-chips">
           {chips.map((c) => (
-            <span className="pl-chip" key={c.key}>
+            <span className="pl-chip" key={c.key} title={c.title}>
               {c.label} {c.hint && <span className="pl-chip-code">{c.hint}</span>}
               <button type="button" className="pl-chip-x" title="Убрать" onClick={() => remove(c.codes)}>
                 ✕
@@ -185,37 +186,44 @@ export function CityPicker({
           onFocus={() => setOpen(true)}
           onKeyDown={onKeyDown}
         />
-        {open && items.length > 0 && (
-          <ul className="combo-list">
-            {items.map((it, i) => (
-              <li
-                key={it.kind === 'country' ? `country-${it.country.iso2}` : it.city.code}
-                className={i === active ? 'active' : ''}
-                onMouseDown={(e) => {
-                  e.preventDefault()
-                  pick(it)
-                }}
-                onMouseEnter={() => setActive(i)}
-              >
-                {it.kind === 'country' ? (
-                  <>
-                    <span className="ac-city">
-                      {it.country.flag} <b>{it.country.name}</b> — вся страна
-                    </span>
-                    <span className="ac-code">{it.country.codes.length}</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="ac-city">
-                      {it.city.flag} {it.city.city}
-                      {it.countryName && <span className="ac-country"> · {it.countryName}</span>}
-                    </span>
-                    <span className="ac-code">{it.city.code}</span>
-                  </>
-                )}
-              </li>
-            ))}
-          </ul>
+        {open && (flagItems.length > 0 || items.length > 0) && (
+          <div className="combo-list pl-cp-drop">
+            {flagItems.length > 0 && (
+              <div className="pl-cp-flags">
+                {flagItems.map((c) => (
+                  <button
+                    key={c.iso2}
+                    type="button"
+                    title={`${c.name} — ${cityCount(c.codes.length)}`}
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      pick(c.codes)
+                    }}
+                  >
+                    {c.flag}
+                  </button>
+                ))}
+              </div>
+            )}
+            <ul>
+              {items.map((o, i) => (
+                <li
+                  key={o.code}
+                  className={i === active ? 'active' : ''}
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    pick([o.code])
+                  }}
+                  onMouseEnter={() => setActive(i)}
+                >
+                  <span className="ac-city">
+                    {o.flag} {o.city}
+                  </span>
+                  <span className="ac-code">{o.code}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
       </div>
     </div>
