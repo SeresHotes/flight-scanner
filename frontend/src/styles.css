@@ -39,11 +39,6 @@ header.hero::after{content:"";position:absolute;right:-40px;top:-40px;width:220p
 .fsub:last-child{margin-bottom:0}
 .fsub>span{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
 .fsub .rangeval{color:var(--txt);font-weight:600}
-.citychips{display:flex;flex-wrap:wrap;gap:6px}
-.citychips button{background:var(--panel);color:var(--muted);border:1px solid var(--line);
-  border-radius:999px;padding:4px 11px;font-size:12px;cursor:pointer;transition:.12s}
-.citychips button:hover{color:var(--txt);border-color:var(--accent2)}
-.citychips button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 .dualrange{display:flex;flex-direction:column;gap:4px}
 .dualrange input[type=range]{width:100%}
 .daterow{display:flex;align-items:center;gap:8px}
@@ -420,6 +415,18 @@ select:disabled{opacity:.4}
 .pl-chip-x{background:transparent;border:none;color:var(--muted);cursor:pointer;
   font-size:11px;line-height:1;padding:0 2px}
 .pl-chip-x:hover{color:var(--accent)}
+/* Выбор городов/стран в фильтре остановки */
+.pl-citypicker{display:flex;flex-direction:column;gap:8px}
+.pl-cp-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pl-cp-head .segbtns{flex:0 0 auto}
+.pl-cp-head .segbtns button{min-width:0;padding:5px 10px;font-size:12px}
+.pl-cp-summary{font-size:12px;color:var(--muted)}
+.pl-cp-reset{background:transparent;border:none;color:var(--accent2);cursor:pointer;font-size:12px;padding:0}
+.pl-cp-reset:hover{text-decoration:underline}
+.pl-chip.excluded{text-decoration:line-through;text-decoration-color:var(--muted);opacity:.85}
+.pl-citypicker .combobox input{padding:8px 9px;font-size:13px}
+.combo-list li .ac-country{color:var(--muted);font-size:12px}
+.combo-list li.active .ac-country{color:#fff}
 /* Дата-пикер занимает всю ширину ячейки; у концов — заметка о выводе дат */
 .pl-window .drp,.pl-window .drp-trigger{width:100%}
 /* Дата-пикер в карточке фильтра города — на всю ширину */
