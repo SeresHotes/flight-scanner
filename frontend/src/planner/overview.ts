@@ -199,7 +199,7 @@ function indexLeg(edges: Edge[], f: PlannerFilters, i: number): LegIndex {
   const idx: LegIndex = new Map()
   for (const e of edges) {
     if (tf && tf.maxTransfers >= 0 && e.transfers > tf.maxTransfers) continue
-    if (tf && e.duration > tf.maxTravelMinutes) continue
+    if (tf && (e.duration < tf.minTravelMinutes || e.duration > tf.maxTravelMinutes)) continue
     let byTo = idx.get(e.from)
     if (!byTo) idx.set(e.from, (byTo = new Map()))
     const list = byTo.get(e.to)

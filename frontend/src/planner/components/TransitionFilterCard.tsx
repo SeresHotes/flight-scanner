@@ -42,14 +42,18 @@ export function TransitionFilterCard({
 
       <div className="pl-fcell">
         <div className="pl-flabel">
-          Перелёт: до <span className="rangeval">{durFmt(filter.maxTravelMinutes)}</span>
+          Перелёт:{' '}
+          <span className="rangeval">
+            {filter.minTravelMinutes ? `${durFmt(filter.minTravelMinutes)} – ` : 'до '}
+            {durFmt(filter.maxTravelMinutes)}
+          </span>
         </div>
         <RangeSlider
-          min={60}
+          min={0}
           max={maxBound}
           step={30}
-          value={filter.maxTravelMinutes}
-          onChange={(maxTravelMinutes) => onChange({ maxTravelMinutes })}
+          value={[filter.minTravelMinutes, filter.maxTravelMinutes]}
+          onChange={([minTravelMinutes, maxTravelMinutes]) => onChange({ minTravelMinutes, maxTravelMinutes })}
         />
       </div>
     </div>

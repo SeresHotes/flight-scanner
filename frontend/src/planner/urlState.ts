@@ -69,13 +69,18 @@ function decodeCity(raw: string): CityFilter | null {
 }
 
 function encodeTransition(t: TransitionFilter): string {
-  return [t.maxTransfers, t.maxTravelMinutes].join(F)
+  return [t.maxTransfers, t.maxTravelMinutes, t.minTravelMinutes].join(F)
 }
 
 function decodeTransition(raw: string): TransitionFilter | null {
   const parts = raw.split(F)
   if (parts.length < 2) return null
-  return { maxTransfers: Number(parts[0]), maxTravelMinutes: Number(parts[1]) }
+  // Нижняя граница появилась позже: в старых ссылках её нет — без ограничения.
+  return {
+    maxTransfers: Number(parts[0]),
+    minTravelMinutes: Number(parts[2] ?? 0) || 0,
+    maxTravelMinutes: Number(parts[1]),
+  }
 }
 
 // --- Сборка / разбор query ---

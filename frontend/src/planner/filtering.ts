@@ -32,7 +32,8 @@ export function itineraryMatches(set: ItinerarySet, n: number, f: PlannerFilters
     if (!tf) continue
     const seg = set.segment(n, k)
     if (tf.maxTransfers >= 0 && seg.transfers > tf.maxTransfers) return false
-    if ((seg.duration || 0) > tf.maxTravelMinutes) return false
+    const d = seg.duration || 0
+    if (d < tf.minTravelMinutes || d > tf.maxTravelMinutes) return false
   }
   // Общая длина поездки.
   const total = set.totalDaysOf(n)
@@ -116,6 +117,7 @@ export function defaultFilters(
     })),
     transitions: Array.from({ length: transitionCount }, () => ({
       maxTransfers: -1,
+      minTravelMinutes: 0,
       maxTravelMinutes: b.maxTravel,
     })),
     tripLength: [b.tripMin, b.tripMax],
@@ -151,12 +153,13 @@ export function carryFilters(prev: PlannerFilters, prevDefaults: PlannerFilters,
     }),
     transitions: next.transitions.map((n, k) => {
       const p = prev.transitions[k]
-      const [, maxTravelMinutes] = carryRange(
-        [0, p.maxTravelMinutes],
-        [0, prevDefaults.transitions[k].maxTravelMinutes],
-        [0, n.maxTravelMinutes],
+      const pd = prevDefaults.transitions[k]
+      const [minTravelMinutes, maxTravelMinutes] = carryRange(
+        [p.minTravelMinutes, p.maxTravelMinutes],
+        [pd.minTravelMinutes, pd.maxTravelMinutes],
+        [n.minTravelMinutes, n.maxTravelMinutes],
       )
-      return { ...p, maxTravelMinutes }
+      return { ...p, minTravelMinutes, maxTravelMinutes }
     }),
     tripLength: carryRange(prev.tripLength, prevDefaults.tripLength, next.tripLength),
   }
