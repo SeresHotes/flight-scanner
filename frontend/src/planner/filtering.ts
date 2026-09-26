@@ -7,12 +7,20 @@ import type { ItinerarySet } from './compact'
 import { coversWindow } from './dates'
 import { graphBounds } from './overview'
 
+// Первая и последняя остановки — концы маршрута: сколько мы там до вылета / после
+// прилёта, к поездке не относится. Фильтры пребывания (дни, окно, выходные) у них
+// не действуют — только выбор городов.
+export function isEndpoint(k: number, stopCount: number): boolean {
+  return k === 0 || k === stopCount - 1
+}
+
 export function itineraryMatches(set: ItinerarySet, n: number, f: PlannerFilters): boolean {
-  // Города: длительность, обязательное окно, выходные.
+  // Города: выбор городов; у промежуточных — длительность, обязательное окно, выходные.
   for (let k = 0; k < set.stopCount; k++) {
     const cf = f.cities[k]
     if (!cf) continue
     if (cf.allowedCodes && !cf.allowedCodes.includes(set.stopCode(n, k))) return false
+    if (isEndpoint(k, set.stopCount)) continue
     const days = set.stopDays(n, k)
     if (days < cf.minStay || days > cf.maxStay) return false
     if (cf.mustCover && !coversWindow(set.arrive(n, k), set.depart(n, k), cf.mustCover)) return false
@@ -48,7 +56,7 @@ interface SetBounds {
   maxTravel: number // максимум суммарной длительности перелёта сегмента
   tripMin: number
   tripMax: number
-  stayMin: number // мин дней в городе по всем остановкам
+  stayMin: number // мин дней в городе по промежуточным остановкам
   stayMax: number // макс дней в городе (не ниже 30 — чтобы слайдер имел запас)
 }
 
@@ -68,7 +76,7 @@ function setBounds(set: ItinerarySet, graph: PlanGraph | null = null): SetBounds
     const total = set.totalDaysOf(n)
     if (total < tripMin) tripMin = total
     if (total > tripMax) tripMax = total
-    for (let k = 0; k < set.stopCount; k++) {
+    for (let k = 1; k < set.stopCount - 1; k++) {
       const days = set.stopDays(n, k)
       if (days < stayMin) stayMin = days
       if (days > stayMax) stayMax = days
@@ -84,8 +92,8 @@ function setBounds(set: ItinerarySet, graph: PlanGraph | null = null): SetBounds
   } else if (!set.count) {
     tripMin = 1
     tripMax = 60
-    stayMin = 1
   }
+  if (stayMin === Infinity) stayMin = 0 // промежуточных остановок нет (или цепочек)
   return { maxTravel, tripMin, tripMax, stayMin, stayMax }
 }
 
