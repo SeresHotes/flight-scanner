@@ -92,6 +92,21 @@ def test_compact_matches_itineraries():
     assert res["cities"]["MOW"] == ["City MOW", "🏳"]
 
 
+def test_trip_length_is_first_departure_to_last_arrival():
+    """Длина поездки не зависит от «пребывания» на концах: ни от начала окна до
+    первого вылета, ни от условного пребывания в финальном городе."""
+    stops = [
+        Stop("cities", ["MOW"], ["", ""]),
+        Stop("cities", ["IST"], ["2026-11-01", "2026-11-20"]),
+        Stop("cities", ["MOW"], ["", ""]),
+    ]
+    collected = {0: [_flight("MOW", "IST", 5, 10, 100)], 1: [_flight("IST", "MOW", 9, 22, 100)]}
+    (it,) = build_itineraries(stops, collected, city_info=CITY_INFO)
+    assert it["total_days"] == 5  # 05.11 вылет → 10.11 прилёт (22:00 + 4 ч)
+    res = build_itineraries_compact(stops, collected, max_results=10, city_info=CITY_INFO)
+    assert list(res["total_days"]) == [5]
+
+
 def test_compact_reuses_segments_across_chains():
     stops, collected = _random_case(1)
     res = build_itineraries_compact(stops, collected, max_results=200, city_info=CITY_INFO)

@@ -10,23 +10,22 @@ export interface CityOption {
 }
 
 // Фильтры одного города: список городов, мин/макс дней, обязательное окно, оба выходных.
+// У концов маршрута (endpoint) — только список городов: пребывание там не учитывается.
 export function CityFilterCard({
   title,
   filter,
   cityOptions,
   stayBounds,
+  endpoint,
   onChange,
 }: {
   title: string
   filter: CityFilter
   cityOptions: CityOption[]
   stayBounds: [number, number] // [min, max] дней в городе — границы слайдеров из данных
+  endpoint: boolean
   onChange: (patch: Partial<CityFilter>) => void
 }) {
-  const [stayMin, stayMax] = stayBounds
-  const coverOn = filter.mustCover !== null
-  const cover = filter.mustCover ?? ['', '']
-
   // Город включён, если фильтр не задан (null == любой) либо код в списке.
   const isOn = (code: string) => filter.allowedCodes === null || filter.allowedCodes.includes(code)
 
@@ -60,6 +59,33 @@ export function CityFilterCard({
         </div>
       )}
 
+      {endpoint ? (
+        <div className="fsub">
+          <span>Конец маршрута — дни здесь не учитываются</span>
+        </div>
+      ) : (
+        <StayFilters filter={filter} stayBounds={stayBounds} onChange={onChange} />
+      )}
+    </div>
+  )
+}
+
+// Пребывание в промежуточном городе: мин/макс дней, обязательное окно, оба выходных.
+function StayFilters({
+  filter,
+  stayBounds,
+  onChange,
+}: {
+  filter: CityFilter
+  stayBounds: [number, number]
+  onChange: (patch: Partial<CityFilter>) => void
+}) {
+  const [stayMin, stayMax] = stayBounds
+  const coverOn = filter.mustCover !== null
+  const cover = filter.mustCover ?? ['', '']
+
+  return (
+    <>
       <div className="fsub">
         <span>
           Дней в городе: <span className="rangeval">{filter.minStay}–{filter.maxStay} {dayW(filter.maxStay)}</span>
@@ -111,6 +137,6 @@ export function CityFilterCard({
         />
         Должны быть оба выходных (сб + вс)
       </label>
-    </div>
+    </>
   )
 }

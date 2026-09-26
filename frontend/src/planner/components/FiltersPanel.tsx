@@ -3,7 +3,7 @@ import { plural } from '../../lib/format'
 import type { CityFilter, PlanGraph, PlannerFilters, PlannerStop, TransitionFilter } from '../types'
 import type { ItinerarySet } from '../compact'
 import { pointLabel } from '../validation'
-import { applyFilters, computeBounds } from '../filtering'
+import { applyFilters, computeBounds, isEndpoint } from '../filtering'
 import { CityFilterCard, type CityOption } from './CityFilterCard'
 import { TransitionFilterCard } from './TransitionFilterCard'
 import { TripLengthFilter } from './TripLengthFilter'
@@ -100,6 +100,7 @@ export function FiltersPanel({
               filter={filters.cities[i]}
               cityOptions={cityOptionsByStop[i]}
               stayBounds={bounds.stayDays}
+              endpoint={isEndpoint(i, stops.length)}
               onChange={(patch) => patchCity(i, patch)}
             />
             {i < stops.length - 1 && (
