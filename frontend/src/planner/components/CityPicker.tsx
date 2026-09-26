@@ -3,8 +3,6 @@ import { plural } from '../../lib/format'
 import { countryName, countrySearchText, flagToIso2, normalizeSearch } from '../countries'
 import type { CityOption } from './CityFilterCard'
 
-type Mode = 'include' | 'exclude'
-
 interface Country {
   iso2: string
   name: string
@@ -28,17 +26,10 @@ function groupCountries(options: CityOption[]): Map<string, Country> {
   return byIso
 }
 
-// Стартовый режим по сохранённому фильтру: длинный список разрешённых короче
-// показать как «все, кроме …».
-function initialMode(allowed: string[] | null, total: number): Mode {
-  if (allowed === null || total <= 2) return 'include'
-  return allowed.length * 2 > total ? 'exclude' : 'include'
-}
-
 // Выбор городов остановки в фильтрах: чипсы выбранного + поиск (как в скелете
 // маршрута). Над списком городов — ряд стран (флаг + название): страна добавляет
-// все свои города разом, и пока выбраны все её города, она показана одним чипом. Режим «Кроме» —
-// исключить выбранное. В модели остаётся список разрешённых кодов (allowedCodes).
+// все свои города разом, и пока выбраны все её города, она показана одним чипом.
+// Ничего не выбрано — подходит любой город. В модели — список разрешённых кодов (allowedCodes).
 export function CityPicker({
   options,
   allowed,
@@ -48,7 +39,6 @@ export function CityPicker({
   allowed: string[] | null
   onChange: (allowed: string[] | null) => void
 }) {
-  const [mode, setMode] = useState<Mode>(() => initialMode(allowed, options.length))
   const [text, setText] = useState('')
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
@@ -61,37 +51,18 @@ export function CityPicker({
     [options, countries],
   )
 
-  // Снаружи выставили короткий список (например, «Показать маршруты» у набора) —
-  // показываем его как «только эти».
-  useEffect(() => {
-    if (allowed !== null && allowed.length * 2 <= options.length) setMode('include')
-  }, [allowed, options.length])
-
-  // Выбранное в текущем режиме: разрешённые либо исключённые города.
-  const selected = useMemo<string[]>(() => {
-    if (allowed === null) return []
-    if (mode === 'include') return allowed
-    return options.filter((o) => !allowed.includes(o.code)).map((o) => o.code)
-  }, [allowed, mode, options])
+  const selected = useMemo<string[]>(() => allowed ?? [], [allowed])
   const selectedSet = useMemo(() => new Set(selected), [selected])
 
-  const commit = (next: string[], m: Mode = mode) => {
-    if (next.length === 0) return onChange(null)
+  // Пусто или выбраны все — снова «любой» (null).
+  const commit = (next: string[]) => {
     const nextSet = new Set(next)
-    if (m === 'include') {
-      const all = options.every((o) => nextSet.has(o.code))
-      return onChange(all ? null : next)
-    }
-    onChange(options.filter((o) => !nextSet.has(o.code)).map((o) => o.code))
+    const all = options.every((o) => nextSet.has(o.code))
+    onChange(next.length === 0 || all ? null : next)
   }
 
   const add = (codes: string[]) => commit([...selected, ...codes.filter((c) => !selectedSet.has(c))])
   const remove = (codes: string[]) => commit(selected.filter((c) => !codes.includes(c)))
-  const switchMode = (m: Mode) => {
-    if (m === mode) return
-    setMode(m)
-    onChange(null)
-  }
 
   // Чипсы: страна целиком (если выбраны все её города и их больше одного), иначе города.
   const chips = useMemo(() => {
@@ -182,14 +153,6 @@ export function CityPicker({
   return (
     <div className="pl-citypicker">
       <div className="pl-cp-head">
-        <div className="segbtns">
-          <button type="button" className={mode === 'include' ? 'active' : ''} onClick={() => switchMode('include')}>
-            Только
-          </button>
-          <button type="button" className={mode === 'exclude' ? 'active' : ''} onClick={() => switchMode('exclude')}>
-            Кроме
-          </button>
-        </div>
         <span className="pl-cp-summary">{summary}</span>
         {allowed !== null && (
           <button type="button" className="pl-cp-reset" onClick={() => onChange(null)}>
@@ -201,7 +164,7 @@ export function CityPicker({
       {chips.length > 0 && (
         <div className="pl-chips">
           {chips.map((c) => (
-            <span className={`pl-chip ${mode === 'exclude' ? 'excluded' : ''}`} key={c.key} title={c.title}>
+            <span className="pl-chip" key={c.key} title={c.title}>
               {c.label} {c.hint && <span className="pl-chip-code">{c.hint}</span>}
               <button type="button" className="pl-chip-x" title="Убрать" onClick={() => remove(c.codes)}>
                 ✕
@@ -215,7 +178,7 @@ export function CityPicker({
         <input
           type="text"
           value={text}
-          placeholder={mode === 'include' ? 'Добавить город или страну' : 'Исключить город или страну'}
+          placeholder="Добавить город или страну"
           onChange={(e) => {
             setText(e.target.value)
             setOpen(true)
