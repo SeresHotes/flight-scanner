@@ -77,6 +77,16 @@ def arrival_of(flight: dict) -> str:
     return flight.get("departure_at")
 
 
+def layover_minutes(flight: dict, transfers: int):
+    """Суммарное время на земле на пересадках, мин. Data API отдаёт duration (весь
+    путь) и duration_to (только в воздухе) — разница и есть ожидание; по отдельным
+    пересадкам источник не разбивает. None — прямой рейс или данных нет."""
+    total, air = flight.get("duration"), flight.get("duration_to")
+    if not transfers or not total or not air or total <= air:
+        return None
+    return total - air
+
+
 def date_only(iso_dt: str) -> str:
     return agg.parse_datetime(iso_dt).strftime("%Y-%m-%d")
 
@@ -127,6 +137,7 @@ class Builder:
             "transfers": transfers,
             "direct": transfers == 0,
             "transfer_points": self._transfer_points(flight.get("link"), transfers),
+            "layover_minutes": layover_minutes(flight, transfers),
             "airline": flight.get("airline"),
             "flight_number": flight.get("flight_number"),
             "price": flight.get("price") or flight.get("value", 0),
