@@ -47,15 +47,3 @@ def test_graph_edges_and_meta():
 def test_empty_collection():
     g = overview_graph(STOPS, {}, city_info=CITY_INFO)
     assert g["legs"] == [[], []]
-
-
-def test_edge_carries_layover():
-    collected = {0: [
-        _flight("SEL", "IST", "2026-11-02T10:00:00", 100, origin_airport="ICN"),
-        _flight("SEL", "DXB", "2026-11-02T11:00:00", 150, origin_airport="ICN",
-                transfers=1, duration=400, duration_to=300),
-    ]}
-    g = overview_graph(STOPS, collected, city_info=CITY_INFO)
-    by_to = {e["to"]: e for e in g["legs"][0]}
-    assert by_to["IST"]["layover"] is None  # прямой рейс
-    assert by_to["DXB"]["layover"] == 100   # duration − duration_to

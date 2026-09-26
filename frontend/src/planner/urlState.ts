@@ -69,18 +69,13 @@ function decodeCity(raw: string): CityFilter | null {
 }
 
 function encodeTransition(t: TransitionFilter): string {
-  return [t.maxTransfers, t.maxTravelMinutes, t.minLayoverMinutes].join(F)
+  return [t.maxTransfers, t.maxTravelMinutes].join(F)
 }
 
 function decodeTransition(raw: string): TransitionFilter | null {
   const parts = raw.split(F)
   if (parts.length < 2) return null
-  // Третье поле появилось позже: в старых ссылках его нет — без ограничения.
-  return {
-    maxTransfers: Number(parts[0]),
-    maxTravelMinutes: Number(parts[1]),
-    minLayoverMinutes: Number(parts[2] ?? 0) || 0,
-  }
+  return { maxTransfers: Number(parts[0]), maxTravelMinutes: Number(parts[1]) }
 }
 
 // --- Сборка / разбор query ---

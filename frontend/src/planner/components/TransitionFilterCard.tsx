@@ -9,11 +9,7 @@ const TRANSFER_OPTS: { v: number; l: string }[] = [
   { v: 0, l: 'Только прямые' },
 ]
 
-// Верх слайдера минимальной пересадки: дольше требовать смысла мало.
-const MAX_MIN_LAYOVER = 360
-
-// Фильтры перехода между городами одной строкой: пересадки, длительность перелёта
-// и минимальная длительность пересадки (0 — любая).
+// Фильтры перехода между городами одной строкой: пересадки и длительность перелёта.
 export function TransitionFilterCard({
   title,
   filter,
@@ -54,22 +50,6 @@ export function TransitionFilterCard({
           step={30}
           value={filter.maxTravelMinutes}
           onChange={(maxTravelMinutes) => onChange({ maxTravelMinutes })}
-        />
-      </div>
-
-      <div className="pl-fcell">
-        <div className="pl-flabel">
-          Пересадка:{' '}
-          <span className="rangeval">
-            {filter.minLayoverMinutes ? `от ${durFmt(filter.minLayoverMinutes)}` : 'любая'}
-          </span>
-        </div>
-        <RangeSlider
-          min={0}
-          max={MAX_MIN_LAYOVER}
-          step={15}
-          value={filter.minLayoverMinutes || 0}
-          onChange={(minLayoverMinutes) => onChange({ minLayoverMinutes })}
         />
       </div>
     </div>

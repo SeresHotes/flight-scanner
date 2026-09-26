@@ -27,8 +27,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from core import aggregate as agg
 from core.collector import collect_leg_data, get_date_range
-from core.trip_builder import (Builder, arrival_of, date_only, layover_minutes, make_city_lookup,
-                                stay_between)
+from core.trip_builder import Builder, arrival_of, date_only, make_city_lookup, stay_between
 
 SECONDS_PER_REQUEST = 0.65  # совпадает с planner/estimate.ts
 MAX_REQUESTS = 200          # предохранитель от слишком широких окон
@@ -697,8 +696,7 @@ def overview_graph(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
     from — город вылета (для первого перехода — только рейсы из стартовых кодов),
     to — город прилёта; dep/arr — наивное время.
 
-    legs[i] — рёбра перехода i: {from, to, dep, arr, price, transfers, duration, layover};
-    layover — суммарно на земле на пересадках (None — прямой рейс или неизвестно)."""
+    legs[i] — рёбра перехода i: {from, to, dep, arr, price, transfers, duration}."""
     if city_info is None:
         city_info = make_city_lookup(agg.load_airport_network())
     starts = set(stops[0].codes) if stops[0].kind == "cities" else set()
@@ -715,11 +713,10 @@ def overview_graph(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
             dep = f.get("departure_at")
             if not origin or not dest or not dep:
                 continue
-            transfers = int(f.get("transfers") or 0)
             edge = {
                 "from": origin, "to": dest, "dep": _naive(dep), "arr": _naive(arrival_of(f)),
-                "price": _price_of(f) or 0, "transfers": transfers,
-                "duration": f.get("duration") or 0, "layover": layover_minutes(f, transfers),
+                "price": _price_of(f) or 0, "transfers": int(f.get("transfers") or 0),
+                "duration": f.get("duration") or 0,
             }
             key = tuple(edge.values())
             if key in seen:  # один и тот же рейс из пересекающихся под-запросов
