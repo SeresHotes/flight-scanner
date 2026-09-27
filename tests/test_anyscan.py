@@ -67,3 +67,34 @@ def test_should_stop_between_cities():
     stops = iter([False, True])
     anyscan.scan_any(state, fetch_fn=_fake_fetch([]), should_stop=lambda: next(stops))
     assert state.done == ["MOW"]
+
+
+def _flaky_fetch(fail_for, all_fail=False):
+    """Для городов из fail_for один запрос (или все при all_fail) отдаёт error=True."""
+    failed = set()
+
+    def fetch(origin=None, destination=None, departure_at=None, allow_indirect=False, **_):
+        if origin in fail_for and (all_fail or origin not in failed):
+            failed.add(origin)
+            return {"data": [], "error": True}
+        return {"data": [_flight(origin, d, departure_at, 100, number=i)
+                         for i, d in enumerate(NEIGHBOURS[origin])]}
+    return fetch
+
+
+def test_city_with_failed_request_is_requeued_once():
+    state = anyscan.ScanState.initial(["2026-10-05"], "MOW")
+    saved = []
+    anyscan.scan_any(state, fetch_fn=_flaky_fetch({"IST"}),
+                     on_city_done=lambda c, f: saved.append(c))
+    # IST сбоил в первый раз → в конец очереди, собран повторно; done без дублей
+    assert saved == ["MOW", "IST", "EVN", "IST", "BKK"]
+    assert state.done == ["MOW", "EVN", "IST", "BKK"] and state.retried == ["IST"]
+
+
+def test_all_requests_failed_stops_scan_and_keeps_city():
+    state = anyscan.ScanState.initial(["2026-10-05"], "MOW")
+    anyscan.scan_any(state, fetch_fn=_flaky_fetch({"MOW"}, all_fail=True))
+    assert state.done == [] and state.queue == ["MOW"]
+    restored = anyscan.ScanState.from_dict(state.as_dict())
+    assert restored.queue == ["MOW"] and restored.retried == []
