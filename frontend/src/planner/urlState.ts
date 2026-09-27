@@ -52,13 +52,11 @@ function decodeCity(raw: string): CityFilter | null {
   if (parts.length < 5) return null
   const [minStay, maxStay, coverA, coverB, weekend, allowedRaw] = parts
   const mustCover: [string, string] | null = coverA && coverB ? [coverA, coverB] : null
-  // Отсутствие поля / '*' → null (любые города); '' → пустой список; иначе коды через '-'.
-  const allowedCodes =
-    allowedRaw === undefined || allowedRaw === ANY_CITIES
-      ? null
-      : allowedRaw === ''
-        ? []
-        : allowedRaw.split(L)
+  // Отсутствие поля / '*' / '' → null (любые города); иначе коды через '-'.
+  // Пустой список в UI означает «ничего не выбрано = любой»; буквальный [] отсекал бы
+  // все цепочки (такие ссылки оставлял старый фильтр-чекбоксы).
+  const codes = allowedRaw ? allowedRaw.split(L).filter(Boolean) : []
+  const allowedCodes = allowedRaw === ANY_CITIES || codes.length === 0 ? null : codes
   return {
     minStay: Number(minStay),
     maxStay: Number(maxStay),
