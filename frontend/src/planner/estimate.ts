@@ -53,5 +53,5 @@ export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
     legs.push({ fromLabel: stopLabel(from), toLabel: stopLabel(to), days, requests: reqs, anyLeg })
     requests += reqs
   }
-  return { requests, seconds: Math.round(requests * SECONDS_PER_REQUEST), legs }
+  return { requests, cold: requests, seconds: Math.round(requests * SECONDS_PER_REQUEST), legs }
 }

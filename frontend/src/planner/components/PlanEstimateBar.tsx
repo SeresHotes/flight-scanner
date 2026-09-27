@@ -21,7 +21,7 @@ export function PlanEstimateBar({
   label?: string
   onLoad: () => void
 }) {
-  const reqWord = plural(estimate.requests, 'запрос', 'запроса', 'запросов')
+  const reqWord = plural(estimate.requests, 'страницу', 'страницы', 'страниц')
 
   return (
     <div className="pl-estimate">
@@ -31,19 +31,26 @@ export function PlanEstimateBar({
         <div className="pl-est-info">
           <div className="pl-est-num">
             Потребуется загрузить <b>{estimate.requests}</b> {reqWord}
-            <span className="pl-est-sec"> · {fmtSeconds(estimate.seconds)}</span>
+            {estimate.cached !== undefined && estimate.cached > 0 && (
+              <span className="pl-est-sec"> · в кэше уже {estimate.cached}</span>
+            )}
+            <span className="pl-est-sec">
+              {' '}
+              · {estimate.cold === 0 ? 'всё из кэша, секунды' : fmtSeconds(estimate.seconds)}
+            </span>
           </div>
           <div className="pl-est-legs">
             {estimate.legs.map((leg, i) => (
               <span className="mchip" key={i}>
                 {leg.fromLabel} → {leg.toLabel}: <b>{leg.requests}</b>
+                {leg.cached ? <span className="pl-anytag"> (в кэше {leg.cached})</span> : null}
                 <span className="pl-anytag"> · {leg.days} дн.</span>
               </span>
             ))}
           </div>
           <div className="pl-est-hint">
-            Запрос = страница по 400 билетов. Оценка — по потолку страниц; повторные и
-            недавние запросы берутся из кэша и идут быстрее. Потолок цены сужает загрузку «любых» городов.
+            Страница = до 400 билетов. Оценка — по потолку страниц на серию; серии, загруженные
+            за последние сутки, берутся из кэша. Бюджет поездки сужает загрузку «любых» городов.
           </div>
         </div>
       )}

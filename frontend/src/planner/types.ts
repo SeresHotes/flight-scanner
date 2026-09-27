@@ -22,12 +22,15 @@ export interface EstimateLeg {
   toLabel: string
   days: number
   requests: number
+  cached?: number // страниц уже в кэше серий (знает только бэк)
   anyLeg: boolean
 }
 
 export interface PlannerEstimate {
-  requests: number
-  seconds: number
+  requests: number // всего страниц по потолку серий
+  cached?: number // из них в кэше (POST /api/plan/estimate)
+  cold?: number // пойдут в источник
+  seconds: number // по холодным
   legs: EstimateLeg[]
 }
 

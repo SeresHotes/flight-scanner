@@ -120,11 +120,6 @@ def _stops_payload(req: "PlanRequest") -> List[Dict[str, Any]]:
     return [{"kind": s.kind, "codes": s.codes, "window": s.window} for s in req.stops]
 
 
-@app.post("/api/plan/estimate")
-def plan_estimate(req: PlanRequest) -> Dict[str, Any]:
-    """Оценка объёма сбора цепочки (запросы/время + разбивка по переходам)."""
-    stops = planner.parse_stops(_stops_payload(req))
-    return planner.estimate_plan(stops)
 
 
 # Разобранные компактные результаты последних джоб — для страниц /routes (JSON на
@@ -147,6 +142,38 @@ class PlanQueryRequest(BaseModel):
     maxResults: Optional[int] = None
 
 
+def _cache_probe():
+    """is_cached для planner.estimate_plan: серия уже лежит в ticket_cache (TTL воркера)."""
+    conn = _conn
+
+    def is_cached(origin, dest, day, key, pages) -> bool:
+        return hot.ticket_cache_has(conn, origin, dest, day, key, worker.FETCH_CACHE_TTL_SECONDS,
+                                    min_pages=pages)
+    return is_cached
+
+
+def _estimate(query: PlanQuery) -> Dict[str, Any]:
+    stops = planner.parse_stops(query.stops)
+    return planner.estimate_plan(stops, max_cost=query.max_cost, is_cached=_cache_probe())
+
+
+def _query_from_request(req: "PlanQueryRequest") -> PlanQuery:
+    return PlanQuery.from_dict({"stops": [{"kind": s.kind, "codes": s.codes, "window": s.window}
+                                          for s in req.stops],
+                                "cities": req.cities, "legs": req.legs, "tripLength": req.tripLength,
+                                "maxCost": req.maxCost, "maxResults": req.maxResults})
+
+
+@app.post("/api/plan/estimate")
+def plan_estimate(req: PlanQueryRequest) -> Dict[str, Any]:
+    """Оценка объёма сбора по запросу: всего страниц, сколько уже в кэше серий,
+    сколько холодных (пойдут в источник) и время по холодным."""
+    try:
+        return _estimate(_query_from_request(req))
+    except ValueError as e:
+        return {"status": "invalid", "message": f"Некорректный фильтр: {e}"}
+
+
 def _start_plan_job(query: PlanQuery) -> Dict[str, Any]:
     """Общий запуск сбора: проверки, дедуп по хэшу запроса, постановка в очередь."""
     stops = planner.parse_stops(query.stops)
@@ -160,12 +187,16 @@ def _start_plan_job(query: PlanQuery) -> Dict[str, Any]:
         return {"status": "invalid",
                 "message": "Не задан лимит числа маршрутов. Обновите страницу (Ctrl/Cmd+Shift+R) — клиент устарел."}
 
-    est = planner.estimate_plan(stops)
+    est = _estimate(query)
     if est["requests"] == 0:
         return {"status": "invalid", "message": "Задайте окна дат для остановок."}
-    if est["requests"] > planner.MAX_REQUESTS:
+    # Предохранитель — только по холодным страницам: то, что уже в кэше серий,
+    # источник не нагружает, а повтор широкого запроса иначе отказывал бы зря.
+    if est["cold"] > planner.MAX_REQUESTS:
         return {"status": "too_wide",
-                "message": f"Слишком широкие окна (~{est['requests']} запросов). Сузьте диапазоны.",
+                "message": f"Слишком широкие окна: ~{est['cold']} страниц надо загрузить из источника "
+                           f"(лимит {planner.MAX_REQUESTS}, в кэше уже {est['cached']}). "
+                           "Сузьте диапазоны дат или задайте бюджет поездки.",
                 "estimate": est}
 
     key = query.key()
@@ -200,11 +231,7 @@ def plan_run(req: PlanQueryRequest) -> Dict[str, Any]:
     пределах суток переиспользует готовую/идущую джобу (reused=true). mode —
     какой экран открывать: combos (наборы городов) или routes."""
     try:
-        query = PlanQuery.from_dict({"stops": [{"kind": s.kind, "codes": s.codes, "window": s.window}
-                                               for s in req.stops],
-                                     "cities": req.cities, "legs": req.legs,
-                                     "tripLength": req.tripLength,
-                                     "maxCost": req.maxCost, "maxResults": req.maxResults})
+        query = _query_from_request(req)
     except ValueError as e:
         return {"status": "invalid", "message": f"Некорректный фильтр: {e}"}
     return _start_plan_job(query)

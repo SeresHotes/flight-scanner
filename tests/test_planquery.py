@@ -179,3 +179,27 @@ def test_gather_still_works_with_open_filters(tmp_path, monkeypatch):
     res = main.plan_gather(main.PlanRequest(stops=[main.PlanStop(**s) for s in JOB_STOPS], max_results=10))
     assert res["status"] == "collecting"
     assert hot.get_job(conn, res["job_id"])["status"] == "done"
+
+
+def test_estimate_counts_cached_series_and_guard_uses_cold(tmp_path, monkeypatch):
+    """Оценка: серии, уже лежащие в ticket_cache, — «в кэше», предохранитель — по холодным."""
+    conn = _setup(tmp_path, monkeypatch)
+    stops = [{"kind": "cities", "codes": ["MOW"], "window": ["", ""]},
+             {"kind": "any", "codes": [], "window": ["2026-11-01", "2026-11-02"]},
+             {"kind": "cities", "codes": ["SEL"], "window": ["", ""]}]
+    req = main.PlanQueryRequest(stops=[main.PlanStop(**s) for s in stops], maxResults=10, maxCost=50000)
+    est = main.plan_estimate(req)
+    assert est["requests"] == 2 * planner.PAGES_ANY * 2 and est["cached"] == 0 and est["cold"] == est["requests"]
+
+    # Кладём в кэш серию MOW→ANY на 1.11 с тем же коридором — она перестаёт быть холодной.
+    hot.ticket_cache_put(conn, "MOW", None, "2026-11-01", "max=50000",
+                         {"tickets": [], "pages": 3, "exhausted": True})
+    est = main.plan_estimate(req)
+    assert est["cached"] == planner.PAGES_ANY and est["cold"] == est["requests"] - planner.PAGES_ANY
+    assert est["legs"][0]["cached"] == planner.PAGES_ANY and est["legs"][1]["cached"] == 0
+    assert est["seconds"] == round(est["cold"] * planner.SECONDS_PER_REQUEST)
+
+    monkeypatch.setattr(planner, "MAX_REQUESTS", est["cold"] - 1)
+    assert main.plan_run(req)["status"] == "too_wide"
+    monkeypatch.setattr(planner, "MAX_REQUESTS", est["cold"])
+    assert main.plan_run(req)["status"] in ("collecting", "done")
