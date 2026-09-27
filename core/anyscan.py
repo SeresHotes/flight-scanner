@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
-from core.collector import collect_leg_data
+from core.collector import collect_leg_data, fetch_flights
 from core.planner import FETCH_MODES, _flight_key
 
 DEFAULT_START_CITY = "MOW"
@@ -55,20 +55,23 @@ def requests_per_city(dates: List[str]) -> int:
 @dataclass
 class ScanState:
     """Состояние BFS: done — уже собранные города (в порядке обхода), queue — ещё
-    не собранные (в порядке постановки), requests — сколько запросов сделано."""
+    не собранные (в порядке постановки), requests — сколько запросов сделано,
+    retried — города, уже возвращённые в очередь после сбойных запросов."""
     dates: List[str]
     queue: List[str] = field(default_factory=list)
     done: List[str] = field(default_factory=list)
     requests: int = 0
+    retried: List[str] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
         return {"dates": self.dates, "queue": self.queue, "done": self.done,
-                "requests": self.requests}
+                "requests": self.requests, "retried": self.retried}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ScanState":
         return cls(dates=list(d["dates"]), queue=list(d.get("queue") or []),
-                   done=list(d.get("done") or []), requests=int(d.get("requests") or 0))
+                   done=list(d.get("done") or []), requests=int(d.get("requests") or 0),
+                   retried=list(d.get("retried") or []))
 
     @classmethod
     def initial(cls, dates: List[str], start_city: str = DEFAULT_START_CITY) -> "ScanState":
@@ -78,22 +81,43 @@ class ScanState:
         return city in self.done or city in self.queue
 
 
+@dataclass
+class CityResult:
+    flights: List[Dict[str, Any]]
+    errors: int  # сбойных запросов (сеть/API); их ответы не кэшируются
+
+
+def _counting_fetch(fetch_fn, counter: Dict[str, int]):
+    """Считает сбойные ответы (error=True от collector.fetch_flights): collect_leg_data
+    их глотает как «рейсов не найдено», а нам важно отличить пустой день от сети."""
+    base = fetch_fn or fetch_flights
+
+    def fetch(*args, **kwargs):
+        result = base(*args, **kwargs)
+        if result.get("error"):
+            counter["errors"] += 1
+        return result
+    return fetch
+
+
 def collect_city_any(city: str, dates: List[str], fetch_fn=None,
-                     progress_cb: Callable[[], None] = None) -> List[Dict[str, Any]]:
+                     progress_cb: Callable[[], None] = None) -> CityResult:
     """X → ANY за все даты в обоих режимах, без дублей (см. planner._flight_key)."""
     flights: List[Dict[str, Any]] = []
     seen = set()
+    counter = {"errors": 0}
+    fetch = _counting_fetch(fetch_fn, counter)
     for allow_indirect in FETCH_MODES:
         batch = collect_leg_data(city, None, dates, leg_name=f"any:{city}",
                                  allow_indirect=allow_indirect,
-                                 progress_cb=progress_cb, fetch_fn=fetch_fn)
+                                 progress_cb=progress_cb, fetch_fn=fetch)
         for f in batch:
             key = _flight_key(f)
             if key in seen:
                 continue
             seen.add(key)
             flights.append(f)
-    return flights
+    return CityResult(flights=flights, errors=counter["errors"])
 
 
 def neighbours(flights: List[Dict[str, Any]]) -> List[str]:
@@ -121,7 +145,12 @@ def scan_any(state: ScanState, fetch_fn=None,
 
     on_city_done(city, flights) — вызывается после каждого города (сохранение
     котировок); состояние обновляется до вызова, чтобы прерывание между городами
-    не теряло уже сохранённое."""
+    не теряло уже сохранённое.
+
+    Сбойные запросы (сеть, API) не кэшируются, поэтому город с ошибками
+    возвращается в конец очереди — один раз (state.retried), удачные дни при
+    повторе берутся из кэша. Если упали ВСЕ запросы города — сеть лежит:
+    город возвращается в начало очереди, обход останавливается."""
     cities_this_run = 0
     per_city = requests_per_city(state.dates)
     while state.queue:
@@ -132,13 +161,22 @@ def scan_any(state: ScanState, fetch_fn=None,
         if max_requests is not None and state.requests + per_city > max_requests:
             break
         city = state.queue.pop(0)
-        flights = collect_city_any(city, state.dates, fetch_fn=fetch_fn, progress_cb=progress_cb)
+        result = collect_city_any(city, state.dates, fetch_fn=fetch_fn, progress_cb=progress_cb)
         state.requests += per_city
-        state.done.append(city)
-        for nb in neighbours(flights):
+        cities_this_run += 1
+        if result.errors >= per_city:
+            state.queue.insert(0, city)
+            print(f"[scan] {city}: все {result.errors} запросов упали — похоже, нет сети; стоп")
+            break
+        if result.errors and city not in state.retried:
+            state.retried.append(city)
+            state.queue.append(city)
+            print(f"[scan] {city}: {result.errors} сбойных запросов — вернул в конец очереди")
+        else:
+            state.done.append(city)
+        for nb in neighbours(result.flights):
             if not state.seen(nb):
                 state.queue.append(nb)
-        cities_this_run += 1
         if on_city_done:
-            on_city_done(city, flights)
+            on_city_done(city, result.flights)
     return state
