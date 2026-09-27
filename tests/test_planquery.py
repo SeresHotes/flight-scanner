@@ -166,6 +166,13 @@ def test_run_dedupes_by_query_key_and_routes_page(tmp_path, monkeypatch):
     assert main.plan_job_routes(first["job_id"], combos="MOW-LED-DST")["total"] == 0
     assert main.plan_job_routes("nope")["status"] == "not_ready"
 
+    combos = main.plan_job_combos(first["job_id"])
+    assert combos["status"] == "ok" and combos["total"] == 1 and combos["totalCount"] == page["total"]
+    assert combos["items"][0]["codes"] == ["MOW", "IST", "DST"] and combos["items"][0]["count"] == page["total"]
+    assert set(combos["cities"]) == {"MOW", "IST", "DST"}
+    assert main.plan_job_combos(first["job_id"], sort="count")["items"] == combos["items"]
+    assert main.plan_job_combos("nope")["status"] == "not_ready"
+
 
 def test_gather_still_works_with_open_filters(tmp_path, monkeypatch):
     conn = _setup(tmp_path, monkeypatch)

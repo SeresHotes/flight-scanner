@@ -13,7 +13,8 @@ RUN pip install --no-cache-dir \
       "uvicorn[standard]>=0.34,<0.35" \
       "pyarrow>=22,<23" \
       "requests>=2.32,<3" \
-      "python-dotenv>=1.2,<2"
+      "python-dotenv>=1.2,<2" \
+      "numpy>=2,<3"
 
 # Только рантайм-код ядра/хранилища/API. Данные (data/) НЕ пекём в образ —
 # они приезжают на персистентный том (сид из Object Storage на первом бутe).
