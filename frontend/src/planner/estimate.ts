@@ -42,7 +42,14 @@ export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
     const days = daysInWindow(win) || DEFAULT_LEG_DAYS
     const anyLeg = from.kind === 'any' || to.kind === 'any'
     const anchor = Math.min(cardinality(from), cardinality(to))
-    const reqs = anchor * days * REQUESTS_PER_DAY
+    // Hidden-city (core/planner._hidden_extra_cities): при якорении по B (у A городов
+    // больше, оба конца — города) на каждый город A добавляется запрос A→ANY с
+    // пересадками в день; при якорении по A такие билеты уже в ответе A→ANY.
+    const hiddenExtra =
+      from.kind === 'cities' && to.kind === 'cities' && cardinality(from) > cardinality(to)
+        ? from.airports.length
+        : 0
+    const reqs = anchor * days * REQUESTS_PER_DAY + hiddenExtra * days
     legs.push({ fromLabel: stopLabel(from), toLabel: stopLabel(to), days, requests: reqs, anyLeg })
     requests += reqs
   }

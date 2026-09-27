@@ -125,6 +125,7 @@ select:disabled{opacity:.4}
 .tbadge.direct{background:rgba(63,185,80,.15);color:var(--ok);border:1px solid rgba(63,185,80,.4)}
 .tbadge.conn{background:rgba(247,129,102,.14);color:var(--warn);border:1px solid rgba(247,129,102,.4)}
 .tbadge.conn.hi{background:rgba(229,72,77,.16);color:#ff6b6f;border-color:rgba(229,72,77,.5)}
+.tbadge.hidden{background:rgba(163,113,247,.16);color:#c297ff;border:1px solid rgba(163,113,247,.45);cursor:help}
 
 .legs{padding:8px 18px 18px;display:flex;flex-direction:column;gap:2px}
 .leg{display:grid;grid-template-columns:118px 1fr auto;gap:12px;align-items:center;

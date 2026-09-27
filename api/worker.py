@@ -245,7 +245,8 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         stops = planner.parse_stops(raw_stops)
         total = planner.request_count(stops)
         from core.trip_builder import make_city_lookup
-        city_info = make_city_lookup(agg.load_airport_network())
+        network = agg.load_airport_network()
+        city_info = make_city_lookup(network)
         steps = [{"label": f"{leg['fromLabel']} → {leg['toLabel']}", "requests": leg["requests"]}
                  for leg in planner.estimate_plan(stops, city_info)["legs"]]
         rep = StageReporter(conn, job_id, "plan", steps)
@@ -253,7 +254,7 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
 
         collected = planner.collect_plan(stops, progress_cb=rep.tick,
                                          fetch_fn=_make_cached_fetch(conn, rep.cache_hit),
-                                         leg_cb=rep.step)
+                                         leg_cb=rep.step, network=network)
         rep.flights(sum(len(v) for v in collected.values()))
         rep.stage("build")
 

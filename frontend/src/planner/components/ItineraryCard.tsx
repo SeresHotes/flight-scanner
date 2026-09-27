@@ -4,8 +4,24 @@ import type { Itinerary, ItineraryStop } from '../types'
 
 const money = makeMoney('RUB')
 
+// Hidden-city: билет куплен до final, выходим в точке прилёта сегмента.
+function HiddenCityBadge({ seg }: { seg: Segment }) {
+  const h = seg.hidden_city
+  if (!h) return null
+  const bag = h.baggage?.known ? (h.baggage.included ? 'багаж включён' : 'без багажа') : 'багаж ?'
+  const title =
+    `Билет ${h.chain.join('→')} до ${h.final_city || h.final}: выходим в ${seg.destination}, ` +
+    `остаток не летим. Только ручная кладь (${bag}), в одну сторону. Время прилёта — оценка.`
+  return (
+    <span className="tbadge hidden" title={title}>
+      🎯 hidden-city → {h.final}
+    </span>
+  )
+}
+
 function TransferBadge({ seg }: { seg: Segment }) {
   const n = seg.transfers || 0
+  if (seg.hidden_city) return <HiddenCityBadge seg={seg} />
   if (!n) return <span className="tbadge direct">● прямой рейс</span>
   const word = plural(n, 'пересадка', 'пересадки', 'пересадок')
   return (
@@ -16,7 +32,19 @@ function TransferBadge({ seg }: { seg: Segment }) {
 }
 
 // Конец перелёта: код города, аэропорт (если отличается от кода города), дата и время.
-function LegPoint({ code, city, airport, iso }: { code: string; city?: string; airport?: string; iso: string }) {
+function LegPoint({
+  code,
+  city,
+  airport,
+  iso,
+  approx,
+}: {
+  code: string
+  city?: string
+  airport?: string
+  iso: string
+  approx?: boolean // время — оценка (hidden-city: источник не отдаёт время пересадки)
+}) {
   const t = fmtDT(iso)
   return (
     <div className="pt">
@@ -26,7 +54,10 @@ function LegPoint({ code, city, airport, iso }: { code: string; city?: string; a
       </div>
       <div className="cty">{city || ''}</div>
       <div className="when">{t.d}</div>
-      <div className="clock">{t.t}</div>
+      <div className="clock" title={approx ? 'оценка: время пересадки источник не отдаёт' : undefined}>
+        {approx ? '≈' : ''}
+        {t.t}
+      </div>
     </div>
   )
 }
@@ -93,6 +124,7 @@ function LegRow({ seg }: { seg: Segment }) {
         city={seg.destination_city}
         airport={seg.destination_airport}
         iso={seg.arrival_at}
+        approx={!!seg.hidden_city?.arrival_estimated}
       />
       <div className="buy">
         {seg.link ? (

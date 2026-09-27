@@ -124,7 +124,7 @@ class Builder:
         dep = flight.get("departure_at")
         arr = arrival_of(flight)
         transfers = int(flight.get("transfers") or 0)
-        return {
+        segment = {
             "origin": origin,
             "destination": dest,
             "origin_airport": flight.get("origin_airport") or origin,
@@ -143,6 +143,15 @@ class Builder:
             "price": flight.get("price") or flight.get("value", 0),
             "link": booking_link(origin, dest, dep) if dep else None,
         }
+        hidden = flight.get("hidden_city")
+        if hidden:
+            # Виртуальный рейс hidden-city (core.planner.hidden_city_flights): покупать
+            # надо реальный билет A→C, поэтому ссылка — на него, а не на поиск A→B.
+            from core.linkinfo import booking_url
+            segment["hidden_city"] = {
+                **hidden, "final_city": self.city_info(hidden.get("final") or "")["city"]}
+            segment["link"] = booking_url(flight.get("link")) or segment["link"]
+        return segment
 
     def _transfer_points(self, link: str, transfers: int) -> list:
         """Города пересадок внутри билета — парсятся из токена ссылки Aviasales

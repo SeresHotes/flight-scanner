@@ -56,6 +56,21 @@ export interface Segment {
   flight_number?: string
   price: number
   link?: string
+  // Виртуальный рейс hidden-city (core/planner.hidden_city_flights): на самом деле
+  // это билет origin→final с первой пересадкой в destination — выходим там. Цена —
+  // всего билета, link — на него, arrival_at — оценка (в источнике нет времени пересадки).
+  hidden_city?: HiddenCity
+}
+
+export interface HiddenCity {
+  final: string // код города конечного пункта билета
+  final_city?: string
+  final_airport?: string
+  chain: string[] // цепочка аэропортов билета, напр. SVO, PKX, HRB
+  full_duration: number | null
+  full_transfers: number
+  baggage?: { known: boolean; included: boolean; pieces: number | null; kg: number | null }
+  arrival_estimated: boolean
 }
 
 export interface StopoverTransfer {
