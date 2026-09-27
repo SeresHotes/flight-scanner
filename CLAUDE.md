@@ -55,7 +55,9 @@ poetry run python scripts/scan_any.py --reset --from-date 2026-11-02 --months 2
 ```sh
 ssh ubuntu@93.77.186.45
 set -a; source /opt/flights/.env; set +a
-sudo docker run -d --name flights-scan --restart on-failure   --env-file /opt/flights/.env -v /opt/flights/data:/app/data "$API_IMAGE"   python -u scripts/scan_any.py                    # весь обход; --max-cities N — порция
+sudo docker run -d --name flights-scan --restart on-failure \
+  --env-file /opt/flights/.env -v /opt/flights/data:/app/data "$API_IMAGE" \
+  python -u scripts/scan_any.py                    # весь обход; --max-cities N — порция
 sudo docker logs -f flights-scan | grep '\[scan\]'  # прогресс; состояние — /opt/flights/data/anyscan_state.json
 sudo docker rm -f flights-scan                     # остановить (повторный запуск продолжит очередь)
 ```
