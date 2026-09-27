@@ -48,6 +48,26 @@ poetry run python scripts/scan_any.py --reset --from-date 2026-11-02 --months 2
 Запускать из основного checkout (данные — в его `data/`); из worktree —
 `--db <main>/data/flights.db --lake-root <main>/data/lake --state <main>/data/anyscan_state.json`.
 
+**Сбор на VM** (не зависит от локального соединения): контейнер `flights-scan`
+из того же образа api, тот же том данных и `.env` с токеном, перезапуск при
+сбое; результат сразу виден проду через `/api/graph/*` (кэш графа 5 мин).
+Код берётся не из образа, а из `/opt/flights/scan-src` (rsync ветки, без CI):
+
+```sh
+rsync -az --delete --exclude __pycache__ core scripts api storage ubuntu@93.77.186.45:/opt/flights/scan-src/
+ssh ubuntu@93.77.186.45 'sudo chown -R 1000:1000 /opt/flights/scan-src; sudo bash -c "
+  set -a; source /opt/flights/.env; set +a
+  docker rm -f flights-scan 2>/dev/null
+  docker run -d --name flights-scan --restart on-failure --env-file /opt/flights/.env \
+    -v /opt/flights/data:/app/data -v /opt/flights/scan-src:/app/src:ro -w /app/src \$API_IMAGE \
+    python -u scripts/scan_any.py --lake-root /app/data/lake --state /app/data/anyscan_state.json"'
+ssh ubuntu@93.77.186.45 'sudo docker logs flights-scan 2>&1 | grep "\[scan\]" | tail'   # прогресс
+ssh ubuntu@93.77.186.45 'sudo docker rm -f flights-scan'                                 # стоп; повторный запуск продолжит очередь
+```
+`--max-cities N` — порция вместо всей очереди. Контейнер не входит в compose и
+переживает деплои api. Когда `scripts/` попадёт в образ (`COPY scripts` в
+Dockerfile), mount `scan-src` можно не делать.
+
 **Граф** (`core/transfer_graph.py`): вершины — аэропорты, рёбра — сегменты
 прямых перелётов из цепочки `link`, отдельно — наблюдённые билеты с пересадками
 (цена, дата, багаж). Строится из `quotes` на лету или сохраняется:

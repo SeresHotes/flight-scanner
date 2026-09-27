@@ -20,6 +20,9 @@ RUN pip install --no-cache-dir \
 COPY core ./core
 COPY storage ./storage
 COPY api ./api
+# CLI-скрипты (сбор X→ANY, граф пересадок) — чтобы запускать на VM отдельным
+# контейнером из того же образа: см. CLAUDE.md, «Сбор на VM».
+COPY scripts ./scripts
 
 # Всё горячее состояние — на смонтированном томе /app/data (SQLite + collected + lake).
 # Пути совпадают с дефолтами модулей (cwd=/app → data/... == /app/data/...).
