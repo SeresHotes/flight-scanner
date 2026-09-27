@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS fetch_cache (
     data_json    TEXT NOT NULL,
     PRIMARY KEY (origin, destination, search_date, direct)
 );
+
+-- Кэш серий GraphQL (core/graphql_api.fetch_series): все страницы одного под-запроса
+-- «направление × день × прочие параметры» (params_key — коридор цен, direct, багаж).
+-- exhausted=0 — серия обрезана предохранителем страниц; pages — сколько получено.
+CREATE TABLE IF NOT EXISTS ticket_cache (
+    origin       TEXT NOT NULL,
+    destination  TEXT NOT NULL,
+    search_date  TEXT NOT NULL,
+    params_key   TEXT NOT NULL,
+    fetched_at   TEXT NOT NULL,
+    pages        INTEGER NOT NULL,
+    exhausted    INTEGER NOT NULL,
+    data_json    TEXT NOT NULL,
+    PRIMARY KEY (origin, destination, search_date, params_key)
+);
 """
 
 
@@ -180,6 +195,11 @@ def count_quotes(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM quotes").fetchone()[0]
 
 
+def count_ticket_series(conn: sqlite3.Connection) -> int:
+    """Сколько серий GraphQL лежит в ticket_cache (health / проверка деплоя)."""
+    return conn.execute("SELECT COUNT(*) FROM ticket_cache").fetchone()[0]
+
+
 def route_has_data(conn: sqlite3.Connection, origin: str, destination: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM quotes WHERE (origin=? OR search_origin=?) "
@@ -275,6 +295,48 @@ def fetch_cache_put(conn: sqlite3.Connection, origin: Optional[str],
         "ON CONFLICT(origin, destination, search_date, direct) "
         "DO UPDATE SET fetched_at=excluded.fetched_at, data_json=excluded.data_json",
         (o, d, search_date, direct, now, json.dumps(data, ensure_ascii=False)),
+    )
+    conn.commit()
+
+
+def ticket_cache_get(conn: sqlite3.Connection, origin: Optional[str],
+                     destination: Optional[str], search_date: str, params_key: str,
+                     ttl_seconds: float, min_pages: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Серия GraphQL из кэша: {"tickets", "pages", "exhausted"} — если свежее TTL и
+    достаточно полная. Обрезанная серия (exhausted=0) годится, только если у неё не
+    меньше min_pages страниц, чем просят сейчас; иначе None — надо перезапросить."""
+    o, d = _fetch_cache_key(origin, destination)
+    row = conn.execute(
+        "SELECT fetched_at, pages, exhausted, data_json FROM ticket_cache "
+        "WHERE origin=? AND destination=? AND search_date=? AND params_key=?",
+        (o, d, search_date, params_key),
+    ).fetchone()
+    if row is None:
+        return None
+    age = (datetime.now() - datetime.fromisoformat(row["fetched_at"])).total_seconds()
+    if age > ttl_seconds:
+        return None
+    if not row["exhausted"] and min_pages is not None and row["pages"] < min_pages:
+        return None
+    return {"tickets": json.loads(row["data_json"]), "pages": row["pages"],
+            "exhausted": bool(row["exhausted"])}
+
+
+def ticket_cache_put(conn: sqlite3.Connection, origin: Optional[str],
+                     destination: Optional[str], search_date: str, params_key: str,
+                     series: Dict[str, Any]) -> None:
+    """Сохраняет серию (tickets/pages/exhausted) с отметкой времени для TTL."""
+    o, d = _fetch_cache_key(origin, destination)
+    now = datetime.now().isoformat()
+    conn.execute(
+        "INSERT INTO ticket_cache (origin, destination, search_date, params_key, "
+        "fetched_at, pages, exhausted, data_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(origin, destination, search_date, params_key) DO UPDATE SET "
+        "fetched_at=excluded.fetched_at, pages=excluded.pages, "
+        "exhausted=excluded.exhausted, data_json=excluded.data_json",
+        (o, d, search_date, params_key, now, int(series.get("pages") or 0),
+         int(bool(series.get("exhausted"))),
+         json.dumps(series.get("tickets") or [], ensure_ascii=False)),
     )
     conn.commit()
 

@@ -27,6 +27,26 @@
 - Инфраструктура прод-деплоя (Terraform + cloud-init + registry) — `infra/terraform/`.
 - Фронтенд: Vite + React + TS (`frontend/`). Новая страница-планировщик — `frontend/src/planner/`.
 
+## GraphQL Data API (`core/graphql_api.py`)
+
+`prices_one_way` — все билеты на дату с сегментами, пересадками и багажом
+(REST `prices_for_dates` отдаёт один самый дешёвый билет на направление).
+Работают `город → ANY` и `ANY → город`, страна→город; страна→страна и запрос без
+обоих концов — ошибка. Лимит 400 на страницу, 60 запросов/мин, `offset` ≲ 14 800.
+Без ценового коридора первые страницы ANY-запроса — дешёвая ближняя Россия/СНГ,
+поэтому `value_min/value_max` обязательны для разумного объёма. `trip_duration`
+приходит 0 — длительность считаем по сегментам. Серии кэшируются в `ticket_cache`
+(TTL 24 ч, `api.worker.make_cached_ticket_fetch`). Проверить руками:
+
+```sh
+poetry run python scripts/fetch_tickets.py MOW SEL 2026-10-15
+poetry run python scripts/fetch_tickets.py MOW - 2026-10-15 --min 20000 --max 40000   # MOW → ANY
+```
+
+Тесты: `PYTHONPATH=. poetry run pytest -q` (venv worktree может быть пустым —
+тогда python из venv основного checkout). План перехода планировщика на GraphQL —
+`docs/PLANNER_V2.md`.
+
 ## ANY → ANY, граф пересадок и hidden-city
 
 Главная продуктовая задача — **hidden-city**: билет A→H→X дешевле прямого A→H,

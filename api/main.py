@@ -101,7 +101,9 @@ def _startup() -> None:
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     quotes = hot.count_quotes(_conn) if _conn else 0
-    return {"status": "ok", "quotes": quotes, "cached_routes": len(_payload_cache)}
+    ticket_series = hot.count_ticket_series(_conn) if _conn else 0
+    return {"status": "ok", "quotes": quotes, "ticket_series": ticket_series,
+            "cached_routes": len(_payload_cache)}
 
 
 # ---------------------------- граф пересадок ---------------------------------

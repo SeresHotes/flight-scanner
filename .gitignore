@@ -32,6 +32,7 @@ poetry.lock
 # Data files (только корневой каталог данных; НЕ frontend/src/data и т.п.)
 /data/
 *.json
+!tests/fixtures/*.json
 *.csv
 # генерируется build_web_data.py
 web/data.js
