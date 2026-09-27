@@ -95,6 +95,8 @@ def connect(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     _add_column_if_missing(conn, "jobs", "stage_json", "TEXT")
+    _add_column_if_missing(conn, "jobs", "query_key", "TEXT")   # хэш PlanQuery (дедуп джоб)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_query_key ON jobs (query_key)")
     conn.commit()
 
 
@@ -360,15 +362,27 @@ def ticket_cache_put(conn: sqlite3.Connection, origin: Optional[str],
 # -------------------------------- jobs ---------------------------------------
 
 def create_job(conn: sqlite3.Connection, job_id: str, params: Dict[str, Any],
-               total: int = 0, stage: Optional[Dict[str, Any]] = None) -> None:
+               total: int = 0, stage: Optional[Dict[str, Any]] = None,
+               query_key: Optional[str] = None) -> None:
     now = datetime.now().isoformat()
     stage_json = json.dumps(stage, ensure_ascii=False) if stage is not None else None
     conn.execute(
-        "INSERT INTO jobs (id, params_json, status, progress, total, stage_json, created_at, updated_at) "
-        "VALUES (?, ?, 'pending', 0, ?, ?, ?, ?)",
-        (job_id, json.dumps(params, ensure_ascii=False), total, stage_json, now, now),
+        "INSERT INTO jobs (id, params_json, status, progress, total, stage_json, query_key, "
+        "created_at, updated_at) VALUES (?, ?, 'pending', 0, ?, ?, ?, ?, ?)",
+        (job_id, json.dumps(params, ensure_ascii=False), total, stage_json, query_key, now, now),
     )
     conn.commit()
+
+
+def find_job_by_key(conn: sqlite3.Connection, query_key: str, ttl_seconds: float) -> Optional[Dict[str, Any]]:
+    """Свежая (created_at не старше TTL) живая или готовая джоба с тем же PlanQuery —
+    её переиспользуем вместо нового сбора. Джобы с ошибкой не подходят."""
+    cutoff = (datetime.now() - timedelta(seconds=ttl_seconds)).isoformat()
+    row = conn.execute(
+        "SELECT * FROM jobs WHERE query_key=? AND status IN ('pending', 'running', 'done') "
+        "AND created_at >= ? ORDER BY created_at DESC LIMIT 1", (query_key, cutoff),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def update_job(conn: sqlite3.Connection, job_id: str, **fields) -> None:

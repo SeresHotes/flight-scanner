@@ -263,15 +263,20 @@ def run_collection(db_path: str, job_id: str, params: Dict[str, Any],
 
 def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any]],
                         max_results: Optional[int] = None,
-                        max_cost: Optional[float] = None) -> None:
+                        max_cost: Optional[float] = None,
+                        query: Optional[Dict[str, Any]] = None) -> None:
     """Сбор данных под планировщик цепочек: обходит переходы, стыкует цепочки,
-    кладёт готовые Itinerary в jobs.result_json. Котировки — в SQLite + озеро.
+    кладёт компактный результат в jobs.result_json. Котировки — в SQLite + озеро.
 
-    max_results/max_cost — движковые границы стыковки (см. planner.build_itineraries):
-    режут перебор по бюджету цены и числу самых дешёвых цепочек. max_results=None
-    (безлимит) отклоняется на уровне API (см. plan_gather), сюда не доходит."""
+    query — полный PlanQuery (core/planquery) со всеми фильтрами; без него
+    собирается из raw_stops/max_results/max_cost (фильтры открыты). max_results
+    обязателен (безлимит отклоняется на уровне API)."""
+    from core.planquery import PlanQuery
     conn = hot.connect(db_path)
     try:
+        pq = PlanQuery.from_dict(query or {"stops": raw_stops, "maxResults": max_results,
+                                           "maxCost": max_cost})
+        raw_stops, max_results, max_cost = pq.stops, pq.max_results, pq.max_cost
         stops = planner.parse_stops(raw_stops)
         total = planner.request_count(stops)
         from core.trip_builder import make_city_lookup
@@ -294,7 +299,7 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         result = planner.build_itineraries_compact(
             stops, collected, city_info=city_info, max_results=max_results, max_cost=max_cost,
             should_stop=lambda: is_cancel_requested(job_id),
-            on_progress=rep.build_progress(max_results))
+            on_progress=rep.build_progress(max_results), query=pq)
 
         # Граф рёбер — для режима «наборы городов»: он оценивает ВСЕ варианты, без
         # движковых границ max_results/max_cost (см. planner.overview_graph).

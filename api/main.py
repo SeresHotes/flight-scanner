@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from core import airports as airports_mod
 from core import planner
+from core.planquery import PlanQuery
 from core import transfer_graph
 from core.routes import get_route_config, get_route_keys
 from core.trip_builder import build_from_config
@@ -459,18 +460,36 @@ def plan_estimate(req: PlanRequest) -> Dict[str, Any]:
     return planner.estimate_plan(stops)
 
 
-@app.post("/api/plan/gather")
-def plan_gather(req: PlanRequest) -> Dict[str, Any]:
-    """Запускает фоновый сбор цепочки. Отдаёт job_id — прогресс/результат по /plan/jobs/{id}."""
-    raw = _stops_payload(req)
-    stops = planner.parse_stops(raw)
+# Разобранные компактные результаты последних джоб — для страниц /routes (JSON на
+# сотни тысяч цепочек разбирать на каждый запрос страницы дорого). Две записи:
+# пользователь обычно смотрит одну джобу, вторая — на переход между запросами.
+PLAN_RESULT_CACHE_SIZE = 2
+PLAN_JOB_TTL_SECONDS = 24 * 3600   # готовая джоба переиспользуется, пока свеж fetch_cache
+_plan_results: Dict[str, Dict[str, Any]] = {}
+_plan_results_lock = threading.Lock()
+
+
+class PlanQueryRequest(BaseModel):
+    """Единый запрос планировщика (core/planquery.PlanQuery): скелет + все фильтры.
+    Поля фильтров необязательны — отсутствующие открыты."""
+    stops: List[PlanStop]
+    cities: Optional[List[Dict[str, Any]]] = None
+    legs: Optional[List[Dict[str, Any]]] = None
+    tripLength: Optional[List[Optional[int]]] = None
+    maxCost: Optional[float] = None
+    maxResults: Optional[int] = None
+
+
+def _start_plan_job(query: PlanQuery) -> Dict[str, Any]:
+    """Общий запуск сбора: проверки, дедуп по хэшу запроса, постановка в очередь."""
+    stops = planner.parse_stops(query.stops)
     if len(stops) < 2:
         return {"status": "invalid", "message": "Нужно минимум две остановки."}
 
     # max_results обязателен: без него движок ушёл бы в безлимитный перебор (сотни
     # тысяч цепочек → сотни МБ → зависание/почти-OOM). None шлёт устаревший
     # закешированный фронт или прямой вызов API — отклоняем, а не молча ограничиваем.
-    if not planner.is_valid_max_results(req.max_results):
+    if not planner.is_valid_max_results(query.max_results):
         return {"status": "invalid",
                 "message": "Не задан лимит числа маршрутов. Обновите страницу (Ctrl/Cmd+Shift+R) — клиент устарел."}
 
@@ -482,14 +501,81 @@ def plan_gather(req: PlanRequest) -> Dict[str, Any]:
                 "message": f"Слишком широкие окна (~{est['requests']} запросов). Сузьте диапазоны.",
                 "estimate": est}
 
+    key = query.key()
+    existing = hot.find_job_by_key(_conn, key, PLAN_JOB_TTL_SECONDS)
+    if existing:
+        return {"status": "collecting" if existing["status"] != "done" else "done",
+                "job_id": existing["id"], "total": existing["total"], "mode": query.mode(),
+                "reused": True}
+
     job_id = uuid.uuid4().hex[:12]
-    hot.create_job(_conn, job_id,
-                   {"kind": "plan", "stops": raw,
-                    "max_results": req.max_results, "max_cost": req.max_cost},
-                   total=est["requests"], stage=worker.initial_stage("plan"))
-    _executor.submit(worker.run_plan_collection, hot.DEFAULT_DB, job_id, raw,
-                     req.max_results, req.max_cost)
-    return {"status": "collecting", "job_id": job_id, "total": est["requests"]}
+    payload = query.as_dict()
+    hot.create_job(_conn, job_id, {"kind": "plan", **payload,
+                                   "stops": payload["stops"], "max_results": query.max_results,
+                                   "max_cost": query.max_cost},
+                   total=est["requests"], stage=worker.initial_stage("plan"), query_key=key)
+    _executor.submit(worker.run_plan_collection, hot.DEFAULT_DB, job_id, payload["stops"],
+                     query.max_results, query.max_cost, payload)
+    return {"status": "collecting", "job_id": job_id, "total": est["requests"], "mode": query.mode()}
+
+
+@app.post("/api/plan/gather")
+def plan_gather(req: PlanRequest) -> Dict[str, Any]:
+    """Запуск сбора по одному скелету (фильтры открыты). Прогресс/результат — /plan/jobs/{id}."""
+    return _start_plan_job(PlanQuery.from_dict({"stops": _stops_payload(req),
+                                                "maxResults": req.max_results,
+                                                "maxCost": req.max_cost}))
+
+
+@app.post("/api/plan/run")
+def plan_run(req: PlanQueryRequest) -> Dict[str, Any]:
+    """Запуск сбора по единому запросу с фильтрами (PlanQuery). Одинаковый запрос в
+    пределах суток переиспользует готовую/идущую джобу (reused=true). mode —
+    какой экран открывать: combos (наборы городов) или routes."""
+    try:
+        query = PlanQuery.from_dict({"stops": [{"kind": s.kind, "codes": s.codes, "window": s.window}
+                                               for s in req.stops],
+                                     "cities": req.cities, "legs": req.legs,
+                                     "tripLength": req.tripLength,
+                                     "maxCost": req.maxCost, "maxResults": req.maxResults})
+    except ValueError as e:
+        return {"status": "invalid", "message": f"Некорректный фильтр: {e}"}
+    return _start_plan_job(query)
+
+
+def _plan_result(job_id: str) -> Optional[Dict[str, Any]]:
+    """Разобранный результат готовой джобы (с ленивым индексом наборов), из кэша."""
+    with _plan_results_lock:
+        entry = _plan_results.get(job_id)
+    if entry is not None:
+        return entry
+    job = hot.get_job(_conn, job_id)
+    if not job or job["status"] != "done" or not job["result_json"]:
+        return None
+    entry = {"result": json.loads(job["result_json"]), "index": None}
+    with _plan_results_lock:
+        while len(_plan_results) >= PLAN_RESULT_CACHE_SIZE:
+            _plan_results.pop(next(iter(_plan_results)))
+        _plan_results[job_id] = entry
+    return entry
+
+
+@app.get("/api/plan/jobs/{job_id}/routes")
+def plan_job_routes(job_id: str, offset: int = 0, limit: int = 50,
+                    combos: Optional[str] = None) -> Dict[str, Any]:
+    """Страница маршрутов готовой джобы (по возрастанию цены), с полными сегментами
+    (багаж, пересадки, hidden-city). combos — наборы городов через запятую
+    (`MOW-IST-ICN,MOW-DXB-ICN`): только цепочки этих наборов."""
+    entry = _plan_result(job_id)
+    if entry is None:
+        return {"status": "not_ready"}
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    wanted = [c.strip().upper() for c in combos.split(",") if c.strip()] if combos else None
+    if wanted and entry["index"] is None:
+        entry["index"] = planner.combo_index(entry["result"])
+    page = planner.routes_page(entry["result"], offset, limit, wanted, entry["index"])
+    return {"status": "ok", "count": entry["result"]["count"], **page}
 
 
 @app.get("/api/plan/jobs/{job_id}")
