@@ -4,7 +4,7 @@ build_airport_network кладёт ISO2 страны в поле "country"; city
 только "iso_country", и у всех городов из сети (Chengdu, Istanbul…) не было
 ни страны, ни флага.
 """
-from core.trip_builder import flag_emoji, make_city_lookup
+from core.segments import flag_emoji, make_city_lookup
 
 NETWORK = {
     "CTU": {"name": "Chengdu Shuangliu International Airport",

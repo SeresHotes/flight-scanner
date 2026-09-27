@@ -56,7 +56,7 @@ def test_cancelled_plan_job_keeps_rescued_status(tmp_path, monkeypatch):
     hot.create_job(conn, "j1", {"kind": "plan"}, total=6, stage=worker.initial_stage("plan"))
     hot.update_job(conn, "j1", status="error", error="сброшена")
     monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
-    monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
+    monkeypatch.setattr(worker, "load_airport_network", lambda *a, **k: {})
 
     worker.request_cancel("j1")
     worker.run_plan_collection(db, "j1", STOPS, max_results=10)
@@ -93,7 +93,7 @@ def test_rescue_unblocks_queue_behind_endless_build(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_conn", conn)
     monkeypatch.setattr(main, "HUNG_JOB_SECONDS", 0)
     monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
-    monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
+    monkeypatch.setattr(worker, "load_airport_network", lambda *a, **k: {})
     real_build = worker.planner.build_itineraries_compact
 
     def build(stops, collected, **kw):

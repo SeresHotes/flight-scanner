@@ -11,7 +11,7 @@ import pytest
 from api import worker
 from core import graphql_api as g
 from core.linkinfo import parse_link
-from core.trip_builder import Builder
+from core.segments import Builder
 from storage import hot
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "graphql_tickets.json").read_text())

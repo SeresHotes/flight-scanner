@@ -1,40 +1,34 @@
-# Локальный запуск: бэк + фронт (Фаза 1)
-
-Архитектура после Фазы 1:
+# Локальный запуск
 
 ```
-React (Vite, :5173) ──POST /api/search──> FastAPI (:8000) ──> core.trip_builder
-   AirportCombobox  ──GET  /api/airports──>              └──> storage.hot (SQLite)
-   (Vite проксирует /api → :8000; в проде один origin через Caddy)
+React (Vite, :5173) ──POST /api/plan/run──> FastAPI (:8000) ──> core.planner / core.overview
+   /combos, /routes  ──GET  …/combos|routes─>        └──> core.graphql_api (Travelpayouts)
+   (Vite проксирует /api → :8000; в проде один origin через Caddy)   └──> storage.hot (SQLite)
 ```
 
 ## Бэкенд (FastAPI)
 
-Зависимости — в `pyproject.toml` (poetry). Токен Travelpayouts — в `.env`
-(нужен только для сбора; для serving из кэша не требуется).
+Зависимости — `pyproject.toml` (poetry). Токен Travelpayouts — `TRAVELPAYOUTS_TOKEN`
+в `.env` (нужен для сбора; страницы готовых джоб отдаются и без него).
 
 ```sh
-poetry install                       # или: poetry run pip install fastapi "uvicorn[standard]" pyarrow
+poetry install
 poetry run uvicorn api.main:app --port 8000 --reload
+PYTHONPATH=. poetry run pytest -q
 ```
 
 Эндпоинты:
-- `GET  /api/health` — статус + число котировок в SQLite.
-- `GET  /api/routes` — что уже доступно: собранные маршруты (`available`) + агрегат
-  хранилища (`stored`: всего котировок, число направлений, топ плеч). Питает страницу выбора.
-- `GET  /api/airports?q=<строка>&limit=10` — автокомплит A/B из `airport_network.json`.
-- `POST /api/search` — **только оценивает, ничего не собирает сам**. Тело `{origin, destination, leg1_dates, leg2_dates}`.
-  - Собранный маршрут → `{status:"ok", data:{meta, trips}}`.
-  - Не собран, есть даты → `{status:"needs_collection", estimate:{requests, seconds}}` (ждёт подтверждения).
-  - Идёт сбор → `{status:"collecting", job_id}`.
-  - Нет дат / слишком широко → `{status:"needs_backend", message}`.
-- `POST /api/gather` — **явный запуск сбора** (после подтверждения на фронте). Тело как у `/search`.
-  Заводит job → `{status:"collecting", job_id}` (**реальный Travelpayouts**).
-  (Путь без слова «collect» — иначе блокировщики рекламы режут его как трекер: `ERR_BLOCKED_BY_CLIENT`.)
-- `GET  /api/jobs/{id}` — прогресс сбора `{status, progress, total, error}`.
+- `GET  /api/health` — статус, число котировок и серий в кэше.
+- `GET  /api/airports?q=&limit=` — автокомплит городов/аэропортов.
+- `POST /api/plan/estimate` — оценка объёма сбора (страниц GraphQL).
+- `POST /api/plan/run` — запуск по PlanQuery (`core/planquery`), дедуп по хэшу запроса → `{job_id, mode}`.
+- `GET  /api/plan/jobs/{id}` — прогресс (этапы fetch → build → combos), по готовности `summary`.
+- `GET  /api/plan/jobs/{id}/combos?sort&offset&limit` — наборы городов.
+- `GET  /api/plan/jobs/{id}/routes?offset&limit&combos=` — страница маршрутов с полными сегментами.
+- `POST /api/jobs/rescue` — сброс зависших джоб.
 
-На старте API импортирует существующие выгрузки коллектора из `data/` в SQLite
-(`quotes`), а собранный контракт MOW→ICN кэширует в памяти.
+Справочник аэропортов `data/airport_network.json` строится `build_airport_network.py`
+(нужен `datasets`, офлайн). Проверить источник руками: `scripts/fetch_tickets.py MOW SEL 2026-10-15`.
 
 ## Фронтенд (React)
 
@@ -42,16 +36,7 @@ poetry run uvicorn api.main:app --port 8000 --reload
 cd frontend
 npm install
 npm run dev        # http://localhost:5173, /api проксируется на :8000
+npm run build      # tsc + vite
 ```
 
-## CLI (без изменений)
-
-Скрипты остались рабочими — теперь это тонкие обёртки над `core/`:
-
-```sh
-poetry run python collect_flights.py MOW ICN --leg1-dates 2026-10-25 2026-11-05 --leg2-dates 2026-11-13 2026-11-30
-poetry run python build_web_data.py --stopover-days 2 14 --max-stay 34   # → web/data.json
-```
-
-`core.trip_builder.build_from_config` воспроизводит текущий `web/data.json`
-байт-в-байт (проверено) — та же логика, что отдаёт `/api/search`.
+Страницы: `/` (запрос) → `/combos/:job` → `/routes/:job`; запрос целиком в URL.

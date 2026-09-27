@@ -15,7 +15,7 @@ def test_done_job_returns_compact_result(tmp_path, monkeypatch):
     hot.init_db(conn)
     monkeypatch.setattr(main, "_conn", conn)
     monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
-    monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
+    monkeypatch.setattr(worker, "load_airport_network", lambda *a, **k: {})
     hot.create_job(conn, "j1", {"kind": "plan"}, total=6, stage=worker.initial_stage("plan"))
 
     main._plan_results.clear()

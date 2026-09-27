@@ -8,7 +8,7 @@ H, цена всего билета. Город→любой: A→ANY с кор�
 """
 from core import planner
 from core.planner import PAGES_ANY, PAGES_CITY, PAGES_HIDDEN, Stop, collect_plan, estimate_plan, request_count
-from core.trip_builder import Builder, make_city_lookup
+from core.segments import Builder, make_city_lookup
 
 CITY_INFO = make_city_lookup({})
 DAY = "2026-10-29"

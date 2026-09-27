@@ -52,7 +52,7 @@ def _run(tmp_path, monkeypatch, max_results=10):
     hot.create_job(conn, "j1", {"kind": "plan"}, total=TOTAL, stage=worker.initial_stage("plan"))
 
     monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
-    monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
+    monkeypatch.setattr(worker, "load_airport_network", lambda *a, **k: {})
     snapshots = []
     orig_update = hot.update_job
 
