@@ -6,7 +6,7 @@ naive-якорём даты цепочки бросает "can't compare offset-
 datetimes". До фикса это всплывало при сборе после снятия beam-кэпов (DFS стал
 доходить до рейсов с таким форматом даты).
 """
-from core import aggregate as agg
+from core import dates as agg
 from core.planner import Stop, build_itineraries
 
 CITY_INFO = lambda code: {"city": code, "country": "", "flag": ""}

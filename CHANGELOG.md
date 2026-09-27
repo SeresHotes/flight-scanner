@@ -18,6 +18,18 @@
   серия переиспользуется только при достаточной глубине); `/api/health` отдаёт
   `ticket_series`. CLI `scripts/fetch_tickets.py MOW - 2026-10-15 --max 40000`.
 
+### 🧹 Чистка после переработки — шаг 6 планировщика v2
+
+- Удалены классический режим на бэке (`core/aggregate`, `core/trip_builder`,
+  `core/routes`, REST-коллектор `core/collector`, `storage/catalog`, ручки
+  `/api/search`, `/api/gather`, `/api/routes`, `/api/jobs/{id}`), граф пересадок
+  и сбор X→ANY (`core/transfer_graph`, `core/anyscan`, `/api/graph/*`,
+  `scripts/scan_any.py`, `scripts/hidden_city.py`, `scripts/build_transfer_graph.py`),
+  корневые CLI-скрипты, `web/`, `QUICK_START.md`, старый кэш `fetch_cache`.
+- Нужное планировщику вынесено: `core/dates.py` (разбор времени, окна дат),
+  `core/network.py` (справочник аэропортов), `core/segments.py` (сегмент
+  карточки, имена городов). Фронт: убраны старые типы и react-query.
+
 ### 🧭 Только планировщик: запрос → наборы → маршруты — шаг 5 планировщика v2
 
 - Классический поиск «туда-обратно» (`/`, `/results`) удалён; планировщик живёт на `/`.

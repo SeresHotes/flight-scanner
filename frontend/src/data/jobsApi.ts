@@ -1,18 +1,15 @@
-// Статус джобы сбора — GET /api/jobs/{id}.
+// Статус джобы планировщика — GET /api/plan/jobs/{id} (api/worker.py StageReporter).
 
-// Текущий этап сбора (api/worker.py StageReporter). null — у джоб, заведённых до
-// появления этапов.
-export type JobStageKey = 'queued' | 'fetch' | 'build' | 'save'
+export type JobStageKey = 'queued' | 'fetch' | 'build' | 'combos'
 
 export interface JobStage {
   key: JobStageKey
   stages: { key: JobStageKey; label: string }[]
-  // Шаг загрузки: переход i из count и сколько его запросов уже сделано.
+  // Шаг загрузки: переход i из count и сколько его страниц уже получено.
   step: { index: number; count: number; label: string; done: number; total: number } | null
-  cached: number // сколько ответов взято из кэша (без обращения к API)
+  cached: number // сколько серий взято из кэша (без обращения к источнику)
   flights: number | null // сколько рейсов загружено (после этапа загрузки)
-  // Стыковка цепочек: сколько уже найдено из лимита (limit=null — без потолка) и
-  // сколько вариантов перебрано. Нет у сбора A→B и у джоб до появления счётчика.
+  // Стыковка цепочек: сколько уже найдено из лимита и сколько вариантов перебрано.
   build?: { found: number; limit: number | null; explored: number } | null
 }
 
@@ -22,12 +19,4 @@ export interface JobStatus {
   total: number
   error?: string | null
   stage?: JobStage | null
-}
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
-
-export async function fetchJob(jobId: string): Promise<JobStatus> {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}`)
-  if (!res.ok) throw new Error(`Не удалось получить статус джобы: ${res.status}`)
-  return (await res.json()) as JobStatus
 }

@@ -1,8 +1,7 @@
-"""Фоновый сбор недостающих данных (Фаза 2).
-
-Джоба реально ходит в Travelpayouts через core.collector, обновляет прогресс в
-таблице jobs, кладёт котировки в SQLite + Parquet и собирает контракт trip_builder.
-Запускается в отдельном потоке (collector синхронный, с rate-limit sleep).
+"""Фоновая джоба планировщика: сбор билетов через GraphQL (core.graphql_api,
+кэш серий), стыковка цепочек (core.planner), наборы городов (core.overview),
+прогресс в таблице jobs, котировки — в SQLite + Parquet. Запускается в потоке
+однопоточного executor (rate-limit к источнику).
 """
 import json
 import threading
@@ -10,19 +9,12 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from core import aggregate as agg
-from core import collector
 from core import planner
-from core.routes import make_route_config
-from core.trip_builder import build_payload
+from core.network import load_airport_network
+from core.segments import make_city_lookup
 from storage import hot, lake
 
-STOP_DAYS = (2, 7)
-MAX_REQUESTS = 150  # предохранитель от слишком широких диапазонов
-SECONDS_PER_REQUEST = 0.65  # 0.5с rate-limit sleep + ~сеть — для оценки времени сбора
-ESTIMATE_TIME_FACTOR = 2  # запас пессимизма в показанной оценке длительности сбора
-
-# Свежесть кэша под-запросов (origin, destination, day): источник (Travelpayouts
+# Свежесть кэша серий (направление, день, коридор): источник (Travelpayouts
 # Data API) сам отдаёт кэш цен с задержкой ~суток, поэтому чаще перезапрашивать
 # бессмысленно — те же цифры, впустую сожжённые запросы к API.
 FETCH_CACHE_TTL_SECONDS = 24 * 3600
@@ -58,19 +50,15 @@ def _forget_cancel(job_id: str) -> None:
         _cancel_requests.discard(job_id)
 
 
-# Этапы сбора для UI. Ключи стабильны (фронт по ним рисует степпер), подписи —
-# под вид джобы: у маршрута A→B после загрузки собираются варианты, у планировщика
-# стыкуются цепочки.
-_ROUTE_STAGES = [("queued", "В очереди"), ("fetch", "Загрузка рейсов"),
-                 ("build", "Сборка вариантов"), ("save", "Сохранение")]
-# У планировщика нет этапа «Сохранение»: котировки пишутся уже после done.
+# Этапы джобы для UI (ключи стабильны — фронт рисует по ним степпер). Этапа
+# «Сохранение» нет: котировки пишутся уже после done.
 _PLAN_STAGES = [("queued", "В очереди"), ("fetch", "Загрузка рейсов"),
                 ("build", "Стыковка цепочек"), ("combos", "Наборы городов")]
 
 
 def initial_stage(kind: str) -> Dict[str, Any]:
     """Этап свежесозданной джобы (ждёт своей очереди в однопоточном executor)."""
-    stages = _PLAN_STAGES if kind == "plan" else _ROUTE_STAGES
+    stages = _PLAN_STAGES
     return {"key": "queued", "stages": [{"key": k, "label": lbl} for k, lbl in stages],
             "step": None, "cached": 0, "flights": None, "build": None}
 
@@ -132,33 +120,6 @@ class StageReporter:
         return report
 
 
-def _make_cached_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None):
-    """Обёртка над collector.fetch_flights с TTL-кэшем по (origin, destination, day).
-
-    На попадании возвращает сохранённый ответ без обращения к API (и без rate-limit
-    паузы). Сбойные ответы (error=True) и запросы без даты не кэшируем.
-    on_cache_hit() — для счётчика «из кэша» в прогрессе джобы."""
-    def fetch(origin=None, destination=None, departure_at=None, currency="RUB",
-              unique=True, limit=1000, allow_indirect=False):
-        direct = 0 if allow_indirect else 1
-        if departure_at:
-            cached = hot.fetch_cache_get(conn, origin, destination, departure_at,
-                                         direct, FETCH_CACHE_TTL_SECONDS)
-            if cached is not None:
-                if on_cache_hit:
-                    on_cache_hit()
-                return {"data": cached}
-        result = collector.fetch_flights(
-            origin=origin, destination=destination, departure_at=departure_at,
-            currency=currency, unique=unique, limit=limit, allow_indirect=allow_indirect,
-        )
-        if departure_at and not result.get("error"):
-            hot.fetch_cache_put(conn, origin, destination, departure_at, direct,
-                                result.get("data", []))
-        return result
-    return fetch
-
-
 def make_cached_ticket_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None,
                              ttl_seconds: float = FETCH_CACHE_TTL_SECONDS,
                              fetch_fn: Optional[Callable[..., Dict[str, Any]]] = None):
@@ -193,8 +154,7 @@ def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: 
                  lake_root: str = lake.DEFAULT_LAKE_ROOT) -> None:
     """Котировки — в горячее хранилище SQLite + дозапись в озеро (если подключено).
 
-    lake_root — каталог озера; по умолчанию data/lake (scripts/scan_any.py может
-    писать в озеро другого checkout)."""
+    lake_root — каталог озера; по умолчанию data/lake."""
     rows = hot.flights_to_quotes(flights, observed_at)
     hot.upsert_quotes(conn, rows)
     if lake.available():
@@ -202,61 +162,6 @@ def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: 
             lake.append_quotes(rows, root=lake_root, part_id=job_id)
         except Exception as e:  # озеро не критично для serving
             print(f"[worker] lake append failed: {e}")
-
-
-def estimate_requests(params: Dict[str, Any]) -> int:
-    return collector.plan_request_count(
-        params["origin"], params["destination"],
-        params["leg1_dates"], params["leg2_dates"], STOP_DAYS,
-    )
-
-
-def run_collection(db_path: str, job_id: str, params: Dict[str, Any],
-                   on_done: Callable[[Tuple[str, str], Dict[str, Any]], None]) -> None:
-    conn = hot.connect(db_path)
-    origin = params["origin"].upper()
-    destination = params["destination"].upper()
-    try:
-        total = estimate_requests(params)
-        steps = collector.route_steps(origin, destination, params["leg1_dates"],
-                                      params["leg2_dates"], STOP_DAYS)
-        rep = StageReporter(conn, job_id, "route", steps)
-        rep.stage("fetch", status="running", total=total, progress=0)
-
-        collected = collector.collect_route(
-            origin, destination, params["leg1_dates"], params["leg2_dates"],
-            stop_days=STOP_DAYS, progress_cb=rep.tick,
-            fetch_fn=_make_cached_fetch(conn, rep.cache_hit), step_cb=rep.step,
-        )
-        rep.flights(sum(len(collected[ds][leg]) for ds in collected for leg in collected[ds]))
-        rep.stage("build")
-
-        network = agg.load_airport_network()
-        cfg = make_route_config(origin, destination, stop_days=STOP_DAYS)
-        payload = build_payload(cfg, network, collected["plain"], collected["there"], collected["back"])
-
-        now = datetime.now().isoformat()
-        payload["meta"]["collected_at"] = now
-
-        # Сохраняем котировки в горячее хранилище + дозаписываем в озеро.
-        rep.stage("save")
-        flights = []
-        for ds in ("plain", "there", "back"):
-            flights += collected[ds]["leg1_flights"] + collected[ds]["leg2_flights"]
-        _save_quotes(conn, flights, now, job_id)
-
-        on_done((origin, destination), payload)
-        hot.update_job(conn, job_id, status="done",
-                       result_json=json.dumps({"trips": payload["meta"]["counts"]["total"]}))
-        print(f"[worker] job {job_id} done: {payload['meta']['counts']['total']} плеч")
-    except JobCancelled:
-        print(f"[worker] job {job_id} сброшена как зависшая")
-    except Exception as e:
-        hot.update_job(conn, job_id, status="error", error=str(e))
-        print(f"[worker] job {job_id} error: {e}")
-    finally:
-        _forget_cancel(job_id)
-        conn.close()
 
 
 # ------------------------- планировщик цепочек A→B→C --------------------------
@@ -279,9 +184,7 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         raw_stops, max_results, max_cost = pq.stops, pq.max_results, pq.max_cost
         stops = planner.parse_stops(raw_stops)
         total = planner.request_count(stops)
-        from core.trip_builder import make_city_lookup
-        network = agg.load_airport_network()
-        city_info = make_city_lookup(network)
+        city_info = make_city_lookup(load_airport_network())
         steps = [{"label": f"{leg['fromLabel']} → {leg['toLabel']}", "requests": leg["requests"]}
                  for leg in planner.estimate_plan(stops, city_info)["legs"]]
         rep = StageReporter(conn, job_id, "plan", steps)

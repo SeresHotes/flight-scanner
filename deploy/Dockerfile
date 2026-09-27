@@ -21,14 +21,12 @@ RUN pip install --no-cache-dir \
 COPY core ./core
 COPY storage ./storage
 COPY api ./api
-# CLI-скрипты (сбор X→ANY, граф пересадок) — чтобы запускать на VM отдельным
-# контейнером из того же образа: см. CLAUDE.md, «Сбор на VM».
+# CLI для проверки источника руками (scripts/fetch_tickets.py) из того же образа.
 COPY scripts ./scripts
 
-# Всё горячее состояние — на смонтированном томе /app/data (SQLite + collected + lake).
+# Всё горячее состояние — на смонтированном томе /app/data (SQLite + lake).
 # Пути совпадают с дефолтами модулей (cwd=/app → data/... == /app/data/...).
 ENV FLIGHT_DB=/app/data/flights.db \
-    COLLECTED_DIR=/app/data/collected \
     PYTHONUNBUFFERED=1
 
 # Непривилегированный пользователь с фиксированным uid 1000 — том /app/data

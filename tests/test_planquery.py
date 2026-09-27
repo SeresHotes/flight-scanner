@@ -134,7 +134,7 @@ def _setup(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_conn", conn)
     monkeypatch.setattr(hot, "DEFAULT_DB", db)
     monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
-    monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
+    monkeypatch.setattr(worker, "load_airport_network", lambda *a, **k: {})
     main._plan_results.clear()
 
     class Sync:

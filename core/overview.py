@@ -23,7 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from core import aggregate as agg
+from core.dates import parse_datetime
+from core.network import load_airport_network
 from core.planner import (FINAL_STAY_DAYS, Stop, _allowed, _apply_leg_filters, _index_leg,  # noqa
                           _leg_dates, _price_of, _side_codes, arrival_of, make_city_lookup)
 from core.planquery import PlanQuery
@@ -34,11 +35,11 @@ _INF = float("inf")
 
 
 def _naive_seconds(iso: str) -> float:
-    return (agg.parse_datetime(iso) - _EPOCH).total_seconds()
+    return (parse_datetime(iso) - _EPOCH).total_seconds()
 
 
 def _ordinal(iso: str) -> int:
-    return agg.parse_datetime(iso).date().toordinal()
+    return parse_datetime(iso).date().toordinal()
 
 
 def _weekend_deadline(arr_ord: int) -> int:
@@ -119,7 +120,7 @@ def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
     """{combos: [{codes, minPrice, transfersAtMin, minTransfers, count}] по цене,
     totalCount, cities: {code: [city, flag]}}."""
     if city_info is None:
-        city_info = make_city_lookup(agg.load_airport_network())
+        city_info = make_city_lookup(load_airport_network())
     last = len(stops) - 1
     if last < 1:
         return {"combos": [], "totalCount": 0, "cities": {}}

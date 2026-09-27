@@ -1,6 +1,6 @@
 """Движок планировщика цепочек A → B → C → …
 
-В отличие от round-trip (core/trip_builder), маршрут — линейная последовательность
+Маршрут — линейная последовательность
 остановок. Каждая остановка — НАБОР городов-кандидатов (kind='cities') или «любой»
 (kind='any', wildcard в середине). Окно дат «когда ОК быть здесь» задаётся только у
 ПРОМЕЖУТОЧНЫХ остановок; у концов оно выводится из соседей.
@@ -26,9 +26,9 @@ from array import array
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional
 
-from core import aggregate as agg
-from core.collector import get_date_range
-from core.trip_builder import Builder, arrival_of, date_only, make_city_lookup, stay_between
+from core.dates import get_date_range, parse_datetime
+from core.network import load_airport_network
+from core.segments import Builder, arrival_of, date_only, make_city_lookup, stay_between
 
 SECONDS_PER_REQUEST = 1.0   # GraphQL: 60 запросов в минуту (совпадает с planner/estimate.ts)
 MAX_REQUESTS = 600          # предохранитель от слишком широких окон (~10 мин сбора без кэша)
@@ -155,7 +155,7 @@ def _leg_requests(stops: List[Stop], i: int) -> int:
 def estimate_plan(stops: List[Stop], city_info=None) -> Dict[str, Any]:
     """Оценка объёма сбора цепочки (совпадает с planner/estimate.ts)."""
     if city_info is None:
-        city_info = make_city_lookup(agg.load_airport_network())
+        city_info = make_city_lookup(load_airport_network())
     legs = []
     requests = 0
     for i in range(len(stops) - 1):
@@ -433,8 +433,8 @@ def hidden_city_flights(tickets: List[Dict[str, Any]], hub_city, thresholds: Dic
 def _has_both_weekend_days(arrive_iso: str, depart_iso: str) -> bool:
     """Оба выходных (сб И вс) попадают в пребывание [arrive..depart]."""
     from datetime import timedelta
-    a = agg.parse_datetime(arrive_iso)
-    b = agg.parse_datetime(depart_iso)
+    a = parse_datetime(arrive_iso)
+    b = parse_datetime(depart_iso)
     if b < a:
         return False
     sat = sun = False
@@ -625,7 +625,7 @@ def _stay_ok(cf, arrive_iso: str, depart_iso: str) -> bool:
 
 def _build_ctx(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]], city_info):
     if city_info is None:
-        city_info = make_city_lookup(agg.load_airport_network())
+        city_info = make_city_lookup(load_airport_network())
     builder = Builder(None, city_info)  # make_segment использует только city_info
     legs_by_origin = {i: _index_leg(collected.get(i, [])) for i in range(len(stops) - 1)}
     chain_start = _leg_dates(stops, 0)[0]  # первая дата окна нулевого плеча

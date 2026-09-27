@@ -3,7 +3,6 @@
 Схема — из docs/PLAN.md. Serving-нагрузка скромная, ноль администрирования.
 Полная история цен живёт в Parquet-озере (storage/lake.py); здесь — свежайшее.
 """
-import glob
 import json
 import os
 import sqlite3
@@ -47,20 +46,6 @@ CREATE TABLE IF NOT EXISTS jobs (
     stage_json  TEXT,       -- текущий этап сбора для UI (см. api.worker.StageReporter)
     created_at  TEXT,
     updated_at  TEXT
-);
-
--- Кэш ответов Travelpayouts по одному под-запросу (origin, destination, day).
--- Позволяет не перезапрашивать недавно собранные под-запросы (TTL — см. worker).
--- origin/destination хранятся как '' когда в запросе не заданы (ANY-направления);
--- direct различает прямые (1) и с пересадками (0) — это разные ответы API.
-CREATE TABLE IF NOT EXISTS fetch_cache (
-    origin       TEXT NOT NULL,
-    destination  TEXT NOT NULL,
-    search_date  TEXT NOT NULL,
-    direct       INTEGER NOT NULL,
-    fetched_at   TEXT NOT NULL,
-    data_json    TEXT NOT NULL,
-    PRIMARY KEY (origin, destination, search_date, direct)
 );
 
 -- Кэш серий GraphQL (core/graphql_api.fetch_series): все страницы одного под-запроса
@@ -165,34 +150,6 @@ def upsert_quotes(conn: sqlite3.Connection, rows: Iterable[Dict[str, Any]]) -> i
     return n
 
 
-def import_collector_result(conn: sqlite3.Connection, result: Dict[str, Any],
-                            observed_at: Optional[str] = None) -> int:
-    """Импортирует выгрузку коллектора ({metadata, leg1_flights, leg2_flights})."""
-    meta = result.get("metadata") or {}
-    observed_at = observed_at or meta.get("collected_at") or datetime.now().isoformat()
-    flights = (result.get("leg1_flights") or []) + (result.get("leg2_flights") or [])
-    return upsert_quotes(conn, (_flight_to_quote(f, observed_at) for f in flights))
-
-
-def import_data_dir(conn: sqlite3.Connection, data_dir: str = "data",
-                    patterns: Iterable[str] = ("flights_*.json", "mcr_*.json")) -> int:
-    """Импортирует все выгрузки коллектора из каталога data/."""
-    total = 0
-    seen = set()
-    for pat in patterns:
-        for path in sorted(glob.glob(str(Path(data_dir) / pat))):
-            if path in seen:
-                continue
-            seen.add(path)
-            try:
-                data = json.load(open(path, encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            if isinstance(data, dict) and ("leg1_flights" in data or "leg2_flights" in data):
-                total += import_collector_result(conn, data)
-    return total
-
-
 def count_quotes(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM quotes").fetchone()[0]
 
@@ -218,103 +175,11 @@ def count_ticket_series(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM ticket_cache").fetchone()[0]
 
 
-def route_has_data(conn: sqlite3.Connection, origin: str, destination: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM quotes WHERE (origin=? OR search_origin=?) "
-        "AND (destination=? OR search_destination=?) LIMIT 1",
-        (origin, origin, destination, destination),
-    ).fetchone()
-    return row is not None
-
-
-def route_coverage(conn: sqlite3.Connection, limit: int = 50) -> Dict[str, Any]:
-    """Агрегат «что уже собрано»: сколько котировок и по каким маршрутам."""
-    total = count_quotes(conn)
-    distinct = conn.execute(
-        "SELECT COUNT(*) FROM (SELECT 1 FROM quotes GROUP BY origin, destination)"
-    ).fetchone()[0]
-    rows = conn.execute(
-        "SELECT origin, destination, COUNT(*) AS quotes, "
-        "MIN(substr(departure_at,1,10)) AS dep_from, "
-        "MAX(substr(departure_at,1,10)) AS dep_to, "
-        "MAX(observed_at) AS last_observed "
-        "FROM quotes GROUP BY origin, destination ORDER BY quotes DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    return {
-        "total_quotes": total,
-        "distinct_routes": distinct,
-        "routes": [dict(r) for r in rows],
-    }
-
-
-def route_last_observed(conn: sqlite3.Connection, origin: str, destination: str) -> Optional[str]:
-    """Когда по маршруту в последний раз собирались данные (max observed_at)."""
-    row = conn.execute(
-        "SELECT MAX(observed_at) FROM quotes "
-        "WHERE (origin=? OR search_origin=?) AND (destination=? OR search_destination=?)",
-        (origin, origin, destination, destination),
-    ).fetchone()
-    return row[0] if row else None
-
-
-def coverage_gaps(conn: sqlite3.Connection, origin: str, destination: str,
-                  dates: List[str]) -> List[str]:
-    """Даты из списка, для которых нет ни одной котировки по маршруту (departure date)."""
-    gaps = []
-    for d in dates:
-        row = conn.execute(
-            "SELECT 1 FROM quotes WHERE origin=? AND destination=? "
-            "AND substr(departure_at,1,10)=? LIMIT 1",
-            (origin, destination, d),
-        ).fetchone()
-        if row is None:
-            gaps.append(d)
-    return gaps
-
-
 # ----------------------------- fetch cache -----------------------------------
 
 def _fetch_cache_key(origin: Optional[str], destination: Optional[str]) -> tuple:
     """Нормализует ключ: ANY-направление (origin/destination=None) → ''."""
     return (origin or "", destination or "")
-
-
-def fetch_cache_get(conn: sqlite3.Connection, origin: Optional[str],
-                    destination: Optional[str], search_date: str, direct: int,
-                    ttl_seconds: float) -> Optional[List[Dict[str, Any]]]:
-    """Список рейсов из кэша, если запрос свежее ttl_seconds; иначе None.
-
-    None означает «надо сходить в API» — как при промахе, так и при протухании.
-    """
-    o, d = _fetch_cache_key(origin, destination)
-    row = conn.execute(
-        "SELECT fetched_at, data_json FROM fetch_cache "
-        "WHERE origin=? AND destination=? AND search_date=? AND direct=?",
-        (o, d, search_date, direct),
-    ).fetchone()
-    if row is None:
-        return None
-    age = (datetime.now() - datetime.fromisoformat(row["fetched_at"])).total_seconds()
-    if age > ttl_seconds:
-        return None
-    return json.loads(row["data_json"])
-
-
-def fetch_cache_put(conn: sqlite3.Connection, origin: Optional[str],
-                    destination: Optional[str], search_date: str, direct: int,
-                    data: List[Dict[str, Any]]) -> None:
-    """Сохраняет ответ API по под-запросу, отметив время (для TTL)."""
-    o, d = _fetch_cache_key(origin, destination)
-    now = datetime.now().isoformat()
-    conn.execute(
-        "INSERT INTO fetch_cache (origin, destination, search_date, direct, fetched_at, data_json) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(origin, destination, search_date, direct) "
-        "DO UPDATE SET fetched_at=excluded.fetched_at, data_json=excluded.data_json",
-        (o, d, search_date, direct, now, json.dumps(data, ensure_ascii=False)),
-    )
-    conn.commit()
 
 
 def ticket_cache_get(conn: sqlite3.Connection, origin: Optional[str],

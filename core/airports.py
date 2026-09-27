@@ -8,8 +8,8 @@
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
-from core import aggregate as agg
-from core.trip_builder import flag_emoji
+from core.network import load_airport_network
+from core.segments import flag_emoji
 
 DEFAULT_NETWORK_PATH = "data/airport_network.json"
 
@@ -68,7 +68,7 @@ def _matches_word_start(text: str, ql: str) -> bool:
 
 @lru_cache(maxsize=4)
 def _network(path: str = DEFAULT_NETWORK_PATH) -> Dict[str, Dict[str, Any]]:
-    return agg.load_airport_network(path)
+    return load_airport_network(path)
 
 
 def _city_option(entry) -> Dict[str, str]:

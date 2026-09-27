@@ -1,5 +1,5 @@
 """Время на земле в сегменте: duration (весь путь) − duration_to (в воздухе)."""
-from core.trip_builder import Builder, layover_minutes
+from core.segments import Builder, layover_minutes
 
 
 def _city_info(code):
