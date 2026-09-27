@@ -159,13 +159,17 @@ def _make_cached_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None):
     return fetch
 
 
-def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: str) -> None:
-    """Котировки — в горячее хранилище SQLite + дозапись в озеро (если подключено)."""
+def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: str,
+                 lake_root: str = lake.DEFAULT_LAKE_ROOT) -> None:
+    """Котировки — в горячее хранилище SQLite + дозапись в озеро (если подключено).
+
+    lake_root — каталог озера; по умолчанию data/lake (scripts/scan_any.py может
+    писать в озеро другого checkout)."""
     rows = hot.flights_to_quotes(flights, observed_at)
     hot.upsert_quotes(conn, rows)
     if lake.available():
         try:
-            lake.append_quotes(rows, part_id=job_id)
+            lake.append_quotes(rows, root=lake_root, part_id=job_id)
         except Exception as e:  # озеро не критично для serving
             print(f"[worker] lake append failed: {e}")
 
