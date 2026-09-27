@@ -31,6 +31,28 @@ function TransferBadge({ seg }: { seg: Segment }) {
   )
 }
 
+// Багаж по билету (GraphQL). У hidden-city — «!»: чемодан зарегистрируют до конечного
+// пункта билета, в хабе его могут не выдать.
+function BaggageBadge({ seg }: { seg: Segment }) {
+  const b = seg.baggage
+  if (!b) return null
+  const text = !b.known ? '🧳 багаж ?' : b.included ? `🧳 ${b.pieces ?? 1} × ${b.kg ? `${b.kg} кг` : 'багаж'}` : '🧳 без багажа'
+  const warn = seg.hidden_city ? '!' : ''
+  const title = seg.hidden_city
+    ? 'hidden-city: багаж зарегистрируют до конечного пункта билета — в точке выхода его могут не выдать'
+    : b.known
+      ? b.included
+        ? 'зарегистрированный багаж включён в тариф'
+        : 'только ручная кладь'
+      : 'условия тарифа неизвестны'
+  return (
+    <span className={`i pl-bag ${b.included ? 'yes' : 'no'}`} title={title}>
+      {text}
+      {warn ? <b className="pl-bag-warn">{warn}</b> : null}
+    </span>
+  )
+}
+
 // Конец перелёта: код города, аэропорт (если отличается от кода города), дата и время.
 function LegPoint({
   code,
@@ -120,6 +142,7 @@ function LegRow({ seg }: { seg: Segment }) {
             <span className="i">⏳ на пересадках: {durFmt(seg.layover_minutes)}</span>
           ) : null}
           {seg.airline && <span className="i">🛩 {seg.airline}</span>}
+          <BaggageBadge seg={seg} />
         </div>
       </div>
       <LegPoint

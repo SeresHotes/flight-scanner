@@ -486,3 +486,8 @@ select:disabled{opacity:.4}
 /* Дата-пикер в карточке фильтра города — на всю ширину */
 .legpanel .drp,.legpanel .drp-trigger{width:100%}
 .pl-window-derived{font-size:12px;color:var(--muted);font-style:italic;padding:8px 4px}
+
+/* Багаж на плече (планировщик): по билету; «!» у hidden-city */
+.pl-bag.yes{color:var(--ok)}
+.pl-bag.no{color:var(--muted,#8b949e)}
+.pl-bag-warn{margin-left:3px;color:var(--warn);font-weight:800}

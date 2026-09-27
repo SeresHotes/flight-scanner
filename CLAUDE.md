@@ -27,6 +27,16 @@
 - Инфраструктура прод-деплоя (Terraform + cloud-init + registry) — `infra/terraform/`.
 - Фронтенд: Vite + React + TS (`frontend/`). Новая страница-планировщик — `frontend/src/planner/`.
 
+## Планировщик v2 (docs/PLANNER_V2.md)
+
+Единый запрос `core/planquery.PlanQuery` (скелет + фильтры городов/плеч/длины
+поездки, `maxCost`, `maxResults`): `POST /api/plan/run` → джоба (дедуп по хэшу
+запроса, TTL сутки), `GET /api/plan/jobs/{id}` — прогресс, `…/routes?offset&limit&combos=`
+— страница маршрутов (полные сегменты: багаж, пересадки, hidden-city). Фильтры
+плеча применяются до перебора, городов — внутри A*, длина поездки — при выдаче.
+Старый `POST /api/plan/gather` = тот же запуск с открытыми фильтрами. Наборы
+городов на бэке и новый поток страниц — следующие шаги плана.
+
 ## GraphQL Data API (`core/graphql_api.py`)
 
 `prices_one_way` — все билеты на дату с сегментами, пересадками и багажом

@@ -548,7 +548,8 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
                       city_info=None, max_results: Optional[int] = None,
                       max_cost: Optional[float] = None,
                       should_stop: Optional[Callable[[], bool]] = None,
-                      on_progress: Optional[Callable[[int, int], None]] = None) -> List[Dict[str, Any]]:
+                      on_progress: Optional[Callable[[int, int], None]] = None,
+                      query: Optional["PlanQuery"] = None) -> List[Dict[str, Any]]:
     """Собирает цепочки из собранных плеч. Чистая функция (без I/O).
 
     max_results — движковый потолок: сколько САМЫХ ДЕШЁВЫХ цепочек вернуть. Это НЕ
@@ -562,14 +563,14 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
     воркер останавливает зависшую стыковку — поток Python снаружи не убить).
     on_progress(found, explored) — тоже на каждом шаге: сколько цепочек уже готово
     и сколько вариантов перебрано (для прогресса в UI; частоту записи режет вызывающий)."""
-    ctx = _build_ctx(stops, collected, city_info)
+    ctx = _build_ctx(stops, _apply_leg_filters(collected, query), city_info)
     check = _step_check(should_stop, on_progress)
 
     if max_results is None:
         return _enumerate_all(ctx, max_cost, check)
     table = _FlightTable(ctx[1])
     stops, _, builder, city_info, chain_start, _ = ctx
-    chains = _search_cheapest(ctx, table, max_results, max_cost, check)
+    chains = _search_cheapest(ctx, table, max_results, max_cost, check, query)
     return [_assemble(stops, [table.flights[fi] for fi in chain], builder, city_info, chain_start, n + 1)
             for n, chain in enumerate(chains)]
 
@@ -578,19 +579,48 @@ def build_itineraries_compact(stops: List[Stop], collected: Dict[int, List[Dict[
                               max_results: int, city_info=None,
                               max_cost: Optional[float] = None,
                               should_stop: Optional[Callable[[], bool]] = None,
-                              on_progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+                              on_progress: Optional[Callable[[int, int], None]] = None,
+                              query: Optional["PlanQuery"] = None) -> Dict[str, Any]:
     """То же, что build_itineraries с потолком, но результат компактный (_pack_compact).
 
     Рассчитан на сотни тысяч – миллион цепочек на VM с 4 ГБ: цепочка в памяти — это
     несколько int-индексов рейсов в плоском array, а не словарь с копиями сегментов
-    (100k словарей Itinerary + их JSON стоили гигабайты и роняли api по OOM)."""
-    ctx = _build_ctx(stops, collected, city_info)
+    (100k словарей Itinerary + их JSON стоили гигабайты и роняли api по OOM).
+
+    query (core/planquery.PlanQuery) — фильтры: плеча — к рейсам до перебора,
+    городов (дни, окно, выходные) — внутри перебора, длины поездки — при выдаче."""
+    ctx = _build_ctx(stops, _apply_leg_filters(collected, query), city_info)
     check = _step_check(should_stop, on_progress)
     table = _FlightTable(ctx[1])
     chains = array("i")
-    for chain in _search_cheapest(ctx, table, max_results, max_cost, check):
+    for chain in _search_cheapest(ctx, table, max_results, max_cost, check, query):
         chains.extend(chain)
     return _pack_compact(ctx, table, chains, len(stops) - 1)
+
+
+def _apply_leg_filters(collected: Dict[int, List[Dict[str, Any]]],
+                       query: Optional["PlanQuery"]) -> Dict[int, List[Dict[str, Any]]]:
+    """Фильтры плеча (пересадки, ожидание, длительность, багаж, hidden-city) — к рейсам
+    до построения: таблица рейсов сразу меньше, перебор не видит лишнего."""
+    if query is None:
+        return collected
+    from core.planquery import filter_leg_flights
+    return {i: filter_leg_flights(flights, query.legs[i] if i < len(query.legs) else None)
+            for i, flights in collected.items()}
+
+
+def _stay_ok(cf, arrive_iso: str, depart_iso: str) -> bool:
+    """Фильтр пребывания в промежуточном городе (core/planquery.CityFilter): дни между
+    прилётом и вылетом (та же _stay, что и в результате), обязательное окно, выходные."""
+    days, weekend = _stay(arrive_iso, depart_iso)
+    if days < cf.min_stay or (cf.max_stay is not None and days > cf.max_stay):
+        return False
+    if cf.must_cover and not (date_only(arrive_iso) <= cf.must_cover[0]
+                              and date_only(depart_iso) >= cf.must_cover[1]):
+        return False
+    if cf.require_weekend and not weekend:
+        return False
+    return True
 
 
 def _build_ctx(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]], city_info):
@@ -673,14 +703,14 @@ class _FlightTable:
         self.dest = [(f.get("destination") or f.get("search_destination") or "").upper()
                      for f in self.flights]
         self.price = [_price_of(f) for f in self.flights]
-        self.dep_day = [date_only(f["departure_at"]) if f.get("departure_at") else None
-                        for f in self.flights]
-        self.arr_day = [date_only(arrival_of(f)) if f.get("departure_at") else None
-                        for f in self.flights]
+        self.dep_iso = [f.get("departure_at") for f in self.flights]
+        self.arr_iso = [arrival_of(f) if f.get("departure_at") else None for f in self.flights]
+        self.dep_day = [date_only(d) if d else None for d in self.dep_iso]
+        self.arr_day = [date_only(a) if a else None for a in self.arr_iso]
 
 
 def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optional[float],
-                     check: Callable[[int], None]):
+                     check: Callable[[int], None], query: Optional["PlanQuery"] = None):
     """best-first (A*): выдаёт цепочки (кортежи индексов рейсов в table) по
     возрастанию цены и останавливается на N.
 
@@ -700,13 +730,21 @@ def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optio
     cands = _Candidates(stops, legs_by_origin, table, lb)
     heap: List[Any] = []
     seq = 0  # tie-breaker: не даём heapq сравнивать узлы
+    # Фильтры городов действуют у промежуточных остановок (1..last-1): пребывание —
+    # между прилётом узла и вылетом кандидата. Длина поездки — при выдаче.
+    city_filters = {i: query.cities[i] for i in range(1, last)
+                    if query is not None and i < len(query.cities) and not query.cities[i].is_open()}
+    trip_length = query.trip_length if query is not None else None
+    if trip_length is not None and not (trip_length[0] or trip_length[1] is not None):
+        trip_length = None
 
     def push_next(node, start: int) -> None:
         """Кладёт в кучу первого валидного ребёнка узла, начиная с позиции start."""
         nonlocal seq
-        i, city, arrive_day, visited, g, _ = node
+        i, city, arrive_day, visited, g, _, arrive_iso = node
         keys, idxs = cands.get(i, city)
         any_next = stops[i + 1].kind == "any"
+        cf = city_filters.get(i)
         for k in range(start, len(idxs)):
             f = g + keys[k]
             if max_cost is not None and f > max_cost:  # список отсортирован — дальше дороже
@@ -716,30 +754,40 @@ def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optio
                 continue
             if any_next and table.dest[fi] in visited:  # «любой» — не в уже посещённый
                 continue
+            if cf is not None and not _stay_ok(cf, arrive_iso, table.dep_iso[fi]):
+                continue
             heapq.heappush(heap, (f, seq, node, k))
             seq += 1
             return
 
     start_day = chain_start  # прилёт в первый город — начало окна (T00:00)
+    start_iso = f"{chain_start}T00:00:00"
     for start in stops[0].codes:
         tail = lb[0].get(start)
         if tail is None or (max_cost is not None and tail > max_cost):
             continue
-        push_next((0, start, start_day, (start,), 0.0, None), 0)
+        push_next((0, start, start_day, (start,), 0.0, None, start_iso), 0)
 
     found = 0
     while heap and found < max_results:
         check(found)
         _, _, node, k = heapq.heappop(heap)
         push_next(node, k + 1)  # брат занимает место извлечённого
-        i, city, _, visited, g, path = node
+        i, city, _, visited, g, path, _ = node
         fi = cands.get(i, city)[1][k]
         if i + 1 == last:  # цепочка готова — и она среди самых дешёвых из оставшихся
+            chain = _unwind((path, fi))
+            if trip_length is not None:
+                from core.planquery import trip_length_ok
+                days = max(1, stay_between(table.dep_day[chain[0]], table.arr_day[chain[-1]]))
+                if not trip_length_ok(days, trip_length):
+                    continue
             found += 1
-            yield _unwind((path, fi))
+            yield chain
             continue
         dest = table.dest[fi]
-        push_next((i + 1, dest, table.arr_day[fi], visited + (dest,), g + table.price[fi], (path, fi)), 0)
+        push_next((i + 1, dest, table.arr_day[fi], visited + (dest,), g + table.price[fi], (path, fi),
+                   table.arr_iso[fi]), 0)
 
 
 class _Candidates:
@@ -990,3 +1038,77 @@ def _assemble(stops: List[Stop], chosen: List[Dict[str, Any]], builder: "Builder
         "total_transfers": total_transfers,
         "travel_minutes": travel_minutes,
     }
+
+
+# ------------------------ материализация страницы результата ------------------
+
+def chain_codes(result: Dict[str, Any], n: int) -> List[str]:
+    """Коды городов цепочки n компактного результата: старт + прилёты всех плеч."""
+    legs, chains, segs = result["legs"], result["chains"], result["segments"]
+    base = n * legs
+    return [segs[chains[base]]["origin"]] + [segs[chains[base + k]]["destination"] for k in range(legs)]
+
+
+def combo_key(codes: List[str]) -> str:
+    return "-".join(codes)
+
+
+def materialize(result: Dict[str, Any], n: int) -> Dict[str, Any]:
+    """Itinerary цепочки n из компактного результата (зеркало compact.ts.materialize):
+    остановки с прилётом/вылетом/днями/выходными, сегменты, суммы."""
+    legs, chains, segs = result["legs"], result["chains"], result["segments"]
+    stop_count = legs + 1
+    segments = [segs[chains[n * legs + k]] for k in range(legs)]
+    cities = result.get("cities") or {}
+    any_stops = result.get("any_stops") or [False] * stop_count
+    stops = []
+    for k in range(stop_count):
+        code = segments[0]["origin"] if k == 0 else segments[k - 1]["destination"]
+        arrive = result["chain_start"] if k == 0 else segments[k - 1]["arrival_at"]
+        if k < legs:
+            depart = segments[k]["departure_at"]
+        else:
+            depart = f"{_shift(date_only(arrive), result.get('final_stay_days', FINAL_STAY_DAYS))}T00:00:00"
+        info = cities.get(code) or [code, ""]
+        stops.append({
+            "code": code, "city": info[0], "flag": info[1],
+            "arrive": arrive, "depart": depart,
+            "days": result["days"][n * stop_count + k],
+            "weekendCovered": bool((result["weekend"][n] >> k) & 1),
+            "resolvedFromAny": bool(any_stops[k]),
+        })
+    return {
+        "id": n + 1,
+        "stops": stops,
+        "segments": segments,
+        "total_price": sum(s.get("price") or 0 for s in segments),
+        "total_days": result["total_days"][n],
+        "total_transfers": sum(s.get("transfers") or 0 for s in segments),
+        "travel_minutes": sum(s.get("duration") or 0 for s in segments),
+    }
+
+
+def combo_index(result: Dict[str, Any]) -> Dict[str, List[int]]:
+    """Набор городов → индексы цепочек (в порядке цены). Один проход по результату;
+    вызывающий кэширует вместе с разобранным результатом."""
+    out: Dict[str, List[int]] = {}
+    for n in range(result["count"]):
+        out.setdefault(combo_key(chain_codes(result, n)), []).append(n)
+    return out
+
+
+def routes_page(result: Dict[str, Any], offset: int, limit: int,
+                combos: Optional[List[str]] = None,
+                index: Optional[Dict[str, List[int]]] = None) -> Dict[str, Any]:
+    """Страница маршрутов: цепочки по возрастанию цены, при combos — только из
+    перечисленных наборов (ключ combo_key), слитые по цене. index — combo_index."""
+    if combos:
+        index = index if index is not None else combo_index(result)
+        picked: List[int] = sorted(n for c in combos for n in index.get(c, []))
+        total = len(picked)
+        page = picked[offset:offset + limit]
+    else:
+        total = result["count"]
+        page = list(range(offset, min(total, offset + limit)))
+    return {"total": total, "offset": offset, "limit": limit,
+            "items": [materialize(result, n) for n in page]}
