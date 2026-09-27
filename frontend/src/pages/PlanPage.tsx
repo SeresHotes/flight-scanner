@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import type { AirportOption } from '../data/airports'
 import { estimatePlan } from '../planner/estimate'
 import { runPlan } from '../planner/api'
@@ -37,6 +37,7 @@ function initialQuery(): PlanQuery {
 // «любой» или несколько городов) или сразу на страницу маршрутов.
 export function PlanPage() {
   const navigate = useNavigate()
+  const [, setSearchParams] = useSearchParams()
   const [fromUrl, setFromUrl] = useQueryFromUrl()
   const [local, setLocal] = useState<PlanQuery | null>(null)
   const query = local ?? fromUrl ?? initialQuery()
@@ -47,6 +48,14 @@ export function PlanPage() {
   const [recent, setRecent] = useState<RecentSearch[]>(() => loadRecent())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Запрос целиком живёт в URL: любая правка остановок, дат и условий сразу
+  // отражается в адресной строке (replace — без засорения истории), так что
+  // ссылку можно сохранить/переслать и открыть с теми же фильтрами.
+  const encoded = encodeQuery(query).toString()
+  useEffect(() => {
+    setSearchParams(new URLSearchParams(encoded), { replace: true })
+  }, [encoded, setSearchParams])
 
   const estimate = useMemo(() => estimatePlan(query.stops), [query.stops])
   const validation = useMemo(() => validatePlan(query.stops), [query.stops])
