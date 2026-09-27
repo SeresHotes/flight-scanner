@@ -1,10 +1,11 @@
-import { useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { runPlan } from '../api'
 import { encodeQuery, fitFilters, queryMode, routeSummary, type PlanQuery } from '../query'
 import type { PlanJobState } from '../usePlanJob'
 import { CollectProgress } from './CollectProgress'
-import { QueryFilters } from './QueryFilters'
+import { QueryEditor } from './QueryEditor'
+import { validatePlan } from '../validation'
 
 // Обвязка страниц результата: подпись запроса, «изменить», сворачиваемые фильтры
 // (правка → новый сбор → переход на новую джобу), прогресс, ошибка, затем контент.
@@ -27,9 +28,10 @@ export function JobShell({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const changed = encodeQuery(draft).toString() !== encodeQuery(query).toString()
+  const validation = useMemo(() => validatePlan(draft.stops), [draft.stops])
 
   async function apply() {
-    if (busy) return
+    if (busy || !validation.ok) return
     setBusy(true)
     setError(null)
     try {
@@ -61,17 +63,17 @@ export function JobShell({
           ← изменить маршрут
         </Link>
         <button type="button" className="btn-ghost" onClick={() => setOpen(!open)}>
-          {open ? 'Скрыть фильтры' : '⚙ Фильтры'}
+          {open ? 'Скрыть запрос' : '⚙ Маршрут и условия'}
         </button>
         {open && (
-          <button type="button" className="btn-primary" disabled={!changed || busy} onClick={apply}>
+          <button type="button" className="btn-primary" disabled={!changed || busy || !validation.ok} onClick={apply}>
             {busy ? 'Запускаем…' : 'Применить →'}
           </button>
         )}
       </div>
       {open && (
         <div className="searchform">
-          <QueryFilters query={draft} onChange={setDraft} />
+          <QueryEditor query={draft} validation={validation} onChange={setDraft} />
         </div>
       )}
       {error && (

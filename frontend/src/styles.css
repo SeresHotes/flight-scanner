@@ -502,3 +502,17 @@ select:disabled{opacity:.4}
 .pl-combo-check input{width:18px;height:18px;accent-color:var(--accent)}
 .pl-combo.on{border-color:var(--accent)}
 .pl-bounds .pl-limit-row{display:block}
+
+/* Единый редактор запроса: карточка остановки = строка городов/дат + строка пребывания */
+.pl-editor{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+.pl-editor .pl-add{margin-top:2px;align-self:flex-start}
+.pl-stopcard{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.pl-stopcard.invalid{border-color:rgba(229,72,77,.55)}
+.pl-stopcard .pl-stoprow{background:transparent;border:0;padding:0;border-radius:0}
+.pl-stayrow{display:grid;grid-template-columns:30px 130px minmax(0,1.2fr) minmax(0,1fr);gap:6px 12px;
+  align-items:center;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+.pl-stayrow .pl-fname{font-weight:600;color:var(--muted);font-size:12.5px}
+@media(max-width:760px){
+  .pl-stayrow{grid-template-columns:28px minmax(0,1fr)}
+  .pl-stayrow>.pl-fcell{grid-column:1/-1}
+}
