@@ -1,44 +1,27 @@
-// Контракт нового планировщика цепочек A → B → C → … (пока на моках).
-// Backend реализует ровно эти формы позже: POST /api/plan/estimate, /api/plan/gather.
+// Контракт планировщика v2 (docs/PLANNER_V2.md). Запрос — planner/query.ts,
+// ответы бэка — planner/api.ts.
 
 import type { AirportOption } from '../data/airports'
-import type { JobStage } from '../data/jobsApi'
 import type { Segment } from '../types'
-import type { ItinerarySet } from './compact'
 
 export type StopKind = 'cities' | 'any'
 
-// Одна остановка маршрута: набор городов-кандидатов (kind==='cities', ≥1 — движок
-// переберёт по одному) или «любой город» (kind==='any', wildcard).
-// window — диапазон «в какие даты нам ОК быть в этом городе». Задаётся только для
-// ПРОМЕЖУТОЧНЫХ остановок; у первого и последнего города даты выводятся из соседних,
-// поэтому у концов window = ['', ''].
+// Одна остановка маршрута: набор городов-кандидатов (kind==='cities', ≥1) или
+// «любой город» (kind==='any', только в середине). window — «в какие даты нам ОК
+// быть в этом городе»; у первого и последнего города дат нет (выводятся из соседних).
 export interface PlannerStop {
   id: string
   kind: StopKind
-  airports: AirportOption[] // кандидаты для kind==='cities' (для 'any' — пусто)
-  window: [string, string] // [start, end] (YYYY-MM-DD); ['',''] у концов
+  airports: AirportOption[]
+  window: [string, string]
 }
 
-export interface PlannerRequest {
-  stops: PlannerStop[]
-}
-
-// Движковые границы стыковки цепочек — уходят на бэк в /api/plan/gather и режут
-// перебор там (а не только показ). maxResults — сколько самых дешёвых цепочек
-// вернуть; maxCost — верхняя граница суммарной цены (null — без ограничения).
-export interface PlannerBounds {
-  maxResults: number
-  maxCost: number | null
-}
-
-// Оценка объёма сбора: одно «плечо» на каждый переход между остановками.
-// Плечо с wildcard-концом собирается как «все направления» (тоже 1 запрос/дата).
+// Оценка объёма сбора: страниц GraphQL по переходам (planner/estimate.ts).
 export interface EstimateLeg {
   fromLabel: string
   toLabel: string
   days: number
-  requests: number // per-date: «якорных» запросов/день (all-directions) × дни
+  requests: number
   anyLeg: boolean
 }
 
@@ -48,77 +31,25 @@ export interface PlannerEstimate {
   legs: EstimateLeg[]
 }
 
-// --- Фильтры (появляются после сбора) ---
-
-export interface CityFilter {
-  minStay: number
-  maxStay: number
-  mustCover: [string, string] | null // окно, которое город обязан покрыть целиком
-  requireWeekend: boolean // должны быть оба выходных (сб + вс)
-  allowedCodes: string[] | null // разрешённые города (IATA); null — любые из собранных
-}
-
-export interface TransitionFilter {
-  maxTransfers: number // 0 — только прямые, N — до N пересадок, -1 — любое
-  minTravelMinutes: number // нижняя граница суммарной длительности перелёта
-  maxTravelMinutes: number // верхняя граница суммарной длительности перелёта
-}
-
-export interface PlannerFilters {
-  cities: CityFilter[] // длина == числу остановок
-  transitions: TransitionFilter[] // длина == числу переходов (stops - 1)
-  tripLength: [number, number] // общая длина поездки, дни
-}
-
-// --- Результат: построенная цепочка ---
+// --- Результат: построенная цепочка (GET /api/plan/jobs/{id}/routes) ---
 
 export interface ItineraryStop {
   code: string
   city: string
   flag?: string
-  arrive: string // ISO прилёта в город
-  depart: string // ISO вылета из города дальше
-  days: number // сколько дней в городе
-  weekendCovered: boolean // попадают ли оба выходных в пребывание
-  resolvedFromAny: boolean // город подобран под wildcard-остановку
+  arrive: string
+  depart: string
+  days: number
+  weekendCovered: boolean
+  resolvedFromAny: boolean
 }
 
 export interface Itinerary {
   id: number
   stops: ItineraryStop[]
-  segments: Segment[] // stops.length - 1 сегментов (переиспользуем общий контракт)
+  segments: Segment[]
   total_price: number
   total_days: number
   total_transfers: number
   travel_minutes: number
 }
-
-// --- Граф рёбер для режима «наборы городов» (core/planner.overview_graph) ---
-
-// Один собранный рейс перехода. from/to — коды городов, dep/arr — время без TZ.
-export interface GraphEdge {
-  from: string
-  to: string
-  dep: string
-  arr: string
-  price: number
-  transfers: number
-  duration: number
-}
-
-export interface PlanGraph {
-  chain_start: string // YYYY-MM-DD — «прилёт» в стартовый город
-  final_stay_days: number // пребывание в финальном городе (у конца окна нет)
-  starts: string[]
-  any: boolean[] // по остановкам: «любой город» (повторы городов там запрещены)
-  legs: GraphEdge[][] // рёбра по переходам
-  cities: Record<string, { city: string; flag?: string }>
-}
-
-// Состояние сбора данных под текущий маршрут.
-export type CollectState =
-  | { status: 'idle' }
-  | { status: 'collecting'; progress: number; total: number; stage?: JobStage | null }
-  // collectedAt — ISO момента сбора; graph — null у данных, собранных до режима обзора
-  | { status: 'ready'; set: ItinerarySet; graph: PlanGraph | null; collectedAt: string }
-  | { status: 'error'; message: string }

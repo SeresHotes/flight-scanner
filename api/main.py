@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
@@ -610,23 +609,25 @@ def plan_job_routes(job_id: str, offset: int = 0, limit: int = 50,
 
 
 @app.get("/api/plan/jobs/{job_id}")
-def plan_job_status(job_id: str) -> Response:
-    """Прогресс джобы; по завершении — компактный результат (result, см.
-    planner._pack_compact) с графом рёбер для режима «наборы городов» (result.graph).
-
-    Результат на сотни тысяч цепочек весит десятки МБ, поэтому вклеиваем сохранённый
-    JSON как есть: json.loads + сериализация FastAPI держали бы в памяти ещё пару копий."""
+def plan_job_status(job_id: str) -> Dict[str, Any]:
+    """Прогресс джобы; по завершении — сводка (summary: цепочек, наборов, всего
+    вариантов). Сами данные — страницами: …/combos и …/routes."""
     job = hot.get_job(_conn, job_id)
     if not job:
-        return JSONResponse({"status": "not_found"})
-    meta = json.dumps({
+        return {"status": "not_found"}
+    out: Dict[str, Any] = {
         "status": job["status"],
         "progress": job["progress"],
         "total": job["total"],
         "error": job["error"],
         "stage": _job_stage(job),
-    }, ensure_ascii=False)
-    if job["status"] != "done" or not job["result_json"]:
-        return Response(meta, media_type="application/json")
-    body = meta[:-1] + ',"result":' + job["result_json"] + "}"
-    return Response(body, media_type="application/json")
+    }
+    if job["status"] == "done":
+        entry = _plan_result(job_id)
+        if entry is not None:
+            res = entry["result"]
+            combos = res.get("combos") or {}
+            out["summary"] = {"count": res.get("count", 0),
+                              "combos": len(combos.get("combos") or []),
+                              "totalCount": combos.get("totalCount", 0)}
+    return out

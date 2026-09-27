@@ -1,18 +1,16 @@
 import { dayW } from '../../lib/format'
+import { TRIP_MAX } from '../query'
 import { RangeSlider } from './RangeSlider'
 
-// Общий фильтр одной строкой: длина всей поездки, дни (диапазон).
+// Общий фильтр одной строкой: длина всей поездки, дни (диапазон; верх = без потолка).
 export function TripLengthFilter({
   value,
-  bounds,
   onChange,
 }: {
-  value: [number, number]
-  bounds: [number, number]
-  onChange: (value: [number, number]) => void
+  value: [number, number | null]
+  onChange: (value: [number, number | null]) => void
 }) {
   const [lo, hi] = value
-  const [minB, maxB] = bounds
   return (
     <div className="pl-frow pl-triplen">
       <div className="pl-ficon">🧳</div>
@@ -20,9 +18,17 @@ export function TripLengthFilter({
       <div className="pl-fcell" />
       <div className="pl-fcell">
         <div className="pl-flabel">
-          Длина: <span className="rangeval">{lo}–{hi} {dayW(hi)}</span>
+          Длина:{' '}
+          <span className="rangeval">
+            {lo}–{hi === null ? '∞' : `${hi} ${dayW(hi)}`}
+          </span>
         </div>
-        <RangeSlider min={minB} max={maxB} value={value} onChange={onChange} />
+        <RangeSlider
+          min={0}
+          max={TRIP_MAX}
+          value={[lo, hi ?? TRIP_MAX]}
+          onChange={([l, h]) => onChange([l, h >= TRIP_MAX ? null : h])}
+        />
       </div>
     </div>
   )
