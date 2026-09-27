@@ -180,12 +180,12 @@ def _start_plan_job(query: PlanQuery) -> Dict[str, Any]:
     if len(stops) < 2:
         return {"status": "invalid", "message": "Нужно минимум две остановки."}
 
-    # max_results обязателен: без него движок ушёл бы в безлимитный перебор (сотни
-    # тысяч цепочек → сотни МБ → зависание/почти-OOM). None шлёт устаревший
-    # закешированный фронт или прямой вызов API — отклоняем, а не молча ограничиваем.
+    # Лимит цепочек — внутренний: фронт его не задаёт, джоба строит DEFAULT_MAX_RESULTS
+    # самых дешёвых; маршруты выбранных наборов городов строятся отдельно по требованию.
+    if query.max_results is None:
+        query.max_results = planner.DEFAULT_MAX_RESULTS
     if not planner.is_valid_max_results(query.max_results):
-        return {"status": "invalid",
-                "message": "Не задан лимит числа маршрутов. Обновите страницу (Ctrl/Cmd+Shift+R) — клиент устарел."}
+        return {"status": "invalid", "message": f"Лимит маршрутов вне диапазона 1…{planner.MAX_RESULTS}."}
 
     est = _estimate(query)
     if est["requests"] == 0:
@@ -297,10 +297,36 @@ def plan_job_routes(job_id: str, offset: int = 0, limit: int = 50,
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     wanted = [c.strip().upper() for c in combos.split(",") if c.strip()] if combos else None
-    if wanted and entry["index"] is None:
-        entry["index"] = planner.combo_index(entry["result"])
-    page = planner.routes_page(entry["result"], offset, limit, wanted, entry["index"])
-    return {"status": "ok", "count": entry["result"]["count"], **page}
+    if not wanted:
+        page = planner.routes_page(entry["result"], offset, limit)
+        return {"status": "ok", "count": entry["result"]["count"], **page}
+    items = _combo_routes(job_id, entry, wanted)
+    if items is None:
+        return {"status": "not_ready"}
+    return {"status": "ok", "count": len(items), "total": len(items), "offset": offset, "limit": limit,
+            "items": items[offset:offset + limit]}
+
+
+def _combo_routes(job_id: str, entry: Dict[str, Any], wanted: List[str]) -> Optional[List[Dict[str, Any]]]:
+    """Маршруты выбранных наборов — по требованию из сохранённых рейсов джобы
+    (planner.build_combo_routes), кэш по набору ключей внутри записи результата."""
+    key = ",".join(sorted(set(wanted)))
+    cache = entry.setdefault("combo_routes", {})
+    if key in cache:
+        return cache[key]
+    job = hot.get_job(_conn, job_id)
+    collected = hot.get_plan_flights(_conn, job_id)
+    if not job or collected is None:
+        return None
+    params = json.loads(job["params_json"] or "{}")
+    query = PlanQuery.from_dict(params)
+    stops = planner.parse_stops(query.stops)
+    combos = [c.split("-") for c in sorted(set(wanted))]
+    items = planner.build_combo_routes(stops, collected, combos, query=query)
+    if len(cache) >= 8:
+        cache.pop(next(iter(cache)))
+    cache[key] = items
+    return items
 
 
 @app.get("/api/plan/jobs/{job_id}")
