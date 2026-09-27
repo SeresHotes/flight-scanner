@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from core import airports as airports_mod
 from core import planner
+from core import transfer_graph
 from core.routes import get_route_config, get_route_keys
 from core.trip_builder import build_from_config
 from storage import hot
@@ -101,6 +102,50 @@ def _startup() -> None:
 def health() -> Dict[str, Any]:
     quotes = hot.count_quotes(_conn) if _conn else 0
     return {"status": "ok", "quotes": quotes, "cached_routes": len(_payload_cache)}
+
+
+# ---------------------------- граф пересадок ---------------------------------
+
+# Граф строится из quotes за доли секунды, но не на каждый запрос: держим в памяти
+# и перестраиваем не чаще GRAPH_TTL_SECONDS (сбор дописывает quotes постепенно).
+GRAPH_TTL_SECONDS = 300
+_graph_cache: Dict[str, Any] = {"graph": None, "built_at": 0.0}
+_graph_lock = threading.Lock()
+
+
+def _graph() -> transfer_graph.TransferGraph:
+    import time
+    with _graph_lock:
+        now = time.monotonic()
+        if _graph_cache["graph"] is None or now - _graph_cache["built_at"] > GRAPH_TTL_SECONDS:
+            from core import aggregate as agg
+            network = agg.load_airport_network() if Path("data/airport_network.json").exists() else {}
+            _graph_cache["graph"] = transfer_graph.build_from_db(_conn, network)
+            _graph_cache["built_at"] = now
+        return _graph_cache["graph"]
+
+
+@app.get("/api/graph/hidden-city")
+def graph_hidden_city(origin: str, via: str, same_day: bool = False, limit: int = 50) -> Dict[str, Any]:
+    """Hidden-city: билеты origin→…→via→…→X дешевле прямого origin→via (выходим в via)."""
+    res = _graph().hidden_city(origin, via, same_day_only=same_day)
+    res["total"] = len(res["tickets"])
+    res["tickets"] = res["tickets"][:limit]
+    return res
+
+
+@app.get("/api/graph/transfers")
+def graph_transfers(origin: str, destination: str, limit: int = 50) -> Dict[str, Any]:
+    """Наблюдённые пересадки по направлению origin→destination."""
+    res = _graph().transfers_for(origin, destination)
+    res["total"] = len(res["via"])
+    res["via"] = res["via"][:limit]
+    return res
+
+
+@app.get("/api/graph/stats")
+def graph_stats() -> Dict[str, Any]:
+    return _graph().stats()
 
 
 # -------------------------------- airports -----------------------------------
