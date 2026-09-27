@@ -63,19 +63,22 @@ function LegPoint({
 }
 
 // Точки пересадок на линии перелёта. Если города не распарсились из ссылки —
-// рисуем столько же безымянных точек. Ожидание источник отдаёт только суммой по
-// всем пересадкам, поэтому под точкой оно — лишь когда пересадка одна.
+// рисуем столько же безымянных точек. Ожидание по каждой пересадке есть у данных
+// GraphQL (p.minutes); у старых данных — только сумма, показываем её при одной пересадке.
 function TransferDots({ seg }: { seg: Segment }) {
   const n = seg.transfers || 0
   if (!n) return null
   const pts = seg.transfer_points || []
   const known = pts.length === n
-  const wait = n === 1 && seg.layover_minutes ? durFmt(seg.layover_minutes) : null
+  const totalWait = n === 1 && seg.layover_minutes ? durFmt(seg.layover_minutes) : null
   return (
     <div className="pl-dots">
       {Array.from({ length: n }, (_, i) => {
         const p = known ? pts[i] : null
-        const title = (p ? `${p.city} (${p.code})` : 'город — на Aviasales') + (wait ? `, ожидание ${wait}` : '')
+        const wait = p?.minutes ? durFmt(p.minutes) : totalWait
+        const flags = p ? `${p.night ? ', ночная' : ''}${p.visa ? ', нужна виза' : ''}` : ''
+        const title =
+          (p ? `${p.city} (${p.code})` : 'город — на Aviasales') + (wait ? `, ожидание ${wait}` : '') + flags
         return (
           <div key={i} className="pl-dot" title={title}>
             <span className="pl-dot-code">{p ? p.code : '?'}</span>

@@ -136,13 +136,17 @@ class Builder:
             "duration": flight.get("duration"),
             "transfers": transfers,
             "direct": transfers == 0,
-            "transfer_points": self._transfer_points(flight.get("link"), transfers),
+            "transfer_points": self._points_from_flight(flight)
+            if flight.get("transfer_points") is not None
+            else self._transfer_points(flight.get("link"), transfers),
             "layover_minutes": layover_minutes(flight, transfers),
             "airline": flight.get("airline"),
             "flight_number": flight.get("flight_number"),
             "price": flight.get("price") or flight.get("value", 0),
             "link": booking_link(origin, dest, dep) if dep else None,
         }
+        if flight.get("baggage") is not None:      # GraphQL: багаж явным полем
+            segment["baggage"] = flight["baggage"]
         hidden = flight.get("hidden_city")
         if hidden:
             # Виртуальный рейс hidden-city (core.planner.hidden_city_flights): покупать
@@ -152,6 +156,15 @@ class Builder:
                 **hidden, "final_city": self.city_info(hidden.get("final") or "")["city"]}
             segment["link"] = booking_url(flight.get("link")) or segment["link"]
         return segment
+
+    def _points_from_flight(self, flight: dict) -> list:
+        """Пересадки нормализованного билета GraphQL (core/graphql_api): код, город,
+        минуты ожидания, ночная, виза. Пустой список у прямого рейса."""
+        return [{
+            "code": p.get("code"), "city": self.city_info(p.get("code") or "")["city"],
+            "minutes": p.get("minutes"), "night": bool(p.get("night")),
+            "visa": bool(p.get("visa")), "country": p.get("country"),
+        } for p in flight.get("transfer_points") or []]
 
     def _transfer_points(self, link: str, transfers: int) -> list:
         """Города пересадок внутри билета — парсятся из токена ссылки Aviasales

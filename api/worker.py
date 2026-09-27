@@ -283,8 +283,9 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         rep.stage("fetch", status="running", total=total, progress=0)
 
         collected = planner.collect_plan(stops, progress_cb=rep.tick,
-                                         fetch_fn=_make_cached_fetch(conn, rep.cache_hit),
-                                         leg_cb=rep.step, network=network)
+                                         fetch_fn=make_cached_ticket_fetch(conn, rep.cache_hit),
+                                         leg_cb=rep.step, max_cost=max_cost,
+                                         airport_city=hot.airport_city_map(conn))
         rep.flights(sum(len(v) for v in collected.values()))
         rep.stage("build")
 
@@ -311,9 +312,10 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         # Котировки планировщику не нужны (результат — result_json, повторы — fetch_cache),
         # они копят статистику /api/routes и историю цен в озере. Поэтому пишем их уже
         # после done, чтобы пользователь не ждал, и сбой тут не портит готовую джобу.
+        # Виртуальные рейсы hidden-city — не котировки (такого билета A→B нет), их не пишем.
         flights: List[Dict[str, Any]] = []
         for leg_flights in collected.values():
-            flights += leg_flights
+            flights += [f for f in leg_flights if not f.get("hidden_city")]
         try:
             _save_quotes(conn, flights, datetime.now().isoformat(), job_id)
         except Exception as e:

@@ -195,6 +195,22 @@ def count_quotes(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM quotes").fetchone()[0]
 
 
+def airport_city_map(conn: sqlite3.Connection) -> Dict[str, str]:
+    """Аэропорт → код города по всем накопленным котировкам (PEK → BJS, ICN → SEL).
+
+    Нужен планировщику, чтобы узнать хаб hidden-city в остановке, заданной кодом
+    города, даже если в текущем сборе билетов в этот аэропорт не было."""
+    out: Dict[str, str] = {}
+    for apt_col, city_col in (("origin_airport", "origin"), ("dest_airport", "destination")):
+        rows = conn.execute(
+            f"SELECT DISTINCT {apt_col}, {city_col} FROM quotes "
+            f"WHERE {apt_col} IS NOT NULL AND {city_col} IS NOT NULL")
+        for apt, city in rows:
+            if apt and city:
+                out.setdefault(apt.upper(), city.upper())
+    return out
+
+
 def count_ticket_series(conn: sqlite3.Connection) -> int:
     """Сколько серий GraphQL лежит в ticket_cache (health / проверка деплоя)."""
     return conn.execute("SELECT COUNT(*) FROM ticket_cache").fetchone()[0]

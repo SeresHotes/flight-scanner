@@ -36,6 +36,17 @@ export interface Meta {
 export interface TransferPoint {
   code: string
   city: string
+  minutes?: number | null // ожидание на этой пересадке (GraphQL); нет у старых данных
+  night?: boolean
+  visa?: boolean
+  country?: string | null
+}
+
+export interface Baggage {
+  known: boolean
+  included: boolean
+  pieces: number | null
+  kg: number | null
 }
 
 export interface Segment {
@@ -51,7 +62,8 @@ export interface Segment {
   transfers: number
   direct: boolean
   transfer_points?: TransferPoint[]
-  layover_minutes?: number | null // суммарно на земле на всех пересадках (источник не разбивает)
+  layover_minutes?: number | null // суммарно на земле на всех пересадках
+  baggage?: Baggage // GraphQL: багаж по билету; нет у данных из REST
   airline?: string
   flight_number?: string
   price: number
@@ -69,8 +81,8 @@ export interface HiddenCity {
   chain: string[] // цепочка аэропортов билета, напр. SVO, PKX, HRB
   full_duration: number | null
   full_transfers: number
-  baggage?: { known: boolean; included: boolean; pieces: number | null; kg: number | null }
-  arrival_estimated: boolean
+  baggage?: Baggage
+  arrival_estimated: boolean // с GraphQL всегда false: прилёт в хаб — реальный
 }
 
 export interface StopoverTransfer {

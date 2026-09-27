@@ -76,19 +76,26 @@ def require_token() -> str:
 def build_params(origin: Optional[str], destination: Optional[str], day: str, *,
                  day_to: Optional[str] = None, value_min: Optional[int] = None,
                  value_max: Optional[int] = None, direct: Optional[bool] = None,
-                 with_baggage: Optional[bool] = None, origin_type: str = "CITY",
-                 destination_type: str = "CITY") -> Dict[str, Any]:
+                 with_baggage: Optional[bool] = None, origin_type: Optional[str] = None,
+                 destination_type: Optional[str] = None) -> Dict[str, Any]:
     """`ParamsOneWay` для запроса. Пустой конец (None) — «ANY», хотя бы один конец
-    обязателен. Коридор цен — `value_min`/`value_max`, целые рубли."""
+    обязателен. Коридор цен — `value_min`/`value_max`, целые рубли.
+
+    Тип места по умолчанию НЕ передаём: источник сам распознаёт и город (MOW, SEL),
+    и аэропорт (PEK, ICN), а явный тип строгий — `ICN` с CITY даёт «city ICN not
+    found», `SEL` с AIRPORT — «airport SEL not found». Остановка у пользователя
+    может быть задана любым кодом, поэтому автоопределение и нужно."""
     if not origin and not destination:
         raise ValueError("нужен хотя бы один из origin/destination")
     p: Dict[str, Any] = {"depart_date_min": day, "depart_date_max": day_to or day}
     if origin:
         p["origin"] = origin.upper()
-        p["origin_type"] = origin_type
+        if origin_type:
+            p["origin_type"] = origin_type
     if destination:
         p["destination"] = destination.upper()
-        p["destination_type"] = destination_type
+        if destination_type:
+            p["destination_type"] = destination_type
     if value_min is not None:
         p["value_min"] = int(value_min)
     if value_max is not None:
@@ -138,10 +145,17 @@ def query_page(params: Dict[str, Any], offset: int = 0, limit: int = PAGE_LIMIT,
     headers = {"X-Access-Token": require_token(), "Content-Type": "application/json"}
     http = session or requests
     resp = http.post(GRAPHQL_URL, json=body, headers=headers, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
-    payload = resp.json()
-    if payload.get("errors"):
+    # Ошибки валидации («city ICN not found») приходят как HTTP 400 с JSON `errors` —
+    # разбираем тело раньше raise_for_status, чтобы не потерять сообщение.
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict) and payload.get("errors"):
         raise GraphQLError(json.dumps(payload["errors"], ensure_ascii=False)[:500])
+    resp.raise_for_status()
+    if not isinstance(payload, dict):
+        raise GraphQLError("пустой или не-JSON ответ")
     return (payload.get("data") or {}).get("prices_one_way") or []
 
 

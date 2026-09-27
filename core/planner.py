@@ -5,15 +5,16 @@
 (kind='any', wildcard в середине). Окно дат «когда ОК быть здесь» задаётся только у
 ПРОМЕЖУТОЧНЫХ остановок; у концов оно выводится из соседей.
 
-Сбор экономный: на каждый переход «якорим» сторону с меньшим числом городов и
-запрашиваем через неё «все направления» (origin=X,dest=None или origin=None,dest=Y)
-— один запрос в день на якорный город, — а другую сторону фильтруем по выбранным
-городам. Поэтому конкретные города не дороже «любого». Всё это должно совпадать
-с клиентской оценкой (frontend/src/planner/estimate.ts).
+Сбор — через GraphQL Data API (core/graphql_api): все билеты на дату с сегментами,
+пересадками и багажом. Город→город запрашиваем парами (одна страница на день),
+плечо с «любым» концом — серией «город → ANY» / «ANY → город» с ценовым коридором
+и потолком страниц (см. раздел «сбор»). Hidden-city — из тех же ответов A→ANY:
+билет A→H→X даёт виртуальный рейс A→H с реальным временем прилёта. Оценка объёма
+должна совпадать с клиентской (frontend/src/planner/estimate.ts).
 
 Публичный контракт (frontend/src/planner/types.ts):
 - estimate_plan(stops)      -> {requests, seconds, legs:[{fromLabel,toLabel,days,requests,anyLeg}]}
-- collect_plan(stops, cb)   -> {leg_index: [сырые рейсы]}   (реальные запросы к API)
+- collect_plan(stops, cb)   -> {leg_index: [нормализованные билеты]}   (реальные запросы к API)
 - build_itineraries(stops, collected) -> [Itinerary]        (чистая сборка)
 - build_itineraries_compact(stops, collected, max_results) -> компактный результат
   (таблица уникальных сегментов + плоские массивы индексов; см. _pack_compact)
@@ -26,29 +27,28 @@ from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional
 
 from core import aggregate as agg
-from core.collector import collect_leg_data, get_date_range
-from core.linkinfo import parse_link
+from core.collector import get_date_range
 from core.trip_builder import Builder, arrival_of, date_only, make_city_lookup, stay_between
 
-SECONDS_PER_REQUEST = 0.65  # совпадает с planner/estimate.ts
-MAX_REQUESTS = 400          # предохранитель от слишком широких окон (2 запроса на день, см. FETCH_MODES)
+SECONDS_PER_REQUEST = 1.0   # GraphQL: 60 запросов в минуту (совпадает с planner/estimate.ts)
+MAX_REQUESTS = 600          # предохранитель от слишком широких окон (~10 мин сбора без кэша)
 MAX_RESULTS = 1_000_000     # потолок max_results: компактный перебор держит его в памяти VM (4 ГБ)
 DEFAULT_START = "2026-11-01"  # якорь старта, если окон нет нигде (совпадает с mock)
 DEFAULT_LEG_DAYS = 7          # ширина окна плеча, если оба конца без окна
 FINAL_STAY_DAYS = 5           # пребывание в финальном городе (у конца окна нет)
 
-# Режимы запроса на каждый день (значения allow_indirect). prices_for_dates с
-# direct=false отдаёт по направлению лишь САМЫЙ ДЕШЁВЫЙ билет на дату — обычно
-# стыковочный, и прямой рейс чуть дороже в ответ не попадает (а потом фильтр
-# «только прямые» выкидывает и стыковочный). Поэтому прямые запрашиваем отдельно.
-FETCH_MODES = (True, False)
+# Оценка серии GraphQL в «запросах» (страницах по 400 билетов), см. раздел «сбор».
+# Это же — потолок страниц серии, поэтому прогресс никогда не перерастает оценку.
+PAGES_CITY = 1      # город → город: все билеты дня почти всегда в одной странице
+PAGES_ANY = 12      # город → любой / любой → город: до 4 800 самых дешёвых билетов в день
+PAGES_HIDDEN = 4    # A → ANY под hidden-city с коридором «дешевле лучшего A→B дня»
+HIDDEN_MIN_RATIO = 0.5  # нижняя граница коридора hidden-city: доля от порога. Без неё
+                        # страницы A→ANY (сортировка по цене) забивает дешёвая ближняя
+                        # Россия/СНГ и до зоны транзита через хаб серия не доходит.
 
-# Hidden-city в плече A→B: билет A→C с пересадкой в B добавляется в список плеча
-# как виртуальный рейс A→B (цена всего билета, выходим в B). При якорении по A
-# такие билеты уже есть в ответе A→ANY; при якорении по B нужен доп. запрос
-# A→ANY (только с пересадками) на каждый день и город A — см. _hidden_series.
-HIDDEN_CITY_SPEED_KMH = 750     # оценка времени сегмента A→B по расстоянию, если
-HIDDEN_CITY_GROUND_MIN = 40     # прямого A→B в выборке нет (руление/набор высоты)
+# Режимы REST-запроса (allow_indirect) — остались для core/anyscan (сбор X→ANY через
+# prices_for_dates); планировщик REST больше не использует.
+FETCH_MODES = (True, False)
 
 
 def is_valid_max_results(n: Optional[int]) -> bool:
@@ -134,24 +134,22 @@ def _stop_label(stop: Stop, city_info) -> str:
     return "/".join(stop.codes)
 
 
-def _hidden_extra_cities(stops: List[Stop], i: int) -> int:
-    """Сколько городов A требуют доп. запроса A→ANY под hidden-city: плечо заякорено
-    по B (у A городов больше), оба конца — конкретные города."""
-    from_stop, to_stop = stops[i], stops[i + 1]
-    if from_stop.kind != "cities" or to_stop.kind != "cities":
-        return 0
-    if from_stop.cardinality() <= to_stop.cardinality():
-        return 0  # якорь по A: ответ A→ANY уже содержит билеты через B
-    return len(from_stop.codes)
+def _leg_days(stops: List[Stop], i: int) -> int:
+    win = _leg_window(stops, i)
+    return len(get_date_range(win[0], win[1])) if win[0] and win[1] else DEFAULT_LEG_DAYS
 
 
 def _leg_requests(stops: List[Stop], i: int) -> int:
-    """Запросов на плечо i = (меньшая мощность конца) × дней окна × режимов запроса
-    + доп. запросы A→ANY (один режим) под hidden-city при якорении по B."""
-    anchor = min(stops[i].cardinality(), stops[i + 1].cardinality())
-    win = _leg_window(stops, i)
-    days = len(get_date_range(win[0], win[1])) if win[0] and win[1] else DEFAULT_LEG_DAYS
-    return int(anchor) * days * len(FETCH_MODES) + _hidden_extra_cities(stops, i) * days
+    """Страниц на плечо i (см. раздел «сбор»): город→город — пары A×B по PAGES_CITY
+    плюс hidden-city A→ANY по PAGES_HIDDEN на город A; с «любым» концом — по
+    PAGES_ANY на каждый конкретный город другого конца. Всё × дней окна."""
+    from_stop, to_stop = stops[i], stops[i + 1]
+    days = _leg_days(stops, i)
+    if from_stop.kind == "cities" and to_stop.kind == "cities":
+        a, b = max(1, len(from_stop.codes)), max(1, len(to_stop.codes))
+        return days * (a * b * PAGES_CITY + a * PAGES_HIDDEN)
+    anchor = from_stop if from_stop.kind == "cities" else to_stop
+    return days * max(1, len(anchor.codes)) * PAGES_ANY
 
 
 def estimate_plan(stops: List[Stop], city_info=None) -> Dict[str, Any]:
@@ -161,8 +159,7 @@ def estimate_plan(stops: List[Stop], city_info=None) -> Dict[str, Any]:
     legs = []
     requests = 0
     for i in range(len(stops) - 1):
-        win = _leg_window(stops, i)
-        days = len(get_date_range(win[0], win[1])) if win[0] and win[1] else DEFAULT_LEG_DAYS
+        days = _leg_days(stops, i)
         reqs = _leg_requests(stops, i)
         legs.append({
             "fromLabel": _stop_label(stops[i], city_info),
@@ -180,22 +177,17 @@ def request_count(stops: List[Stop]) -> int:
 
 
 # --------------------------------- сбор --------------------------------------
-
-def _leg_series(stops: List[Stop], i: int):
-    """План под-запросов плеча i с якорением по стороне с меньшим числом городов.
-
-    Каждый элемент: (origin|None, dest|None, dates, allow_side, allow_set) — где
-    allow_side ∈ {'dest','origin'} говорит, какую сторону результата фильтровать по
-    allow_set (None = не фильтровать, конец 'any')."""
-    from_stop, to_stop = stops[i], stops[i + 1]
-    dates = _leg_dates(stops, i)
-    if from_stop.cardinality() <= to_stop.cardinality():
-        # якорим по from: origin=город, dest=None (все направления), фильтр по to
-        allow = set(to_stop.codes) if to_stop.kind == "cities" else None
-        return [(city, None, dates, "dest", allow) for city in from_stop.codes]
-    # якорим по to: origin=None (все направления), dest=город, фильтр по from
-    allow = set(from_stop.codes) if from_stop.kind == "cities" else None
-    return [(None, city, dates, "origin", allow) for city in to_stop.codes]
+#
+# Источник — GraphQL prices_one_way (core/graphql_api): все билеты на дату. Планы
+# серий по видам плеча (серия = направление × день, страницы по 400):
+#   город → город   пары A×B, обычно одна страница; плюс hidden-city: A→ANY с
+#                   коридором «дешевле лучшего A→B того дня» (PAGES_HIDDEN);
+#   город → любой   A→ANY по дням, коридор value_max = max_cost, потолок PAGES_ANY
+#                   (сортировка по цене — теряются только самые дорогие);
+#                   hidden-city выходит бесплатно: билет A→H→X даёт и рейс A→H;
+#   любой → город   ANY→B по дням, тот же потолок; hidden-city нет (нужен X→ANY).
+# «Запрос» в оценке = страница; прогресс идёт по страницам и добивается до оценки
+# в конце серии, поэтому счётчик доходит ровно до total (и при попадании в кэш).
 
 
 def _side_codes(flight: Dict[str, Any], side: str) -> set:
@@ -229,176 +221,212 @@ def _flight_key(flight: Dict[str, Any]) -> tuple:
         "airline", "flight_number", "transfers", "price"))
 
 
-def _hidden_series(stops: List[Stop], i: int):
-    """Доп. под-запросы A→ANY (с пересадками) под hidden-city при якорении по B."""
-    if not _hidden_extra_cities(stops, i):
-        return []
-    dates = _leg_dates(stops, i)
-    return [(city, None, dates) for city in stops[i].codes]
+
+def _airport_city_learn(flights: List[Dict[str, Any]], airport_city: Dict[str, str]) -> None:
+    """Пополняет карту аэропорт → город из концов билетов (PKX → BJS)."""
+    for f in flights:
+        for side, apt in (("destination", "destination_airport"), ("origin", "origin_airport")):
+            if f.get(apt) and f.get(side) and not f.get("hidden_city"):
+                airport_city.setdefault(f[apt].upper(), f[side].upper())
+
+
+def _run_series(fetch_fn, origin: Optional[str], dest: Optional[str], day: str, pages: int,
+                value_max: Optional[float], progress_cb,
+                value_min: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Одна серия с прогрессом: тик на каждую полученную страницу, в конце добивка
+    до `pages` (оценка серии), чтобы прогресс всегда сходился с total."""
+    ticks = [0]
+
+    def on_page(_page: int, _n: int) -> None:
+        if progress_cb and ticks[0] < pages:
+            ticks[0] += 1
+            progress_cb()
+
+    series = fetch_fn(origin, dest, day, value_min=int(value_min) if value_min else None,
+                      value_max=int(value_max) if value_max else None,
+                      max_pages=pages, progress_cb=on_page)
+    if progress_cb:
+        for _ in range(pages - ticks[0]):
+            progress_cb()
+    return series.get("tickets") or []
+
+
+def _threshold(flights: List[Dict[str, Any]], key) -> Dict[Any, float]:
+    """Порог hidden-city по группе key(f): цена лучшего ПРЯМОГО обычного рейса, если
+    прямой есть, иначе лучшего вообще. Виртуальный рейс интересен, только если он
+    дешевле этого порога (иначе есть обычный билет не хуже)."""
+    best_direct: Dict[Any, float] = {}
+    best_any: Dict[Any, float] = {}
+    for f in flights:
+        if f.get("hidden_city"):
+            continue
+        k = key(f)
+        price = _price_of(f)
+        if not int(f.get("transfers") or 0) and price < best_direct.get(k, _INF):
+            best_direct[k] = price
+        if price < best_any.get(k, _INF):
+            best_any[k] = price
+    return {**best_any, **best_direct}
 
 
 def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
                  fetch_fn=None,
                  leg_cb: Callable[[int], None] = None,
-                 network: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[int, List[Dict[str, Any]]]:
-    """Реально ходит в Travelpayouts: собирает рейсы по каждому переходу.
+                 network: Optional[Dict[str, Dict[str, Any]]] = None,
+                 max_cost: Optional[float] = None,
+                 airport_city: Optional[Dict[str, str]] = None) -> Dict[int, List[Dict[str, Any]]]:
+    """Собирает рейсы по каждому переходу через GraphQL (см. шапку раздела).
 
-    Возвращает {индекс_перехода: [сырые рейсы]}. На каждый день — два запроса
-    (FETCH_MODES): с пересадками, чтобы фильтр по их числу на фронте имел смысл, и
-    только прямые, которые иначе теряются за более дешёвым стыковочным билетом.
-    progress_cb() — после каждого запроса,
-    leg_cb(i) — перед началом перехода i (для показа этапа в UI).
-    fetch_fn позволяет подменить обращение к API (кэширующая обёртка из api.worker).
-    network — сеть аэропортов (координаты для оценки прилёта hidden-city; опционально).
-
-    В список плеча A→B дописываются виртуальные рейсы hidden-city: билеты A→C с
-    первой пересадкой в B, дешевле обычных A→B того же дня (см. hidden_city_flights)."""
+    Возвращает {индекс_перехода: [нормализованные билеты + виртуальные hidden-city]}.
+    progress_cb() — на каждую страницу (и добивку до оценки серии),
+    leg_cb(i) — перед началом перехода i (этап в UI),
+    fetch_fn(origin, dest, day, value_max=, max_pages=, progress_cb=) → серия
+      (по умолчанию graphql_api.fetch_series; воркер даёт кэширующую обёртку),
+    max_cost — потолок цены всей поездки: коридор value_max для ANY-серий,
+    airport_city — карта аэропорт → город из накопленных котировок (дополняется
+      по ходу сбора); network — не используется, оставлен для совместимости вызова."""
+    from core import graphql_api
+    fetch = fetch_fn or graphql_api.fetch_series
+    airport_city = dict(airport_city or {})
     collected: Dict[int, List[Dict[str, Any]]] = {}
     for i in range(len(stops) - 1):
         if leg_cb:
             leg_cb(i)
-        leg_flights: List[Dict[str, Any]] = []
-        raw: List[Dict[str, Any]] = []   # все ответы плеча до фильтра — источник hidden-city
+        from_stop, to_stop = stops[i], stops[i + 1]
+        dates = _leg_dates(stops, i)
+        regular: List[Dict[str, Any]] = []
+        virtual: List[Dict[str, Any]] = []
         seen = set()
-        for origin, dest, dates, side, allow in _leg_series(stops, i):
-            for allow_indirect in FETCH_MODES:
-                flights = collect_leg_data(
-                    origin, dest, dates, leg_name=f"leg{i}",
-                    allow_indirect=allow_indirect, progress_cb=progress_cb, fetch_fn=fetch_fn,
-                )
-                raw += flights
-                for f in flights:
-                    key = _flight_key(f)
-                    if key in seen or not _keep(f, side, allow):
-                        continue
-                    seen.add(key)
-                    leg_flights.append(f)
-        for origin, dest, dates in _hidden_series(stops, i):
-            raw += collect_leg_data(origin, dest, dates, leg_name=f"leg{i}:hidden",
-                                    allow_indirect=True, progress_cb=progress_cb, fetch_fn=fetch_fn)
-        leg_flights += hidden_city_flights(raw, leg_flights, stops[i], stops[i + 1], network)
-        collected[i] = leg_flights
+
+        def keep(flights: List[Dict[str, Any]], side: Optional[str], allow: Optional[set]) -> None:
+            _airport_city_learn(flights, airport_city)
+            for f in flights:
+                key = graphql_api.flight_key(f)
+                if key in seen or (side and not _keep(f, side, allow)):
+                    continue
+                seen.add(key)
+                regular.append(f)
+
+        if from_stop.kind == "cities" and to_stop.kind == "cities":
+            allow_to = set(to_stop.codes)
+            for day in dates:
+                for a in from_stop.codes:
+                    day_regular: List[Dict[str, Any]] = []
+                    for b in to_stop.codes:
+                        got = _run_series(fetch, a, b, day, PAGES_CITY, None, progress_cb)
+                        keep(got, "dest", allow_to)
+                        day_regular += got
+                    # hidden-city: A→ANY в коридоре [HIDDEN_MIN_RATIO × порог, порог],
+                    # порог — лучший обычный A→B этого дня (без него — max_cost)
+                    thr = _threshold(day_regular, lambda f: 0).get(0)
+                    got = _run_series(fetch, a, None, day, PAGES_HIDDEN, thr or max_cost, progress_cb,
+                                      value_min=thr * HIDDEN_MIN_RATIO if thr else None)
+                    _airport_city_learn(got, airport_city)
+                    hub_city = _hub_resolver(allow_to, airport_city)
+                    virtual += hidden_city_flights(got, hub_city, {0: thr} if thr else {},
+                                                   lambda f: 0, seen)
+        elif from_stop.kind == "cities":                      # город → любой
+            day_flights: Dict[str, List[Dict[str, Any]]] = {}
+            for day in dates:
+                for a in from_stop.codes:
+                    got = _run_series(fetch, a, None, day, PAGES_ANY, max_cost, progress_cb)
+                    keep(got, None, None)
+                    day_flights.setdefault(day, []).extend(got)
+            # hidden-city во все промежуточные хабы (кроме города вылета): дешевле
+            # лучшего обычного рейса A→хаб того же дня из этой же выборки.
+            hub_city = lambda apt, ac=airport_city: ac.get(apt, apt)   # noqa: E731
+            for day, flights in day_flights.items():
+                thr = _threshold(flights, lambda f: (f.get("origin"), f.get("destination")))
+                virtual += hidden_city_flights(
+                    flights, hub_city, thr,
+                    lambda f: (f.get("origin"), f.get("destination")), seen)
+        else:                                                  # любой → город
+            for day in dates:
+                for b in to_stop.codes:
+                    got = _run_series(fetch, None, b, day, PAGES_ANY, max_cost, progress_cb)
+                    keep(got, "dest", set(to_stop.codes))
+        collected[i] = regular + virtual
     return collected
 
 
 # --------------------------------- hidden-city --------------------------------
 
-def _coords(network: Optional[Dict[str, Dict[str, Any]]], code: str):
-    info = (network or {}).get(code) or {}
-    raw = info.get("coordinates")
-    if not raw:
-        return None
-    try:
-        lat, lon = (float(x) for x in str(raw).split(","))
-        return lat, lon
-    except ValueError:
-        return None
+def _hub_resolver(allow_to: set, airport_city: Dict[str, str]):
+    """Аэропорт → код остановки B, если это её аэропорт (кодом города или самого
+    аэропорта), иначе None."""
+    def resolve(apt: str) -> Optional[str]:
+        if apt in allow_to:
+            return apt
+        city = airport_city.get(apt)
+        return city if city in allow_to else None
+    return resolve
 
 
-def _geo_minutes(network, a: str, b: str) -> Optional[int]:
-    """Оценка времени перелёта a→b по дуге большого круга."""
-    import math
-    pa, pb = _coords(network, a), _coords(network, b)
-    if not pa or not pb:
-        return None
-    lat1, lon1, lat2, lon2 = map(math.radians, (*pa, *pb))
-    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
-    km = 2 * 6371 * math.asin(math.sqrt(h))
-    return int(km / HIDDEN_CITY_SPEED_KMH * 60) + HIDDEN_CITY_GROUND_MIN
+def _virtual_flight(t: Dict[str, Any], k: int, hub_city: str) -> Dict[str, Any]:
+    """Виртуальный рейс «выходим на k-й пересадке»: сегменты до хаба, реальное время
+    прилёта в хаб, transfers = k, цена всего билета; hidden_city — что это за билет."""
+    from core.graphql_api import _minutes_between
+    tp = t["transfer_points"][k]
+    hub = tp["code"]
+    legs = t["legs"][:k + 1]
+    arrival = legs[-1]["arrival_at"]
+    air = [_minutes_between(l["departure_at"], l["arrival_at"]) for l in legs]
+    chain = t["chain"]
+    cut = next((j for j, code in enumerate(chain) if j >= 1 and code == hub), len(chain) - 1)
+    v = dict(t)
+    v.update({
+        "destination": hub_city,
+        "destination_airport": hub,
+        "arrival_at": arrival,
+        "duration": _minutes_between(t["departure_at"], arrival),
+        "duration_to": sum(air) if all(m is not None for m in air) else None,
+        "transfers": k,
+        "transfer_points": t["transfer_points"][:k],
+        "legs": legs,
+        "chain": chain[:cut + 1],
+        "hidden_city": {
+            "final": t.get("destination"),
+            "final_airport": t.get("destination_airport"),
+            "chain": chain,
+            "full_duration": t.get("duration"),
+            "full_transfers": int(t.get("transfers") or 0),
+            "baggage": t.get("baggage"),
+            "arrival_estimated": False,
+        },
+    })
+    return v
 
 
-def _segment_minutes(ticket: Dict[str, Any], hub: str, hub_city: str,
-                     regular: List[Dict[str, Any]], network) -> int:
-    """Длительность первого сегмента A→B билета: по прямому A→B из той же выборки
-    (тот же аэропорт вылета и хаб, иначе любой прямой между этими городами), иначе
-    по расстоянию, иначе — доля общей длительности по числу сегментов."""
-    origin_airport = ticket.get("origin_airport")
-    same_airports, same_cities = [], []
-    for f in regular:
-        if int(f.get("transfers") or 0) or not f.get("duration") or f.get("hidden_city"):
+def hidden_city_flights(tickets: List[Dict[str, Any]], hub_city, thresholds: Dict[Any, float],
+                        key, seen: Optional[set] = None) -> List[Dict[str, Any]]:
+    """Виртуальные рейсы hidden-city из билетов с пересадками.
+
+    Для каждой пересадки билета, чей аэропорт hub_city(apt) распознан как остановка
+    (вернул код города), строим рейс «до этой пересадки». Оставляем только те, что
+    дешевле порога thresholds[key(виртуальный рейс)] (лучший обычный рейс того же
+    дня/направления); без порога — берём все. Хаб не может совпадать с городом
+    вылета. seen — общий с обычными рейсами набор ключей для дедупликации."""
+    from core.graphql_api import flight_key
+    seen = seen if seen is not None else set()
+    out: List[Dict[str, Any]] = []
+    for t in tickets:
+        points = t.get("transfer_points") or []
+        if not points or not t.get("legs"):
             continue
-        if f.get("destination_airport") != hub and f.get("destination") != hub_city:
-            continue
-        (same_airports if f.get("origin_airport") == origin_airport else same_cities).append(f["duration"])
-    for pool in (same_airports, same_cities):
-        if pool:
-            return min(pool)
-    geo = _geo_minutes(network, origin_airport, hub)
-    if geo is not None:
-        return geo
-    chain = parse_link(ticket.get("link")).airports
-    return int((ticket.get("duration") or 0) / max(1, len(chain) - 1))
-
-
-def hidden_city_flights(raw: List[Dict[str, Any]], regular: List[Dict[str, Any]],
-                        from_stop: Stop, to_stop: Stop,
-                        network=None) -> List[Dict[str, Any]]:
-    """Виртуальные рейсы A→B из билетов A→C с ПЕРВОЙ пересадкой в B (hidden-city).
-
-    Берём билеты из сырых ответов плеча, у которых в цепочке `t=` второй аэропорт —
-    аэропорт B (B задан кодом города или аэропорта; аэропорты города узнаём из тех
-    же ответов), а конечный пункт — не B. Оставляем только те, что дешевле самого
-    дешёвого обычного рейса A→B того же дня вылета (иначе смысла нет). Виртуальный
-    рейс: destination=B, transfers=0, duration — оценка первого сегмента, а
-    hidden_city — что это за билет на самом деле (финал, цепочка, багаж)."""
-    if from_stop.kind != "cities" or to_stop.kind != "cities":
-        return []
-    allow_to, allow_from = set(to_stop.codes), set(from_stop.codes)
-    airport_city: Dict[str, str] = {}
-    for f in raw + regular:
-        for side, apt in (("destination", "destination_airport"), ("origin", "origin_airport")):
-            if f.get(apt) and f.get(side):
-                airport_city[f[apt].upper()] = f[side].upper()
-    hubs = {apt for apt, city in airport_city.items() if city in allow_to} | allow_to
-
-    best_regular: Dict[str, float] = {}
-    for f in regular:
-        if f.get("hidden_city"):
-            continue
-        day = date_only(f.get("departure_at") or "")
-        price = _price_of(f)
-        if day not in best_regular or price < best_regular[day]:
-            best_regular[day] = price
-
-    virtual: List[Dict[str, Any]] = []
-    seen = set()
-    for f in raw:
-        info = parse_link(f.get("link"))
-        chain = info.airports
-        if len(chain) < 3 or chain[1] not in hubs:
-            continue
-        if _keep(f, "dest", allow_to) or not _keep(f, "origin", allow_from):
-            continue
-        day = date_only(f.get("departure_at") or "")
-        price = _price_of(f)
-        if day in best_regular and price >= best_regular[day]:
-            continue
-        hub = chain[1]
-        hub_city = airport_city.get(hub) or (hub if hub in allow_to else next(iter(allow_to)))
-        v = dict(f)
-        v.update({
-            "destination": hub_city,
-            "destination_airport": hub,
-            "transfers": 0,
-            "duration": _segment_minutes(f, hub, hub_city, regular, network),
-            "duration_to": None,
-            "hidden_city": {
-                "final": f.get("destination"),
-                "final_airport": f.get("destination_airport"),
-                "chain": chain,
-                "full_duration": f.get("duration"),
-                "full_transfers": int(f.get("transfers") or 0),
-                "baggage": info.baggage.as_dict(),
-                "arrival_estimated": True,
-            },
-        })
-        key = _flight_key(v)
-        if key in seen:
-            continue
-        seen.add(key)
-        virtual.append(v)
-    return virtual
-
+        for k, tp in enumerate(points):
+            city = hub_city(tp["code"])
+            if not city or city == t.get("origin") or tp["code"] == t.get("origin_airport"):
+                continue
+            v = _virtual_flight(t, k, city)
+            thr = thresholds.get(key(v))
+            if thr is not None and _price_of(v) >= thr:
+                continue
+            fk = flight_key(v)
+            if fk in seen:
+                continue
+            seen.add(fk)
+            out.append(v)
+    return out
 
 # ------------------------------- сборка цепочек ------------------------------
 

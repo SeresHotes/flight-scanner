@@ -1,15 +1,19 @@
 // Клиентская оценка объёма сбора цепочки — чистая арифметика по окнам дат,
 // считается мгновенно на каждый ввод (без round-trip к беку). Формула совпадает
-// с core/planner.estimate_plan: якорим сторону с МЕНЬШИМ числом городов и
-// запрашиваем «все направления» через неё (2 запроса/день на якорный город:
-// с пересадками и только прямые — см. core/planner.FETCH_MODES).
+// с core/planner._leg_requests: «запрос» = страница GraphQL по 400 билетов.
+//   город → город:  пары A×B по PAGES_CITY + hidden-city A→ANY по PAGES_HIDDEN на город A;
+//   с «любым» концом: PAGES_ANY на каждый конкретный город другого конца.
+// Всё × дней окна плеча. Оценка пессимистичная (потолок страниц серии), прогресс
+// сбора доходит ровно до неё.
 
 import type { PlannerEstimate, PlannerStop } from './types'
 import { daysInWindow } from './dates'
 
-const SECONDS_PER_REQUEST = 0.65 // совпадает с core/planner.SECONDS_PER_REQUEST
+const SECONDS_PER_REQUEST = 1.0 // совпадает с core/planner.SECONDS_PER_REQUEST (60 запросов/мин)
 const DEFAULT_LEG_DAYS = 7 // ширина окна плеча, если оба конца без окна
-const REQUESTS_PER_DAY = 2 // = len(core/planner.FETCH_MODES)
+const PAGES_CITY = 1 // core/planner.PAGES_CITY
+const PAGES_ANY = 12 // core/planner.PAGES_ANY
+const PAGES_HIDDEN = 4 // core/planner.PAGES_HIDDEN
 
 export function stopLabel(s: PlannerStop): string {
   if (s.kind === 'any') return 'Любой город'
@@ -28,9 +32,7 @@ function legWindow(stops: PlannerStop[], i: number): [string, string] {
   return ['', '']
 }
 
-// Число городов на конце; «любой» = бесконечность (нельзя «заякорить»).
-const cardinality = (s: PlannerStop): number =>
-  s.kind === 'cities' ? Math.max(1, s.airports.length) : Infinity
+const cities = (s: PlannerStop): number => Math.max(1, s.airports.length)
 
 export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
   const legs = []
@@ -41,15 +43,13 @@ export function estimatePlan(stops: PlannerStop[]): PlannerEstimate {
     const win = legWindow(stops, i)
     const days = daysInWindow(win) || DEFAULT_LEG_DAYS
     const anyLeg = from.kind === 'any' || to.kind === 'any'
-    const anchor = Math.min(cardinality(from), cardinality(to))
-    // Hidden-city (core/planner._hidden_extra_cities): при якорении по B (у A городов
-    // больше, оба конца — города) на каждый город A добавляется запрос A→ANY с
-    // пересадками в день; при якорении по A такие билеты уже в ответе A→ANY.
-    const hiddenExtra =
-      from.kind === 'cities' && to.kind === 'cities' && cardinality(from) > cardinality(to)
-        ? from.airports.length
-        : 0
-    const reqs = anchor * days * REQUESTS_PER_DAY + hiddenExtra * days
+    let perDay: number
+    if (from.kind === 'cities' && to.kind === 'cities') {
+      perDay = cities(from) * cities(to) * PAGES_CITY + cities(from) * PAGES_HIDDEN
+    } else {
+      perDay = cities(from.kind === 'cities' ? from : to) * PAGES_ANY
+    }
+    const reqs = days * perDay
     legs.push({ fromLabel: stopLabel(from), toLabel: stopLabel(to), days, requests: reqs, anyLeg })
     requests += reqs
   }
