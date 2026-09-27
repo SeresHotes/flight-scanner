@@ -1,9 +1,4 @@
-"""GET /api/plan/jobs/{id}: готовый результат вклеивается в ответ как есть.
-
-Компактный результат на сотни тысяч цепочек весит десятки МБ — ручка не должна его
-разбирать (json.loads + сериализация FastAPI держали бы в памяти лишние копии)."""
-import json
-
+"""GET /api/plan/jobs/{id}: прогресс, по готовности — сводка; данные страницами."""
 from api import main, worker
 from core import graphql_api
 from storage import hot
@@ -11,8 +6,7 @@ from tests.test_job_stages import STOPS, _fake_fetch
 
 
 def _call(job_id):
-    resp = main.plan_job_status(job_id)
-    return json.loads(resp.body)
+    return main.plan_job_status(job_id)
 
 
 def test_done_job_returns_compact_result(tmp_path, monkeypatch):
@@ -24,16 +18,15 @@ def test_done_job_returns_compact_result(tmp_path, monkeypatch):
     monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
     hot.create_job(conn, "j1", {"kind": "plan"}, total=6, stage=worker.initial_stage("plan"))
 
+    main._plan_results.clear()
     running = _call("j1")
-    assert running["status"] == "pending" and "result" not in running
+    assert running["status"] == "pending" and "summary" not in running
 
     worker.run_plan_collection(db, "j1", STOPS, max_results=10)
     done = _call("j1")
     assert done["status"] == "done"
-    assert done["result"]["format"] == "compact-v1"
-    assert done["result"]["count"] > 0
-    assert len(done["result"]["chains"]) == done["result"]["count"] * done["result"]["legs"]
-    assert done["result"]["graph"]["legs"]  # граф для режима «наборы городов» рядом с цепочками
+    assert done["summary"]["count"] > 0 and done["summary"]["combos"] == 1
+    assert done["summary"]["totalCount"] == done["summary"]["count"]
 
 
 def test_unknown_job(tmp_path, monkeypatch):

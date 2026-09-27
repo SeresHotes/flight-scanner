@@ -301,9 +301,6 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
             should_stop=lambda: is_cancel_requested(job_id),
             on_progress=rep.build_progress(max_results), query=pq)
 
-        # Граф рёбер — для режима «наборы городов»: он оценивает ВСЕ варианты, без
-        # движковых границ max_results/max_cost (см. planner.overview_graph).
-        result["graph"] = planner.overview_graph(stops, collected, city_info=city_info)
         # Наборы городов — на бэке (core/overview): все варианты под фильтры запроса,
         # без границ max_results/max_cost. Страницы отдаёт /api/plan/jobs/{id}/combos.
         rep.stage("combos")

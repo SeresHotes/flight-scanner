@@ -12,11 +12,13 @@ export function PlanEstimateBar({
   estimate,
   validation,
   disabled,
+  label = 'Загрузить данные →',
   onLoad,
 }: {
   estimate: PlannerEstimate
   validation: Validation
   disabled: boolean
+  label?: string
   onLoad: () => void
 }) {
   const reqWord = plural(estimate.requests, 'запрос', 'запроса', 'запросов')
@@ -35,19 +37,19 @@ export function PlanEstimateBar({
             {estimate.legs.map((leg, i) => (
               <span className="mchip" key={i}>
                 {leg.fromLabel} → {leg.toLabel}: <b>{leg.requests}</b>
-                <span className="pl-anytag"> · запр/день</span>
+                <span className="pl-anytag"> · {leg.days} дн.</span>
               </span>
             ))}
           </div>
           <div className="pl-est-hint">
-            Собираем «все направления» и фильтруем по выбранным городам — конкретные
-            города не дороже «любого».
+            Запрос = страница по 400 билетов. Оценка — по потолку страниц; повторные и
+            недавние запросы берутся из кэша и идут быстрее. Потолок цены сужает загрузку «любых» городов.
           </div>
         </div>
       )}
 
       <button type="button" className="btn-primary" disabled={disabled} onClick={onLoad}>
-        Загрузить данные →
+        {label}
       </button>
 
       {!validation.ok && (

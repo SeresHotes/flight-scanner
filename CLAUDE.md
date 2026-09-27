@@ -25,7 +25,9 @@
 
 - Архитектура и фазы — `docs/PLAN.md`; локальный запуск — `docs/RUN.md`.
 - Инфраструктура прод-деплоя (Terraform + cloud-init + registry) — `infra/terraform/`.
-- Фронтенд: Vite + React + TS (`frontend/`). Новая страница-планировщик — `frontend/src/planner/`.
+- Фронтенд: Vite + React + TS (`frontend/`), только планировщик: `pages/PlanPage`
+  (`/`, запрос) → `pages/CombosPage` (`/combos/:job`) → `pages/RoutesPage`
+  (`/routes/:job`); общее — `frontend/src/planner/` (запрос `query.ts`, API `api.ts`).
 
 ## Планировщик v2 (docs/PLANNER_V2.md)
 
@@ -36,8 +38,9 @@
 плеча применяются до перебора, городов — внутри A*, длина поездки — при выдаче.
 Старый `POST /api/plan/gather` = тот же запуск с открытыми фильтрами. Наборы
 городов считает бэк (`core/overview.py`, numpy, этап «combos» джобы) —
-`…/combos?sort&offset&limit`; фронтовый воркер `planner/overview.ts` устаревает
-и уйдёт вместе с новым потоком страниц (следующий шаг плана).
+`…/combos?sort&offset&limit`. Фронт ничего не считает: запрос в URL, страницы
+результата поллят `/api/plan/jobs/{id}` (прогресс + сводка) и листают
+`/combos` и `/routes` с бэка.
 
 ## GraphQL Data API (`core/graphql_api.py`)
 

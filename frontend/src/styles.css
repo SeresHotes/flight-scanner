@@ -491,3 +491,14 @@ select:disabled{opacity:.4}
 .pl-bag.yes{color:var(--ok)}
 .pl-bag.no{color:var(--muted,#8b949e)}
 .pl-bag-warn{margin-left:3px;color:var(--warn);font-weight:800}
+
+/* Планировщик v2: единые фильтры и страницы результата */
+.pl-fselects{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.pl-fselects select{max-width:100%}
+.pl-query-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0 12px}
+.pl-query-head a.btn-ghost{text-decoration:none;display:inline-flex;align-items:center}
+.pl-combos-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:8px 0 12px;padding:10px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;position:sticky;top:0;z-index:5}
+.pl-combo-check{display:flex;gap:10px;align-items:center;cursor:pointer}
+.pl-combo-check input{width:18px;height:18px;accent-color:var(--accent)}
+.pl-combo.on{border-color:var(--accent)}
+.pl-bounds .pl-limit-row{display:block}
