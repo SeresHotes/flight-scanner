@@ -31,11 +31,7 @@ export function QueryEditor({
   const setStops = (next: PlannerStop[]) => onChange(fitFilters({ ...query, stops: next }))
   const updateStop = (i: number, patch: Partial<PlannerStop>) =>
     setStops(stops.map((s, k) => (k === i ? { ...s, ...patch } : s)))
-  const addStop = () => {
-    const next = [...stops]
-    next.splice(Math.max(1, next.length - 1), 0, { id: nid(), kind: 'cities', airports: [], window: ['', ''] })
-    setStops(next)
-  }
+  const addStop = () => setStops([...stops, { id: nid(), kind: 'cities', airports: [], window: ['', ''] }])
   const removeStop = (i: number) => {
     if (stops.length > 2) setStops(stops.filter((_, k) => k !== i))
   }
