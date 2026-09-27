@@ -3,9 +3,12 @@
 Статус: **реализовано** 2026-09-27 (PR #66–#71, все шаги ниже). Раздел «Что есть
 сейчас» описывает состояние ДО переработки и оставлен как история; актуальные
 отличия от плана: остановки и условия редактируются одним списком
-(`planner/components/QueryEditor`), оценку считает фронт (`estimate.ts`,
-зеркало `core/planner._leg_requests`), IndexedDB-кэша нет, статус джобы
-отдаёт только прогресс и сводку.
+(`planner/components/QueryEditor`); оценку с учётом кэша отдаёт бэк
+(`POST /api/plan/estimate`: requests/cached/cold), предохранитель «слишком
+широко» — по холодным страницам (2000); `maxResults` из запроса убран — джоба
+строит 5000 самых дешёвых цепочек, а маршруты выбранных наборов строятся по
+требованию из сохранённых рейсов джобы (`plan_flights`, до 2000 на набор);
+IndexedDB-кэша нет, статус джобы отдаёт только прогресс и сводку.
 
 ## Цель (формулировка продукта)
 
@@ -182,7 +185,7 @@ tripLength[lo,hi], maxCost|null, maxResults
 | `POST /api/plan/run` | запуск/переиспользование джобы по хэшу запроса → `{job_id, mode: combos|routes}` |
 | `GET /api/plan/jobs/{id}` | статус, прогресс (этапы fetch/build), сводка (`routes`, `combos`) |
 | `GET /api/plan/jobs/{id}/combos?sort&offset&limit` | наборы городов |
-| `GET /api/plan/jobs/{id}/routes?combos&sort&offset&limit` | страница маршрутов с полными сегментами |
+| `GET /api/plan/jobs/{id}/routes?combos&offset&limit` | страница маршрутов с полными сегментами; с `combos` — строятся по требованию на каждый набор |
 | удаляются | `/api/search`, `/api/gather`, `/api/routes`, `/api/jobs/{id}` (классика) |
 | удаляются в чистке | `/api/graph/*` (граф пересадок) |
 | остаются | `/api/airports`, `/api/health`, `/api/jobs/rescue` |
