@@ -203,3 +203,45 @@ def test_estimate_counts_cached_series_and_guard_uses_cold(tmp_path, monkeypatch
     assert main.plan_run(req)["status"] == "too_wide"
     monkeypatch.setattr(planner, "MAX_REQUESTS", est["cold"])
     assert main.plan_run(req)["status"] in ("collecting", "done")
+
+
+def test_routes_for_selected_combos_built_on_demand(tmp_path, monkeypatch):
+    """Маршруты выбранных наборов строятся из сохранённых рейсов джобы, а не берутся из
+    общего топ-N: набор, которого нет среди самых дешёвых цепочек, всё равно получает
+    свои маршруты."""
+    conn = _setup(tmp_path, monkeypatch)
+    stops = [{"kind": "cities", "codes": ["MOW"], "window": ["", ""]},
+             {"kind": "any", "codes": [], "window": ["2026-11-01", "2026-11-01"]},
+             {"kind": "cities", "codes": ["SEL"], "window": ["", ""]}]
+
+    def fetch(origin=None, destination=None, day=None, **_):
+        from tests.test_job_stages import _flight, _series
+        if origin == "MOW" and destination is None:          # MOW → ANY: дешёвый IST, дорогой DXB
+            return _series([_flight("MOW", "IST", f"{day}T10:00:00", 100),
+                            _flight("MOW", "DXB", f"{day}T10:00:00", 900)])
+        if destination == "SEL":                              # ANY → SEL
+            return _series([_flight("IST", "SEL", f"{day}T20:00:00", 100),
+                            _flight("DXB", "SEL", f"{day}T20:00:00", 100)])
+        return _series([])
+    monkeypatch.setattr(graphql_api, "fetch_series", fetch)
+
+    res = main.plan_run(main.PlanQueryRequest(stops=[main.PlanStop(**s) for s in stops], maxResults=1))
+    job = res["job_id"]
+    assert hot.get_job(conn, job)["status"] == "done"
+    assert hot.get_plan_flights(conn, job) is not None
+    # Общий список ограничен одной самой дешёвой цепочкой (через IST)…
+    top = main.plan_job_routes(job)
+    assert top["total"] == 1 and [s["code"] for s in top["items"][0]["stops"]] == ["MOW", "IST", "SEL"]
+    # …а маршруты набора через DXB строятся по требованию.
+    dxb = main.plan_job_routes(job, combos="MOW-DXB-SEL")
+    assert dxb["total"] == 1 and dxb["items"][0]["total_price"] == 1000 and dxb["items"][0]["combo"] == "MOW-DXB-SEL"
+    both = main.plan_job_routes(job, combos="MOW-DXB-SEL,MOW-IST-SEL")
+    assert [it["combo"] for it in both["items"]] == ["MOW-IST-SEL", "MOW-DXB-SEL"]   # по цене
+    assert main.plan_job_routes(job, combos="MOW-LED-SEL")["total"] == 0
+
+
+def test_run_without_max_results_uses_default(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    res = main.plan_run(main.PlanQueryRequest(stops=[main.PlanStop(**s) for s in JOB_STOPS]))
+    assert res["status"] in ("collecting", "done")
+    assert json.loads(hot.get_job(main._conn, res["job_id"])["params_json"])["maxResults"] == planner.DEFAULT_MAX_RESULTS

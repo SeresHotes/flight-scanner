@@ -4,7 +4,7 @@ import type { AirportOption } from '../data/airports'
 import { estimatePlan } from '../planner/estimate'
 import { fetchEstimate, runPlan } from '../planner/api'
 import { validatePlan } from '../planner/validation'
-import { DEFAULT_MAX_RESULTS, encodeQuery, fitFilters, queryMode, type PlanQuery } from '../planner/query'
+import { encodeQuery, fitFilters, queryMode, type PlanQuery } from '../planner/query'
 import type { PlannerEstimate } from '../planner/types'
 import { nextStopId, useQueryFromUrl } from '../planner/useQueryState'
 import { PlanEstimateBar } from '../planner/components/PlanEstimateBar'
@@ -29,7 +29,6 @@ function initialQuery(): PlanQuery {
     legs: [],
     tripLength: [0, null],
     maxCost: null,
-    maxResults: DEFAULT_MAX_RESULTS,
   })
 }
 

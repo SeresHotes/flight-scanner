@@ -195,6 +195,8 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
                                          leg_cb=rep.step, max_cost=max_cost,
                                          airport_city=hot.airport_city_map(conn))
         rep.flights(sum(len(v) for v in collected.values()))
+        # Рейсы — в БД: маршруты выбранных наборов городов строятся из них по требованию.
+        hot.put_plan_flights(conn, job_id, collected)
         rep.stage("build")
 
         # Компактный результат (сегменты один раз + плоские массивы индексов): на

@@ -2,10 +2,10 @@ import { Fragment } from 'react'
 import { AirportCombobox } from '../../components/AirportCombobox'
 import { DateRangePicker } from '../../components/DateRangePicker'
 import type { AirportOption } from '../../data/airports'
-import { dayW, plural } from '../../lib/format'
+import { dayW } from '../../lib/format'
 import type { PlannerStop } from '../types'
 import type { CityQuery, LegQuery, PlanQuery } from '../query'
-import { DEFAULT_MAX_RESULTS, MAX_RESULTS, STAY_MAX, fitFilters } from '../query'
+import { STAY_MAX, fitFilters } from '../query'
 import { pointLabel, type Validation } from '../validation'
 import { RangeSlider } from './RangeSlider'
 import { TransitionFilterCard } from './TransitionFilterCard'
@@ -73,41 +73,12 @@ export function QueryEditor({
         ＋ добавить остановку
       </button>
 
-      <TripLengthFilter value={query.tripLength} onChange={(tripLength) => onChange({ ...query, tripLength })} />
-
-      <div className="pl-frow pl-bounds">
-        <div className="pl-ficon">⚙</div>
-        <div className="pl-fname">Границы</div>
-        <div className="pl-fcell">
-          <label className="pl-limit-row" title="Верхняя граница суммарной цены маршрута. Отсекает дорогие направления ещё при сборе и сужает загрузку «любых» городов.">
-            Максимум цены, ₽:{' '}
-            <input
-              type="number"
-              min={0}
-              step={5000}
-              value={query.maxCost ?? ''}
-              placeholder="без лимита"
-              onChange={(e) => onChange({ ...query, maxCost: e.target.value === '' ? null : Math.max(0, Number(e.target.value) || 0) })}
-            />
-          </label>
-        </div>
-        <div className="pl-fcell">
-          <label className="pl-limit-row" title="Сколько самых дешёвых маршрутов строить. Наборы городов считаются без этого лимита.">
-            Максимум маршрутов:{' '}
-            <input
-              type="number"
-              min={1}
-              max={MAX_RESULTS}
-              step={100}
-              value={query.maxResults}
-              onChange={(e) =>
-                onChange({ ...query, maxResults: Math.max(1, Math.min(MAX_RESULTS, Number(e.target.value) || DEFAULT_MAX_RESULTS)) })
-              }
-            />
-            <span className="pl-flabel"> {plural(query.maxResults, 'маршрут', 'маршрута', 'маршрутов')}</span>
-          </label>
-        </div>
-      </div>
+      <TripLengthFilter
+        value={query.tripLength}
+        maxCost={query.maxCost}
+        onChange={(tripLength) => onChange({ ...query, tripLength })}
+        onMaxCost={(maxCost) => onChange({ ...query, maxCost })}
+      />
     </div>
   )
 }

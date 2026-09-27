@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at  TEXT
 );
 
+-- Собранные рейсы джобы планировщика (gzip JSON {плечо: [рейсы]}): из них по
+-- требованию строятся маршруты выбранных наборов городов (/routes?combos=).
+CREATE TABLE IF NOT EXISTS plan_flights (
+    job_id      TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    data        BLOB NOT NULL
+);
+
 -- Кэш серий GraphQL (core/graphql_api.fetch_series): все страницы одного под-запроса
 -- «направление × день × прочие параметры» (params_key — коридор цен, direct, багаж).
 -- exhausted=0 — серия обрезана предохранителем страниц; pages — сколько получено.
@@ -168,6 +176,24 @@ def airport_city_map(conn: sqlite3.Connection) -> Dict[str, str]:
             if apt and city:
                 out.setdefault(apt.upper(), city.upper())
     return out
+
+
+def put_plan_flights(conn: sqlite3.Connection, job_id: str, collected: Dict[int, List[Dict[str, Any]]]) -> None:
+    """Сохраняет собранные рейсы джобы (gzip JSON) для построения маршрутов по требованию."""
+    import gzip
+    blob = gzip.compress(json.dumps({str(k): v for k, v in collected.items()}, ensure_ascii=False).encode())
+    conn.execute("INSERT OR REPLACE INTO plan_flights (job_id, created_at, data) VALUES (?, ?, ?)",
+                 (job_id, datetime.now().isoformat(), blob))
+    conn.commit()
+
+
+def get_plan_flights(conn: sqlite3.Connection, job_id: str) -> Optional[Dict[int, List[Dict[str, Any]]]]:
+    import gzip
+    row = conn.execute("SELECT data FROM plan_flights WHERE job_id=?", (job_id,)).fetchone()
+    if row is None:
+        return None
+    raw = json.loads(gzip.decompress(row["data"]).decode())
+    return {int(k): v for k, v in raw.items()}
 
 
 def count_ticket_series(conn: sqlite3.Connection) -> int:

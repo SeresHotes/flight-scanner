@@ -28,8 +28,7 @@ export interface PlanQuery {
   cities: CityQuery[] // == stops
   legs: LegQuery[] // == stops - 1
   tripLength: [number, number | null]
-  maxCost: number | null
-  maxResults: number
+  maxCost: number | null // бюджет поездки: фильтр и коридор загрузки «любых» городов
 }
 
 // Границы слайдеров (запрос задаётся до данных, поэтому границы фиксированные).
@@ -37,8 +36,6 @@ export interface PlanQuery {
 export const STAY_MAX = 30 // дней в городе
 export const TRAVEL_MAX_MIN = 48 * 60 // длительность перелёта, минут
 export const TRIP_MAX = 60 // длина поездки, дней
-export const MAX_RESULTS = 1_000_000 // совпадает с planner.MAX_RESULTS
-export const DEFAULT_MAX_RESULTS = 1000
 
 export const openCity = (): CityQuery => ({ minStay: 0, maxStay: null, mustCover: null, requireWeekend: false })
 export const openLeg = (): LegQuery => ({
@@ -82,7 +79,6 @@ export function toApi(q: PlanQuery) {
     })),
     tripLength: q.tripLength,
     maxCost: q.maxCost,
-    maxResults: q.maxResults,
   }
 }
 
@@ -91,7 +87,7 @@ export function toApi(q: PlanQuery) {
 //   st = kind.codes(-).winA.winB          — по остановке
 //   cf = minStay.maxStay.coverA.coverB.wk — по остановке ('' = ∞ / нет)
 //   lf = maxTransfers.minLayover.travelLo.travelHi.baggage(a|i|n).hidden(1|0) — по переходу
-//   tl = lo.hi   mc = maxCost   mr = maxResults
+//   tl = lo.hi   mc = бюджет поездки
 
 const F = '.'
 const L = '-'
@@ -114,7 +110,6 @@ export function encodeQuery(q: PlanQuery): URLSearchParams {
   }
   sp.set('tl', `${q.tripLength[0]}${F}${q.tripLength[1] ?? ''}`)
   if (q.maxCost !== null) sp.set('mc', String(q.maxCost))
-  sp.set('mr', String(q.maxResults))
   return sp
 }
 
@@ -150,14 +145,12 @@ export function decodeQuery(sp: URLSearchParams, nextId: () => string): PlanQuer
     }
   })
   const tl = sp.get('tl')?.split(F)
-  const mr = sp.get('mr')
   return fitFilters({
     stops,
     cities,
     legs,
     tripLength: tl ? [Number(tl[0]) || 0, numOrNull(tl[1])] : [0, null],
     maxCost: numOrNull(sp.get('mc') ?? undefined),
-    maxResults: mr ? Math.max(1, Math.min(MAX_RESULTS, Number(mr) || DEFAULT_MAX_RESULTS)) : DEFAULT_MAX_RESULTS,
   })
 }
 

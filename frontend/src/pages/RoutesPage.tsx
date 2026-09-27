@@ -63,13 +63,13 @@ function RoutesList({ jobId, combos }: { jobId: string; combos: string[] }) {
   const items = pages.flatMap((p) => p.items)
   if (!first) return <div className="empty">{loading ? 'Загружаем маршруты…' : 'Нет данных.'}</div>
   if (first.status !== 'ok' || first.total === 0) {
-    return <div className="empty">Маршрутов нет — ослабьте фильтры, поднимите потолок цены или лимит маршрутов.</div>
+    return <div className="empty">Маршрутов нет — ослабьте условия или поднимите бюджет поездки.</div>
   }
   return (
     <div className="pl-results">
       <div className="count">
-        <b>{first.total.toLocaleString('ru-RU')}</b> {plural(first.total, 'маршрут', 'маршрута', 'маршрутов')}
-        {first.total < first.count && <> из {first.count.toLocaleString('ru-RU')} собранных</>} · по возрастанию цены
+        <b>{first.total.toLocaleString('ru-RU')}</b> {plural(first.total, 'маршрут', 'маршрута', 'маршрутов')} · по
+        возрастанию цены
       </div>
       <div className="cards">
         {items.map((it) => (

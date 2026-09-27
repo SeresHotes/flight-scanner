@@ -31,8 +31,10 @@ from core.network import load_airport_network
 from core.segments import Builder, arrival_of, date_only, make_city_lookup, stay_between
 
 SECONDS_PER_REQUEST = 1.0   # GraphQL: 60 запросов в минуту (совпадает с planner/estimate.ts)
-MAX_REQUESTS = 900          # предохранитель: столько ХОЛОДНЫХ страниц (не в кэше) за один сбор, ~15 мин
+MAX_REQUESTS = 2000         # предохранитель: столько ХОЛОДНЫХ страниц (не в кэше) за один сбор, ~35 мин
 MAX_RESULTS = 1_000_000     # потолок max_results: компактный перебор держит его в памяти VM (4 ГБ)
+DEFAULT_MAX_RESULTS = 5_000 # сколько самых дешёвых цепочек строит джоба, если запрос не задал
+COMBO_MAX_RESULTS = 2_000   # сколько самых дешёвых цепочек строится на один выбранный набор
 DEFAULT_START = "2026-11-01"  # якорь старта, если окон нет нигде (совпадает с mock)
 DEFAULT_LEG_DAYS = 7          # ширина окна плеча, если оба конца без окна
 FINAL_STAY_DAYS = 5           # пребывание в финальном городе (у конца окна нет)
@@ -1088,3 +1090,31 @@ def routes_page(result: Dict[str, Any], offset: int, limit: int,
         page = list(range(offset, min(total, offset + limit)))
     return {"total": total, "offset": offset, "limit": limit,
             "items": [materialize(result, n) for n in page]}
+
+
+def build_combo_routes(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]],
+                       combos: List[List[str]], query=None, city_info=None,
+                       per_combo: int = COMBO_MAX_RESULTS) -> List[Dict[str, Any]]:
+    """Маршруты выбранных наборов городов по требованию: на каждый набор — тот же A*
+    по сохранённым рейсам джобы, но остановки зафиксированы кодами набора (окна дат
+    и фильтры запроса — прежние). Результат — Itinerary по возрастанию цены, у каждого
+    поле combo (ключ набора)."""
+    if city_info is None:
+        city_info = make_city_lookup(load_airport_network())
+    max_cost = query.max_cost if query is not None else None
+    out: List[Dict[str, Any]] = []
+    for codes in combos:
+        if len(codes) != len(stops):
+            continue
+        fixed = [Stop("cities", [code], stop.window) for code, stop in zip(codes, stops)]
+        res = build_itineraries_compact(fixed, collected, max_results=per_combo, city_info=city_info,
+                                        max_cost=max_cost, query=query)
+        key = combo_key(codes)
+        for n in range(res["count"]):
+            it = materialize(res, n)
+            it["combo"] = key
+            out.append(it)
+    out.sort(key=lambda it: it["total_price"])
+    for n, it in enumerate(out):
+        it["id"] = n + 1
+    return out
