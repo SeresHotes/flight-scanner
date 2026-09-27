@@ -560,6 +560,37 @@ def _plan_result(job_id: str) -> Optional[Dict[str, Any]]:
     return entry
 
 
+COMBO_SORTS = {"price": lambda c: (c["minPrice"], c["codes"]),
+               "count": lambda c: (-c["count"], c["minPrice"]),
+               "transfers": lambda c: (c["transfersAtMin"], c["minPrice"])}
+
+
+@app.get("/api/plan/jobs/{job_id}/combos")
+def plan_job_combos(job_id: str, offset: int = 0, limit: int = 100,
+                    sort: str = "price") -> Dict[str, Any]:
+    """Страница наборов городов готовой джобы (core/overview): {codes, minPrice,
+    transfersAtMin, minTransfers, count}; sort — price | count | transfers.
+    cities — имена/флаги кодов страницы."""
+    entry = _plan_result(job_id)
+    if entry is None:
+        return {"status": "not_ready"}
+    overview = entry["result"].get("combos")
+    if not overview:
+        return {"status": "ok", "total": 0, "totalCount": 0, "offset": offset, "limit": limit,
+                "items": [], "cities": {}}
+    combos = overview["combos"]
+    key = COMBO_SORTS.get(sort)
+    if key is not None and sort != "price":
+        combos = sorted(combos, key=key)
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    page = combos[offset:offset + limit]
+    codes = {c for it in page for c in it["codes"]}
+    return {"status": "ok", "total": len(combos), "totalCount": overview["totalCount"],
+            "offset": offset, "limit": limit, "items": page,
+            "cities": {c: overview["cities"].get(c, [c, ""]) for c in codes}}
+
+
 @app.get("/api/plan/jobs/{job_id}/routes")
 def plan_job_routes(job_id: str, offset: int = 0, limit: int = 50,
                     combos: Optional[str] = None) -> Dict[str, Any]:

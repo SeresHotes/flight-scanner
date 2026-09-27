@@ -65,7 +65,7 @@ _ROUTE_STAGES = [("queued", "В очереди"), ("fetch", "Загрузка р
                  ("build", "Сборка вариантов"), ("save", "Сохранение")]
 # У планировщика нет этапа «Сохранение»: котировки пишутся уже после done.
 _PLAN_STAGES = [("queued", "В очереди"), ("fetch", "Загрузка рейсов"),
-                ("build", "Стыковка цепочек")]
+                ("build", "Стыковка цепочек"), ("combos", "Наборы городов")]
 
 
 def initial_stage(kind: str) -> Dict[str, Any]:
@@ -304,6 +304,11 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         # Граф рёбер — для режима «наборы городов»: он оценивает ВСЕ варианты, без
         # движковых границ max_results/max_cost (см. planner.overview_graph).
         result["graph"] = planner.overview_graph(stops, collected, city_info=city_info)
+        # Наборы городов — на бэке (core/overview): все варианты под фильтры запроса,
+        # без границ max_results/max_cost. Страницы отдаёт /api/plan/jobs/{id}/combos.
+        rep.stage("combos")
+        from core.overview import build_overview
+        result["combos"] = build_overview(stops, collected, pq, city_info=city_info)
 
         if is_cancel_requested(job_id):  # не перетираем статус сброшенной джобы
             raise JobCancelled()

@@ -103,7 +103,7 @@ def test_initial_stage_is_queued_with_all_stages(tmp_path):
     hot.create_job(conn, "j0", {}, total=1, stage=worker.initial_stage("plan"))
     stage = json.loads(hot.get_job(conn, "j0")["stage_json"])
     assert stage["key"] == "queued"
-    assert [s["key"] for s in stage["stages"]] == ["queued", "fetch", "build"]
+    assert [s["key"] for s in stage["stages"]] == ["queued", "fetch", "build", "combos"]
 
 
 def test_plan_job_walks_stages_and_counts_steps(tmp_path, monkeypatch):
@@ -113,7 +113,7 @@ def test_plan_job_walks_stages_and_counts_steps(tmp_path, monkeypatch):
 
     # Этапы идут по порядку без пропусков.
     keys = [s["key"] for s in snaps]
-    assert [k for i, k in enumerate(keys) if i == 0 or keys[i - 1] != k] == ["fetch", "build"]
+    assert [k for i, k in enumerate(keys) if i == 0 or keys[i - 1] != k] == ["fetch", "build", "combos"]
 
     # Два перехода по 3 дня окна; на каждом счётчик доходит до total (страницы:
     # пара A→B по 1 + hidden-city A→ANY по PAGES_HIDDEN в день).
