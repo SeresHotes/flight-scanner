@@ -159,6 +159,36 @@ def _make_cached_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None):
     return fetch
 
 
+def make_cached_ticket_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None,
+                             ttl_seconds: float = FETCH_CACHE_TTL_SECONDS,
+                             fetch_fn: Optional[Callable[..., Dict[str, Any]]] = None):
+    """Обёртка над graphql_api.fetch_series с TTL-кэшем серий (hot.ticket_cache).
+
+    Ключ — направление, день и «прочие» параметры (коридор цен, direct, багаж).
+    На попадании возвращает сохранённую серию без обращения к источнику. Обрезанная
+    серия переиспользуется, только если в ней не меньше страниц, чем просят сейчас.
+    Серии с error=True не кэшируем. fetch_fn — подмена fetch_series в тестах."""
+    from core import graphql_api
+    real_fetch = fetch_fn or graphql_api.fetch_series
+
+    def fetch(origin=None, destination=None, day=None, *, value_min=None, value_max=None,
+              direct=None, with_baggage=None, max_pages=graphql_api.MAX_PAGES, **kw):
+        key = graphql_api.params_key(value_min, value_max, direct, with_baggage)
+        cached = hot.ticket_cache_get(conn, origin, destination, day, key, ttl_seconds,
+                                      min_pages=max_pages)
+        if cached is not None:
+            if on_cache_hit:
+                on_cache_hit()
+            return {**cached, "error": False, "cached": True}
+        series = real_fetch(origin, destination, day, value_min=value_min,
+                            value_max=value_max, direct=direct, with_baggage=with_baggage,
+                            max_pages=max_pages, **kw)
+        if not series.get("error"):
+            hot.ticket_cache_put(conn, origin, destination, day, key, series)
+        return series
+    return fetch
+
+
 def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: str,
                  lake_root: str = lake.DEFAULT_LAKE_ROOT) -> None:
     """Котировки — в горячее хранилище SQLite + дозапись в озеро (если подключено).

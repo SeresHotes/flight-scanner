@@ -1,0 +1,323 @@
+{
+ "mow_sel": [
+  {
+   "value": 36127,
+   "currency": "rub",
+   "main_airline": "U6",
+   "baggage_code": "0PC",
+   "with_baggage": false,
+   "trip_duration": 0,
+   "number_of_changes": 3,
+   "departure_at": "2026-10-15T08:25:00+03:00",
+   "origin_city_iata": "MOW",
+   "destination_city_iata": "SEL",
+   "ticket_link": "/MOW1510SEL1?t=U617920527001792263300003150DMESVXHRBFOCICN_59cce7123ecc03a7e1d4d7be260dcfef_36127&search_date=27092026&expected_price_uuid=01a0e3a5-7357-8050-a5d4-fdc66dc5b9d2&static_fare_key=TY%7CP1%7CH0%7CL0%7CCH0%7CR0%7CTBC0&itinerary_key=eCPa-39f_T1AXxFB8T3Fow&expected_price_source=share&expected_price_currency=rub&expected_price=36127",
+   "segments": [
+    {
+     "transfers": [
+      {
+       "at": "SVX",
+       "to": "SVX",
+       "country_code": "RU",
+       "duration_seconds": 9000,
+       "visa_required": false,
+       "night_transfer": false
+      },
+      {
+       "at": "HRB",
+       "to": "HRB",
+       "country_code": "CN",
+       "duration_seconds": 51300,
+       "visa_required": false,
+       "night_transfer": true
+      },
+      {
+       "at": "FOC",
+       "to": "FOC",
+       "country_code": "CN",
+       "duration_seconds": 70800,
+       "visa_required": false,
+       "night_transfer": true
+      }
+     ],
+     "flight_legs": [
+      {
+       "origin": "DME",
+       "destination": "SVX",
+       "departure_at": "2026-10-15T08:25:00+03:00",
+       "arrival_at": "2026-10-15T12:55:00+05:00",
+       "flight_number": "273",
+       "operating_carrier": "U6"
+      },
+      {
+       "origin": "SVX",
+       "destination": "HRB",
+       "departure_at": "2026-10-15T15:25:00+05:00",
+       "arrival_at": "2026-10-16T00:15:00+08:00",
+       "flight_number": "755",
+       "operating_carrier": "U6"
+      },
+      {
+       "origin": "HRB",
+       "destination": "FOC",
+       "departure_at": "2026-10-16T14:30:00+08:00",
+       "arrival_at": "2026-10-16T19:45:00+08:00",
+       "flight_number": "8822",
+       "operating_carrier": "MF"
+      },
+      {
+       "origin": "FOC",
+       "destination": "ICN",
+       "departure_at": "2026-10-17T15:25:00+08:00",
+       "arrival_at": "2026-10-17T18:55:00+09:00",
+       "flight_number": "877",
+       "operating_carrier": "MF"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "value": 38213,
+   "currency": "rub",
+   "main_airline": "U6",
+   "baggage_code": "1PC15",
+   "with_baggage": true,
+   "trip_duration": 0,
+   "number_of_changes": 2,
+   "departure_at": "2026-10-15T08:25:00+03:00",
+   "origin_city_iata": "MOW",
+   "destination_city_iata": "SEL",
+   "ticket_link": "/MOW1510SEL1?t=U617920527001792161900001460DMESVXHRBICN_c7ba765c97336a1c9cdff04ead235730_38213&search_date=27092026&expected_price_uuid=01a0e3a5-7357-8050-a5d4-fdc66dc5b9d2&static_fare_key=TY%7CP1%7CH0%7CL1_1_15%7CCH0%7CR0%7CTBC1&itinerary_key=yzkfi_6n1NHpaEmjjmQeBA&expected_price_source=share&expected_price_currency=rub&expected_price=38213",
+   "segments": [
+    {
+     "transfers": [
+      {
+       "at": "SVX",
+       "to": "SVX",
+       "country_code": "RU",
+       "duration_seconds": 9000,
+       "visa_required": false,
+       "night_transfer": false
+      },
+      {
+       "at": "HRB",
+       "to": "HRB",
+       "country_code": "CN",
+       "duration_seconds": 40200,
+       "visa_required": false,
+       "night_transfer": true
+      }
+     ],
+     "flight_legs": [
+      {
+       "origin": "DME",
+       "destination": "SVX",
+       "departure_at": "2026-10-15T08:25:00+03:00",
+       "arrival_at": "2026-10-15T12:55:00+05:00",
+       "flight_number": "273",
+       "operating_carrier": "U6"
+      },
+      {
+       "origin": "SVX",
+       "destination": "HRB",
+       "departure_at": "2026-10-15T15:25:00+05:00",
+       "arrival_at": "2026-10-16T00:15:00+08:00",
+       "flight_number": "755",
+       "operating_carrier": "U6"
+      },
+      {
+       "origin": "HRB",
+       "destination": "ICN",
+       "departure_at": "2026-10-16T11:25:00+08:00",
+       "arrival_at": "2026-10-16T14:45:00+09:00",
+       "flight_number": "8906",
+       "operating_carrier": "7C"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "value": 48737,
+   "currency": "rub",
+   "main_airline": "JD",
+   "baggage_code": "1PC23",
+   "with_baggage": true,
+   "trip_duration": 0,
+   "number_of_changes": 1,
+   "departure_at": "2026-10-15T21:20:00+03:00",
+   "origin_city_iata": "MOW",
+   "destination_city_iata": "SEL",
+   "ticket_link": "/MOW1510SEL1?t=JD17920992001792164900000735SVOTAOICN_b2e8fa85ec604f5915869b8775ef8dfb_48737&search_date=27092026&expected_price_uuid=01a0e3a5-7357-8050-a5d4-fdc66dc5b9d2&static_fare_key=TY%7CP1%7CH1%7CL1_1_23%7CCH0%7CR0%7CTBC1&itinerary_key=ZiJN2M6E8qrZtd6nuFqx9Q&expected_price_source=share&expected_price_currency=rub&expected_price=48737",
+   "segments": [
+    {
+     "transfers": [
+      {
+       "at": "TAO",
+       "to": "TAO",
+       "country_code": "CN",
+       "duration_seconds": 8700,
+       "visa_required": false,
+       "night_transfer": false
+      }
+     ],
+     "flight_legs": [
+      {
+       "origin": "SVO",
+       "destination": "TAO",
+       "departure_at": "2026-10-15T21:20:00+03:00",
+       "arrival_at": "2026-10-16T10:45:00+08:00",
+       "flight_number": "496",
+       "operating_carrier": "JD"
+      },
+      {
+       "origin": "TAO",
+       "destination": "ICN",
+       "departure_at": "2026-10-16T13:10:00+08:00",
+       "arrival_at": "2026-10-16T15:35:00+09:00",
+       "flight_number": "559",
+       "operating_carrier": "MU"
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "mow_any": [
+  {
+   "value": 19991,
+   "currency": "rub",
+   "main_airline": "DP",
+   "baggage_code": "0PC",
+   "with_baggage": false,
+   "trip_duration": 0,
+   "number_of_changes": 1,
+   "departure_at": "2026-10-15T11:10:00+03:00",
+   "origin_city_iata": "MOW",
+   "destination_city_iata": "BGW",
+   "ticket_link": "/MOW1510BGW1?t=DP17920626001792116900000905VKOISTSAWBGW_4aa346c60412719cc8fb901e70dbf205_19991&search_date=27092026&expected_price_uuid=01a0e35e-329c-8051-2c77-2018c65add56&static_fare_key=TY%7CP1%7CH0%7CL0%7CCH1%7CR0%7CTBC0&itinerary_key=yVnoxPJM-diSvlZg5MxHrw&expected_price_source=share&expected_price_currency=rub&expected_price=19991",
+   "segments": [
+    {
+     "transfers": [
+      {
+       "at": "IST",
+       "to": "SAW",
+       "country_code": "TR",
+       "duration_seconds": 26100,
+       "visa_required": false,
+       "night_transfer": false
+      }
+     ],
+     "flight_legs": [
+      {
+       "origin": "VKO",
+       "destination": "IST",
+       "departure_at": "2026-10-15T11:10:00+03:00",
+       "arrival_at": "2026-10-15T16:15:00+03:00",
+       "flight_number": "995",
+       "operating_carrier": "DP"
+      },
+      {
+       "origin": "SAW",
+       "destination": "BGW",
+       "departure_at": "2026-10-15T23:30:00+03:00",
+       "arrival_at": "2026-10-16T02:15:00+03:00",
+       "flight_number": "131",
+       "operating_carrier": "VF"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "value": 20054,
+   "currency": "rub",
+   "main_airline": "WZ",
+   "baggage_code": "0PC",
+   "with_baggage": false,
+   "trip_duration": 0,
+   "number_of_changes": 2,
+   "departure_at": "2026-10-15T10:35:00+03:00",
+   "origin_city_iata": "MOW",
+   "destination_city_iata": "ALA",
+   "ticket_link": "/MOW1510ALA1?t=WZ17920605001792209000002355SVOKZNSVXALA_194309047185f8a820df0266d7f3042d_20054&search_date=27092026&expected_price_uuid=01a0e3ff-6d38-8051-2056-ef228789f113&static_fare_key=TY%7CP0%7CH1%7CL0%7CCH0%7CR0%7CTBC0&itinerary_key=d3DrpPo4MPXo5U6BD4tK4Q&expected_price_source=share&expected_price_currency=rub&expected_price=20054",
+   "segments": [
+    {
+     "transfers": [
+      {
+       "at": "KZN",
+       "to": "KZN",
+       "country_code": "RU",
+       "duration_seconds": 82500,
+       "visa_required": false,
+       "night_transfer": true
+      },
+      {
+       "at": "SVX",
+       "to": "SVX",
+       "country_code": "RU",
+       "duration_seconds": 37800,
+       "visa_required": false,
+       "night_transfer": false
+      }
+     ],
+     "flight_legs": [
+      {
+       "origin": "SVO",
+       "destination": "KZN",
+       "departure_at": "2026-10-15T10:35:00+03:00",
+       "arrival_at": "2026-10-15T12:05:00+03:00",
+       "flight_number": "6843",
+       "operating_carrier": "DP"
+      },
+      {
+       "origin": "KZN",
+       "destination": "SVX",
+       "departure_at": "2026-10-16T11:00:00+03:00",
+       "arrival_at": "2026-10-16T14:30:00+05:00",
+       "flight_number": "1068",
+       "operating_carrier": "WZ"
+      },
+      {
+       "origin": "SVX",
+       "destination": "ALA",
+       "departure_at": "2026-10-17T01:00:00+05:00",
+       "arrival_at": "2026-10-17T03:50:00+06:00",
+       "flight_number": "1073",
+       "operating_carrier": "WZ"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "value": 20345,
+   "currency": "rub",
+   "main_airline": "SU",
+   "baggage_code": "1PC23",
+   "with_baggage": true,
+   "trip_duration": 0,
+   "number_of_changes": 0,
+   "departure_at": "2026-10-15T21:05:00+03:00",
+   "origin_city_iata": "MOW",
+   "destination_city_iata": "UUD",
+   "ticket_link": "/MOW1510UUD1?t=SU17920983001792137900000360SVOUUD_82209219a0c41a57e406d0f3567370b2_20345&search_date=27092026&expected_price_uuid=01a0e3ac-0353-8050-a1b6-b0c732bc3b2a&static_fare_key=TY%7CP1%7CH1%7CL1_1_23%7CCH1%7CR1%7CTBC1&itinerary_key=bYK4h6uz9dw96j-TtJePgQ&expected_price_source=share&expected_price_currency=rub&expected_price=20345",
+   "segments": [
+    {
+     "transfers": [],
+     "flight_legs": [
+      {
+       "origin": "SVO",
+       "destination": "UUD",
+       "departure_at": "2026-10-15T21:05:00+03:00",
+       "arrival_at": "2026-10-16T08:05:00+08:00",
+       "flight_number": "1454",
+       "operating_carrier": "SU"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
