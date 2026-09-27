@@ -48,6 +48,20 @@ poetry run python scripts/scan_any.py --reset --from-date 2026-11-02 --months 2
 Запускать из основного checkout (данные — в его `data/`); из worktree —
 `--db <main>/data/flights.db --lake-root <main>/data/lake --state <main>/data/anyscan_state.json`.
 
+**Сбор на VM** (не зависит от локального соединения): отдельный контейнер из
+того же образа api, тот же том данных и `.env` с токеном, перезапуск при сбое;
+результат сразу виден проду через `/api/graph/*` (кэш графа 5 мин).
+
+```sh
+ssh ubuntu@93.77.186.45
+set -a; source /opt/flights/.env; set +a
+sudo docker run -d --name flights-scan --restart on-failure   --env-file /opt/flights/.env -v /opt/flights/data:/app/data "$API_IMAGE"   python -u scripts/scan_any.py                    # весь обход; --max-cities N — порция
+sudo docker logs -f flights-scan | grep '\[scan\]'  # прогресс; состояние — /opt/flights/data/anyscan_state.json
+sudo docker rm -f flights-scan                     # остановить (повторный запуск продолжит очередь)
+```
+Контейнер `flights-scan` не входит в compose и переживает деплои api; после
+обновления образа перезапустить его вручную, чтобы подхватить новый код.
+
 **Граф** (`core/transfer_graph.py`): вершины — аэропорты, рёбра — сегменты
 прямых перелётов из цепочки `link`, отдельно — наблюдённые билеты с пересадками
 (цена, дата, багаж). Строится из `quotes` на лету или сохраняется:
