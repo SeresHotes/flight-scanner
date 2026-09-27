@@ -4,7 +4,7 @@
 import type { JobStatus } from '../data/jobsApi'
 import type { PlanQuery } from './query'
 import { toApi } from './query'
-import type { Itinerary } from './types'
+import type { Itinerary, PlannerEstimate } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
@@ -48,6 +48,15 @@ async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return (await res.json()) as T
+}
+
+// Оценка с учётом кэша серий на бэке (клиентская estimate.ts — мгновенный черновик без кэша).
+export function fetchEstimate(q: PlanQuery): Promise<PlannerEstimate & { status?: string; message?: string }> {
+  return getJson(`${API_BASE}/plan/estimate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(toApi(q)),
+  })
 }
 
 export function runPlan(q: PlanQuery): Promise<RunResponse> {

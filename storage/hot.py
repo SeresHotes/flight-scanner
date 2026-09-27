@@ -205,6 +205,25 @@ def ticket_cache_get(conn: sqlite3.Connection, origin: Optional[str],
             "exhausted": bool(row["exhausted"])}
 
 
+def ticket_cache_has(conn: sqlite3.Connection, origin: Optional[str],
+                     destination: Optional[str], search_date: str, params_key: str,
+                     ttl_seconds: float, min_pages: Optional[int] = None) -> bool:
+    """Есть ли серия в кэше (те же правила, что ticket_cache_get), без чтения данных —
+    для оценки «сколько страниц уже в кэше» перед сбором."""
+    o, d = _fetch_cache_key(origin, destination)
+    row = conn.execute(
+        "SELECT fetched_at, pages, exhausted FROM ticket_cache "
+        "WHERE origin=? AND destination=? AND search_date=? AND params_key=?",
+        (o, d, search_date, params_key),
+    ).fetchone()
+    if row is None:
+        return False
+    age = (datetime.now() - datetime.fromisoformat(row["fetched_at"])).total_seconds()
+    if age > ttl_seconds:
+        return False
+    return bool(row["exhausted"]) or min_pages is None or row["pages"] >= min_pages
+
+
 def ticket_cache_put(conn: sqlite3.Connection, origin: Optional[str],
                      destination: Optional[str], search_date: str, params_key: str,
                      series: Dict[str, Any]) -> None:

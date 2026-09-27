@@ -31,7 +31,7 @@ from core.network import load_airport_network
 from core.segments import Builder, arrival_of, date_only, make_city_lookup, stay_between
 
 SECONDS_PER_REQUEST = 1.0   # GraphQL: 60 запросов в минуту (совпадает с planner/estimate.ts)
-MAX_REQUESTS = 600          # предохранитель от слишком широких окон (~10 мин сбора без кэша)
+MAX_REQUESTS = 900          # предохранитель: столько ХОЛОДНЫХ страниц (не в кэше) за один сбор, ~15 мин
 MAX_RESULTS = 1_000_000     # потолок max_results: компактный перебор держит его в памяти VM (4 ГБ)
 DEFAULT_START = "2026-11-01"  # якорь старта, если окон нет нигде (совпадает с mock)
 DEFAULT_LEG_DAYS = 7          # ширина окна плеча, если оба конца без окна
@@ -152,12 +152,46 @@ def _leg_requests(stops: List[Stop], i: int) -> int:
     return days * max(1, len(anchor.codes)) * PAGES_ANY
 
 
-def estimate_plan(stops: List[Stop], city_info=None) -> Dict[str, Any]:
-    """Оценка объёма сбора цепочки (совпадает с planner/estimate.ts)."""
+def plan_series(stops: List[Stop], max_cost: Optional[float] = None):
+    """Детерминированные серии сбора: (плечо, origin|None, dest|None, день, value_min,
+    value_max, страниц). Серии hidden-city сюда не входят — их коридор зависит от
+    лучшей цены дня и известен только в сборе (в оценке они всегда «холодные»)."""
+    out = []
+    vmax = int(max_cost) if max_cost else None
+    for i in range(len(stops) - 1):
+        from_stop, to_stop = stops[i], stops[i + 1]
+        for day in _leg_dates(stops, i):
+            if from_stop.kind == "cities" and to_stop.kind == "cities":
+                for a in from_stop.codes:
+                    for b in to_stop.codes:
+                        out.append((i, a, b, day, None, None, PAGES_CITY))
+            elif from_stop.kind == "cities":
+                for a in from_stop.codes:
+                    out.append((i, a, None, day, None, vmax, PAGES_ANY))
+            else:
+                for b in to_stop.codes:
+                    out.append((i, None, b, day, None, vmax, PAGES_ANY))
+    return out
+
+
+def estimate_plan(stops: List[Stop], city_info=None, max_cost: Optional[float] = None,
+                  is_cached: Optional[Callable[..., bool]] = None) -> Dict[str, Any]:
+    """Оценка объёма сбора цепочки (совпадает с planner/estimate.ts): requests —
+    всего страниц (по потолку серий), cached — сколько из них уже в кэше серий,
+    cold — сколько реально пойдёт в источник, seconds — по холодным.
+
+    is_cached(origin, dest, day, params_key, pages) → bool — проба кэша (storage.hot);
+    без неё всё считается холодным."""
     if city_info is None:
         city_info = make_city_lookup(load_airport_network())
+    from core.graphql_api import params_key
+    cached_by_leg: Dict[int, int] = {}
+    if is_cached is not None:
+        for i, origin, dest, day, vmin, vmax, pages in plan_series(stops, max_cost):
+            if is_cached(origin, dest, day, params_key(vmin, vmax), pages):
+                cached_by_leg[i] = cached_by_leg.get(i, 0) + pages
     legs = []
-    requests = 0
+    requests = cached = 0
     for i in range(len(stops) - 1):
         days = _leg_days(stops, i)
         reqs = _leg_requests(stops, i)
@@ -166,10 +200,14 @@ def estimate_plan(stops: List[Stop], city_info=None) -> Dict[str, Any]:
             "toLabel": _stop_label(stops[i + 1], city_info),
             "days": days,
             "requests": reqs,
+            "cached": cached_by_leg.get(i, 0),
             "anyLeg": stops[i].kind == "any" or stops[i + 1].kind == "any",
         })
         requests += reqs
-    return {"requests": requests, "seconds": round(requests * SECONDS_PER_REQUEST), "legs": legs}
+        cached += cached_by_leg.get(i, 0)
+    cold = max(0, requests - cached)
+    return {"requests": requests, "cached": cached, "cold": cold,
+            "seconds": round(cold * SECONDS_PER_REQUEST), "legs": legs}
 
 
 def request_count(stops: List[Stop]) -> int:

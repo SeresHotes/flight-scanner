@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import type { AirportOption } from '../data/airports'
 import { estimatePlan } from '../planner/estimate'
-import { runPlan } from '../planner/api'
+import { fetchEstimate, runPlan } from '../planner/api'
 import { validatePlan } from '../planner/validation'
 import { DEFAULT_MAX_RESULTS, encodeQuery, fitFilters, queryMode, type PlanQuery } from '../planner/query'
+import type { PlannerEstimate } from '../planner/types'
 import { nextStopId, useQueryFromUrl } from '../planner/useQueryState'
 import { PlanEstimateBar } from '../planner/components/PlanEstimateBar'
 import { QueryEditor } from '../planner/components/QueryEditor'
@@ -57,8 +58,28 @@ export function PlanPage() {
     setSearchParams(new URLSearchParams(encoded), { replace: true })
   }, [encoded, setSearchParams])
 
-  const estimate = useMemo(() => estimatePlan(query.stops), [query.stops])
   const validation = useMemo(() => validatePlan(query.stops), [query.stops])
+  // Оценка: мгновенно клиентская (без кэша), затем уточнённая с бэка — сколько
+  // страниц уже в кэше серий и сколько реально пойдёт в источник.
+  const clientEstimate = useMemo(() => estimatePlan(query.stops), [query.stops])
+  const [serverEstimate, setServerEstimate] = useState<PlannerEstimate | null>(null)
+  useEffect(() => {
+    setServerEstimate(null)
+    if (!validation.ok) return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      fetchEstimate(query)
+        .then((est) => {
+          if (!cancelled && !est.status) setServerEstimate(est)
+        })
+        .catch(() => undefined)
+    }, 400)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [encoded, validation.ok]) // eslint-disable-line react-hooks/exhaustive-deps
+  const estimate = serverEstimate ?? clientEstimate
 
 
   async function run() {
