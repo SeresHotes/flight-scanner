@@ -113,9 +113,13 @@ tripLength[lo,hi], maxCost|null, maxResults
 - **Hidden-city** (флаг в фильтре плеча): для плеча A→B из **A→ANY** берём билеты,
   у которых B — любая пересадка (не только первая) и цена ниже лучшего A→B того
   дня; виртуальный рейс: прилёт в B **реальный** из `flight_legs`, `transfers` =
-  позиция B − 1, багаж = «только ручная кладь» (для фильтра `baggage=included`
-  такой рейс не проходит; если следующий сегмент внутренний в CN/US/CA/RU —
-  метка «багаж, вероятно, выдадут», но не гарантия). Если плечо якорится по A,
+  позиция B − 1. **Багаж:** зарегистрированный багаж по билету едет до X, в B
+  его не выдадут. Исключение — B первый аэропорт въезда в страну с таможней при
+  первом входе (CN, US, CA, RU) и следующий сегмент внутренний: тогда багаж
+  получают и сдают заново. Поэтому: если по билету багаж есть **и** следующий
+  сегмент внутренний в такой стране — `baggage = included`, метка «вероятно,
+  выдадут в B, не гарантия»; иначе — «только ручная кладь», фильтр
+  `baggage=included` такой рейс отсекает. Если плечо якорится по A,
   A→ANY уже есть; если по B — добавляем A→ANY с `value_max = лучший A→B`
   (2–4 страницы/день на город A). Для ANY-плеча A→ANY даёт hidden-city
   во **все** промежуточные аэропорты бесплатно.
@@ -125,8 +129,12 @@ tripLength[lo,hi], maxCost|null, maxResults
   иначе константа.
 - Сохранение: `quotes` → новая таблица `tickets` (плюс `segments_json`,
   `baggage_code`, `arrival_at`, `source`); озеро Parquet — те же поля.
-  `scripts/scan_any.py` и `/api/graph/*` не трогаем (отдельная задача — перевод
-  на GraphQL).
+  Граф пересадок (`core/transfer_graph.py`, `/api/graph/*`, `scripts/scan_any.py`,
+  `scripts/hidden_city.py`, `scripts/build_transfer_graph.py`) планировщику не
+  нужен: тот же ответ («через что бывают пересадки», hidden-city) даёт A→ANY в
+  момент запроса, полнее и без предварительного сбора. Удаляется в PR чистки.
+  Контейнер `flights-scan` на VM продукту тоже не нужен (он кормил граф);
+  останавливать ли его — решение пользователя.
 
 ### 3. Построение на бэке
 
@@ -174,7 +182,8 @@ tripLength[lo,hi], maxCost|null, maxResults
 | `GET /api/plan/jobs/{id}/combos?sort&offset&limit` | наборы городов |
 | `GET /api/plan/jobs/{id}/routes?combos&sort&offset&limit` | страница маршрутов с полными сегментами |
 | удаляются | `/api/search`, `/api/gather`, `/api/routes`, `/api/jobs/{id}` (классика) |
-| остаются | `/api/airports`, `/api/health`, `/api/graph/*`, `/api/jobs/rescue` |
+| удаляются в чистке | `/api/graph/*` (граф пересадок) |
+| остаются | `/api/airports`, `/api/health`, `/api/jobs/rescue` |
 
 ## Риски и допущения
 
@@ -192,9 +201,10 @@ tripLength[lo,hi], maxCost|null, maxResults
 4. **Память VM 4 ГБ.** Билеты GraphQL тяжелее (сегменты). Держим их в SQLite, в
    RAM — только `_FlightTable` (массивы) и compact-результат; `MAX_PAGES_PER_DAY`
    ограничивает объём.
-5. **Hidden-city и багаж.** Рейс hidden-city считаем «без зарегистрированного
-   багажа» для фильтра; ручная кладь только. Правила Aviasales/Travelpayouts к
-   таким ссылкам не проверены.
+5. **Hidden-city и багаж.** Правило «внутренний сегмент после таможни ⇒ багаж
+   выдадут» — эвристика: список стран не проверен, в Китае есть пилоты сквозного
+   багажа. Показываем как «вероятно», не как гарантию. Правила
+   Aviasales/Travelpayouts к таким ссылкам не проверены.
 6. **Data API ≠ live.** «Все рейсы» = все билеты из кэша пользовательских поисков
    с лагом до суток, не расписание.
 7. Два старых падения в `tests/test_job_stages.py` — в main до этой работы.
@@ -215,5 +225,6 @@ tripLength[lo,hi], maxCost|null, maxResults
 5. Новый поток страниц: `/` → `/combos/:id` (мультивыбор) → `/routes/:id`;
    удаление классики и IndexedDB-кэша; `urlState` под `PlanQuery`.
 6. Чистка: `core/aggregate.py`, `core/trip_builder.py` (перенос `make_segment`),
-   корневые скрипты классики, `web/`, `results/`, docs (`PLAN.md`, `PLANNER.md`,
-   `RUN.md`), CHANGELOG.
+   граф пересадок (`core/transfer_graph.py`, `core/anyscan.py`, `scripts/*`,
+   `/api/graph/*`, раздел в CLAUDE.md), корневые скрипты классики, `web/`,
+   `results/`, docs (`PLAN.md`, `PLANNER.md`, `RUN.md`), CHANGELOG.
