@@ -1,0 +1,549 @@
+type Query {
+  """ Query for one way prices """
+  prices_one_way(paging: Paging = {limit:30,offset:0}, sorting: Sorting = VALUE_ASC, grouping: GroupingOneWay = DATES, params: ParamsOneWay!, currency: String = rub, market: String = ru, brand: Brand = AS): [Price!]!
+  """ Query for round trip prices """
+  prices_round_trip(paging: Paging = {limit:30,offset:0}, sorting: Sorting = VALUE_ASC, grouping: GroupingRoundTrip = DATES, params: ParamsRoundTrip!, currency: String = rub, market: String = ru, brand: Brand = AS): [Price!]!
+  """ Query for one way special offers """
+  special_offers_one_way(paging: Paging = {limit:30,offset:0}, grouping: GroupingSpecialOfferOneWay = DEPART_DATE, params: ParamsSpecialOfferOneWay!, currency: String = rub, experimental: Boolean = false, market: String = ru, brand: Brand = AS): [Price!]!
+  """ Query for round trip special offers """
+  special_offers_round_trip(paging: Paging = {limit:30,offset:0}, grouping: GroupingSpecialOfferRoundTrip = DATES, params: ParamsSpecialOfferRoundTrip!, currency: String = rub, experimental: Boolean = false, market: String = ru, brand: Brand = AS): [Price!]!
+  """ Query for round trip weekend prices """
+  weekend_prices_round_trip(paging: Paging = {limit:30,offset:0}, sorting: Sorting = VALUE_ASC, grouping: GroupingWeekendRoundTrip = DEPART_RETURN_DATE_HOUR, params: ParamsWeekendRoundTrip!, currency: String = rub, experimental: Boolean = false, market: String = ru, brand: Brand = AS): [Price!]!
+}
+
+enum Brand {
+  """ Aviasales brand """
+  AS
+}
+
+""" Date format YYYY-MM-DD """
+scalar Date
+
+""" DateTime format YYYY-MM-DD hh:mm """
+scalar DateTime
+
+type FlightLeg {
+  """ Origin airport IATA code """
+  origin: String!
+  """ Destination airport IATA code """
+  destination: String!
+  """ Departure date """
+  departure_at: String!
+  """ Arrival date """
+  arrival_at: String!
+  """ Flight number """
+  flight_number: String!
+  """ Airline carrying """
+  operating_carrier: String!
+  """ Aircraft model code """
+  aircraft_code: String!
+}
+
+""" One way grouping options """
+enum GroupingOneWay {
+  """ DO NOT GROUP """
+  NONE
+  """ GROUP BY depart_date """
+  DEPART_DATE
+  """ GROUP BY origin_city_iata, destination_city_iata """
+  DIRECTIONS
+  """ GROUP BY depart_date, return_date """
+  DATES
+  """ GROUP BY depart_date, return_date, number_of_changes """
+  DATES_NUM_OF_CHANGES
+  """ GROUP BY depart_year, depart_month """
+  YEAR_MONTH
+}
+
+""" Round trip grouping options """
+enum GroupingRoundTrip {
+  """ DO NOT GROUP """
+  NONE
+  """ GROUP BY depart_date """
+  DEPART_DATE
+  """ GROUP BY origin_city_iata, destination_city_iata """
+  DIRECTIONS
+  """ GROUP BY depart_date, return_date """
+  DATES
+  """ GROUP BY depart_date, return_date, number_of_changes """
+  DATES_NUM_OF_CHANGES
+  """ GROUP BY depart_year, depart_month """
+  YEAR_MONTH
+}
+
+""" Special offers one way grouping options """
+enum GroupingSpecialOfferOneWay {
+  """ GROUP BY depart_date """
+  DEPART_DATE
+  """ GROUP BY origin_city_iata, destination_city_iata """
+  DIRECTIONS
+}
+
+""" Special offers round trip grouping options """
+enum GroupingSpecialOfferRoundTrip {
+  """ GROUP BY depart_date, return_date """
+  DATES
+  """ GROUP BY origin_city_iata, destination_city_iata """
+  DIRECTIONS
+}
+
+""" Weekend round trip grouping options """
+enum GroupingWeekendRoundTrip {
+  """ GROUP BY depart_date, depart_hour, return_date, return_hour """
+  DEPART_RETURN_DATE_HOUR
+  """ GROUP BY depart_date """
+  DEPART_DATE
+  """ GROUP BY depart_date, return_date """
+  DATES
+  """ GROUP BY origin_city_iata, destination_city_iata """
+  DIRECTIONS
+}
+
+""" Pagination parameters """
+input Paging {
+  limit: Int!
+  offset: Int!
+}
+
+""" Search params for one way prices """
+input ParamsOneWay {
+  """Origin IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with origin_type field.
+If origin_type isn't provided, tries to resolve origin type automatically"""
+  origin: String
+  """ Origin place type, resolved by application if it was left blank """
+  origin_type: PlaceType
+  """Destination IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with destination_type field.
+If destination_type isn't provided, tries to resolve destination type automatically"""
+  destination: String
+  """ Destination place type, resolved by application if it was left blank """
+  destination_type: PlaceType
+  """ Trip class """
+  trip_class: TripClass
+  """List of depart months.
+Must be provided in 'YYYY-MM-01' format"""
+  depart_months: [Date!]
+  """List of depart dates.
+Must be provided in 'YYYY-MM-DD' format"""
+  depart_dates: [Date!]
+  """ Minimum departure date """
+  depart_date_min: Date
+  """ Maximum departure date """
+  depart_date_max: Date
+  """ Minimum ticket price """
+  value_min: Int
+  """ Maximum ticket price """
+  value_max: Int
+  """ Only direct flights, number of changes = 0 """
+  direct: Boolean
+  """Only convenient tickets, which are:
+- with a maximum of one transfer;
+- no overnight transfers;
+- no long transfers (>=4 hours);
+- no short transfers (<=60 minutes);
+- no transfers with a change of airport;
+- no transfers that require a visa."""
+  convenient: Boolean
+  """Without lowcost airline tickets
+
+Deprecated: parameter is ignored"""
+  no_lowcost: Boolean
+  """ Visa isn't required when transfer """
+  no_visa_at_transfer: Boolean
+  """ With baggage """
+  with_baggage: Boolean
+}
+
+""" Search params for round trip prices """
+input ParamsRoundTrip {
+  """Origin IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with origin_type field.
+If origin_type isn't provided, tries to resolve origin type automatically"""
+  origin: String
+  """ Origin place type, resolved by application if it was left blank """
+  origin_type: PlaceType
+  """Destination IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with destination_type field.
+If destination_type isn't provided, tries to resolve destination type automatically"""
+  destination: String
+  """ Destination place type, resolved by application if it was left blank """
+  destination_type: PlaceType
+  """ Trip class """
+  trip_class: TripClass
+  """List of depart months.
+Must be provided in 'YYYY-MM-01' format"""
+  depart_months: [Date!]
+  """List of depart dates.
+Must be provided in 'YYYY-MM-DD' format"""
+  depart_dates: [Date!]
+  """List of return dates.
+Must be provided in 'YYYY-MM-DD' format"""
+  return_dates: [Date!]
+  """ Minimum departure date """
+  depart_date_min: Date
+  """ Maximum departure date """
+  depart_date_max: Date
+  """ Minimum return date """
+  return_date_min: Date
+  """ Maximum return date """
+  return_date_max: Date
+  """ Minimum trip duration in days """
+  trip_duration_min: Int
+  """ Maximum trip duration in days """
+  trip_duration_max: Int
+  """ Minimum price """
+  value_min: Int
+  """ Maximum price """
+  value_max: Int
+  """ Only direct flights, number of changes = 0 """
+  direct: Boolean
+  """Only convenient tickets, which are:
+- with a maximum of one transfer;
+- no overnight transfers;
+- no long transfers (>=4 hours);
+- no short transfers (<=60 minutes);
+- no transfers with a change of airport;
+- no transfers with visa."""
+  convenient: Boolean
+  """Without lowcost airline tickets
+
+Deprecated: parameter is ignored"""
+  no_lowcost: Boolean
+  """ Visa isn't required when transfer """
+  no_visa_at_transfer: Boolean
+  """ With baggage """
+  with_baggage: Boolean
+}
+
+""" Search params for one way special offers """
+input ParamsSpecialOfferOneWay {
+  """Origin IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with origin_type field.
+If origin_type isn't provided, tries to resolve origin type automatically"""
+  origin: String
+  """ Origin place type, resolved by application if it was left blank """
+  origin_type: PlaceType
+  """Destination IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with destination_type field.
+If destination_type isn't provided, tries to resolve destination type automatically"""
+  destination: String
+  """ Destination place type, resolved by application if it was left blank """
+  destination_type: PlaceType
+  """ Trip class """
+  trip_class: TripClass
+  """List of depart months.
+Must be provided in 'YYYY-MM-01' format"""
+  depart_months: [Date!]
+  """List of depart dates.
+Must be provided in 'YYYY-MM-DD' format"""
+  depart_dates: [Date!]
+  """ Minimum departure date """
+  depart_date_min: Date
+  """ Maximum departure date """
+  depart_date_max: Date
+  """ Minimum ticket price """
+  value_min: Int
+  """ Maximum ticket price """
+  value_max: Int
+  """ Only direct flights, number of changes = 0 """
+  direct: Boolean
+  """Only convenient tickets, which are:
+- with a maximum of one transfer;
+- no overnight transfers;
+- no long transfers (>=4 hours);
+- no short transfers (<=60 minutes);
+- no transfers with a change of airport;
+- no transfers with visa."""
+  convenient: Boolean
+  """Without lowcost airline tickets
+
+Deprecated: parameter is ignored"""
+  no_lowcost: Boolean
+  """ Visa isn't required when transfer """
+  no_visa_at_transfer: Boolean
+  """ With baggage """
+  with_baggage: Boolean
+}
+
+""" Search params for round trip special offers """
+input ParamsSpecialOfferRoundTrip {
+  """Origin IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with origin_type field.
+If origin_type isn't provided, tries to resolve origin type automatically"""
+  origin: String
+  """ Origin place type, resolved by application if it was left blank """
+  origin_type: PlaceType
+  """Destination IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with destination_type field.
+If destination_type isn't provided, tries to resolve destination type automatically"""
+  destination: String
+  """ Destination place type, resolved by application if it was left blank """
+  destination_type: PlaceType
+  """ Trip class """
+  trip_class: TripClass
+  """List of depart months.
+Must be provided in 'YYYY-MM-01' format"""
+  depart_months: [Date!]
+  """List of depart dates.
+Must be provided in 'YYYY-MM-DD' format"""
+  depart_dates: [Date!]
+  """ Minimum departure date """
+  depart_date_min: Date
+  """ Maximum departure date """
+  depart_date_max: Date
+  """ Minimum ticket price """
+  value_min: Int
+  """ Maximum ticket price """
+  value_max: Int
+  """ Only direct flights, number of changes = 0 """
+  direct: Boolean
+  """Only convenient tickets, which are:
+- with a maximum of one transfer;
+- no overnight transfers;
+- no long transfers (>=4 hours);
+- no short transfers (<=60 minutes);
+- no transfers with a change of airport;
+- no transfers with visa."""
+  convenient: Boolean
+  """Without lowcost airline tickets
+
+Deprecated: parameter is ignored"""
+  no_lowcost: Boolean
+  """ Visa isn't required when transfer """
+  no_visa_at_transfer: Boolean
+  """ With baggage """
+  with_baggage: Boolean
+  """List of return dates.
+Must be provided in 'YYYY-MM-DD' format"""
+  return_dates: [Date!]
+  """ Minimum return date """
+  return_date_min: Date
+  """ Maximum return date """
+  return_date_max: Date
+  """ Trip duration in days """
+  trip_duration: Int
+}
+
+""" Search params for round trip prices """
+input ParamsWeekendRoundTrip {
+  """Origin IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with origin_type field.
+If origin_type isn't provided, tries to resolve origin type automatically"""
+  origin: String
+  """ Origin place type, resolved by application if it was left blank """
+  origin_type: PlaceType
+  """Destination IATA code.
+Accepts airport, city or country IATA code as input. Can be used together or separately with destination_type field.
+If destination_type isn't provided, tries to resolve destination type automatically"""
+  destination: String!
+  """ Destination place type, resolved by application if it was left blank """
+  destination_type: PlaceType
+  """ Trip class """
+  trip_class: TripClass
+  """List of depart months.
+Must be provided in 'YYYY-MM-01' format
+
+Deprecated: parameter is ignored"""
+  depart_months: [Date!]
+  """List of depart dates.
+Must be provided in 'YYYY-MM-DD' format
+
+Deprecated: parameter is ignored"""
+  depart_dates: [Date!]
+  """Minimum departure date
+
+Deprecated: parameter is ignored"""
+  depart_date_min: Date
+  """Maximum departure date
+
+Deprecated: parameter is ignored"""
+  depart_date_max: Date
+  """ Minimum departure datetime """
+  depart_date_time_min: DateTime
+  """ Maximum departure datetime """
+  depart_date_time_max: DateTime
+  """ Minimum price """
+  value_min: Int
+  """ Maximum price """
+  value_max: Int
+  """Only direct flights, number of changes = 0
+
+Deprecated: parameter is ignored"""
+  direct: Boolean
+  """Only convenient tickets, which are:
+- with a maximum of one transfer;
+- no overnight transfers;
+- no long transfers (>=4 hours);
+- no short transfers (<=60 minutes);
+- no transfers with a change of airport;
+- no transfers with visa."""
+  convenient: Boolean
+  """Visa isn't required when transfer
+
+Deprecated: parameter is ignored"""
+  no_visa_at_transfer: Boolean
+  """With baggage
+
+Deprecated: parameter is ignored"""
+  with_baggage: Boolean
+  """List of return dates.
+Must be provided in 'YYYY-MM-DD' format
+
+Deprecated: parameter is ignored"""
+  return_dates: [Date!]
+  """Minimum return date
+
+Deprecated: parameter is ignored"""
+  return_date_min: Date
+  """Maximum return date
+
+Deprecated: parameter is ignored"""
+  return_date_max: Date
+  """ Minimum return datetime """
+  return_date_time_min: DateTime
+  """ Maximum return datetime """
+  return_date_time_max: DateTime
+  """ Minimum trip duration in days """
+  trip_duration_min: Int
+  """ Maximum trip duration in days """
+  trip_duration_max: Int
+}
+
+""" Place types """
+enum PlaceType {
+  """ Airport """
+  AIRPORT
+  """ City """
+  CITY
+  """ Country """
+  COUNTRY
+}
+
+type Price {
+  """ Departure date """
+  departure_at: String!
+  """ Return date, can be left empty if one way ticket """
+  return_at: String
+  """ Origin airport IATA code """
+  origin_airport_iata: String!
+  """ Origin city IATA code """
+  origin_city_iata: String!
+  """ Origin country IATA code """
+  origin_country_iata: String!
+  """ Destination airport IATA code """
+  destination_airport_iata: String!
+  """ Destination city IATA code """
+  destination_city_iata: String!
+  """ Destination country IATA code """
+  destination_country_iata: String!
+  """ Price in a given currency """
+  value: Float!
+  """ Currency ISO code """
+  currency: String!
+  """ Route weight score """
+  route_weight: Int!
+  """ Distance in kilometers between origin and destination """
+  distance: Int
+  """ Flight duration in minutes of all flight legs """
+  duration: Int!
+  """ Duration in days between departure and return dates. Only for round trip prices """
+  trip_duration: Int!
+  """ Price per kilometer """
+  distance_unit_price: Float! @deprecated(reason: "field is ignored")
+  """ Maximum number of transfers per segment """
+  number_of_changes: Int!
+  """ Agent who offers this ticket """
+  gate: String!
+  """ UUID of search """
+  search_id: String!
+  """ Airline that flies the longest among all segments """
+  main_airline: String!
+  """ Date and time when the ticket was found """
+  found_at: Int!
+  """ No lowcost (watch the definition in query params) """
+  no_lowcost: Boolean!
+  """ No night change (watch the definition in query params) """
+  no_night_change: Boolean!
+  """ Convenient (watch the definition in query params) """
+  convenient: Boolean!
+  """ Visa isn't required when transfer """
+  no_visa_at_transfer: Boolean!
+  """Baggage code describes the checked-baggage allowance for the returned offer in the following format:
+{pieces}PC — number of baggage pieces (weight not specified)
+{pieces}PC{weightKg} — number of pieces + max weight in kilograms (per piece)
+{pieces}PC{weightKg}x{dimSum} — number of pieces + weight (kg) + total dimensions sum"""
+  baggage_code: String!
+  """ With baggage """
+  with_baggage: Boolean!
+  """ Segments """
+  segments: [Segment!]!
+  """ Ticket link """
+  ticket_link: String!
+  """ Discount calculated as deviation from average price for current ticket """
+  discount: Float!
+  """ Ticket trip class """
+  trip_class: String!
+  """ Price source """
+  provider: PriceProvider!
+}
+
+""" Price providers """
+enum PriceProvider {
+  """ Organic searches """
+  ORGANIC
+  """ External source """
+  EXTERNAL
+  """ Predicted price """
+  PREDICTED
+}
+
+type Segment {
+  """ Departure date of the first flight of the segment """
+  departure_at: String!
+  """ Arrival date of the last flight of the segment """
+  arrival_at: String!
+  """ Transfers of the segment """
+  transfers: [Transfer!]!
+  """ Flights of the segment """
+  flight_legs: [FlightLeg!]!
+}
+
+""" Sorting options """
+enum Sorting {
+  """ ORDER BY value ASC """
+  VALUE_ASC
+  """ ORDER BY distance_unit_price ASC(deprecated)"""
+  DISTANCE_UNIT_PRICE_ASC
+  """ ORDER BY route_weight DESC """
+  ROUTE_WEIGHT_DESC
+  """ ORDER BY discount DESC """
+  DISCOUNT_DESC
+}
+
+type Transfer {
+  """ Origin of transfer """
+  at: String!
+  """ Destination of transfer """
+  to: String!
+  """ Country code """
+  country_code: String!
+  """ Duration of transfer in seconds """
+  duration_seconds: Int!
+  """ Night transfer """
+  night_transfer: Boolean!
+  """ Visa required """
+  visa_required: Boolean!
+}
+
+""" Trip class options """
+enum TripClass {
+  """ Economy class """
+  Y
+  """ Business class """
+  C
+  """ First class """
+  F
+  """ Premium economy """
+  W
+}

@@ -1,38 +1,6 @@
-# API данных Aviasales для партнёров (Travelpayouts Data API)
+# API данных Aviasales для партнёров
 
-> Копия статьи https://support.travelpayouts.com/hc/ru/articles/203956163
-> (версия от 2026-09-06, сохранено 2026-09-27; получено через Zendesk API
-> `https://support.travelpayouts.com/api/v2/help_center/ru/articles/203956163.json`,
-> сама страница закрыта Cloudflare). Документация для разработчиков —
-> https://travelpayouts.github.io/slate/#about-api. Токен — заголовок `X-Access-Token` или параметр `token=`.
->
-> В проекте из REST используется только `prices_for_dates`; основной источник —
-> GraphQL `prices_one_way` (см. `core/graphql_api.py`, `docs/PLANNER_V2.md`).
-
-## Сводка ручек
-
-| Ручка | Назначение |
-|---|---|
-| `GET https://api.travelpayouts.com/aviasales/v3/prices_for_dates` | Самые дешёвые билеты на конкретные даты/месяцы |
-| `GET https://api.travelpayouts.com/aviasales/v3/grouped_prices` | Дешёвые билеты, сгруппированные (например, по дате вылета) |
-| `GET https://api.travelpayouts.com/aviasales/v3/get_latest_prices` | Цены на билеты за период |
-| `GET https://api.travelpayouts.com/v2/prices/month-matrix` | Календарь цен на месяц |
-| `GET https://api.travelpayouts.com/v2/prices/nearest-places-matrix` | Цены по альтернативным (соседним) направлениям |
-| `GET https://api.travelpayouts.com/v1/prices/cheap` | Самые дешёвые билеты |
-| `GET https://api.travelpayouts.com/v1/prices/direct` | Самый дешёвый билет без пересадок |
-| `GET https://api.travelpayouts.com/v1/prices/calendar` | Билеты на любое число месяца |
-| `GET https://api.travelpayouts.com/v1/airline-directions` | Популярные направления авиакомпании |
-| `GET https://api.travelpayouts.com/aviasales/v3/get_special_offers` | Специальные предложения |
-| `GET https://api.travelpayouts.com/v2/prices/week-matrix` | Календарь цен на неделю |
-| `GET https://api.travelpayouts.com/v1/city-directions` | Популярные направления из города |
-| `GET https://api.travelpayouts.com/aviasales/v3/get_popular_directions` | Самые дешёвые билеты на популярные направления |
-| `GET https://api.travelpayouts.com/aviasales/v3/search_by_price_range` | Поиск билетов в ценовом коридоре (`value_min`/`value_max`) |
-| `GET http://pics.avs.io/{width}/{height}/{iata}.png` | Логотипы авиакомпаний |
-| `GET http://yasen.aviasales.ru/adaptors/currency.json` | Курсы валют к рублю |
-| `GET https://api.travelpayouts.com/data/ru/cities.json` | Справочник городов (IATA) |
-| `GET https://api.travelpayouts.com/data/ru/airports.json` | Справочник аэропортов (IATA) |
-
----
+> Источник: https://support.travelpayouts.com/hc/ru/articles/203956163 (обновлено 2026-09-06, сохранено 2026-09-27)
 
 Всё об API для доступа к данным о популярных направлениях и низких ценах на авиабилеты от Авиасейлс.                                                                                                
 
