@@ -24,7 +24,7 @@
 ## Полезное
 
 - Архитектура и фазы — `docs/PLAN.md`; локальный запуск — `docs/RUN.md`.
-- REST Data API Travelpayouts (все ручки, параметры, примеры) — `docs/AVIASALES_DATA_API.md`.
+- Все ручки Travelpayouts/Aviasales (GraphQL-схема, REST Data API, Search API, справочники, лимиты) — `docs/travelpayouts/README.md`.
 - Инфраструктура прод-деплоя (Terraform + cloud-init + registry) — `infra/terraform/`.
 - Фронтенд: Vite + React + TS (`frontend/`), только планировщик: `pages/PlanPage`
   (`/`, запрос) → `pages/CombosPage` (`/combos/:job`) → `pages/RoutesPage`
