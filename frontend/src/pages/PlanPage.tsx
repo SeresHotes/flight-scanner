@@ -1,15 +1,13 @@
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { AirportOption } from '../data/airports'
-import type { PlannerStop } from '../planner/types'
 import { estimatePlan } from '../planner/estimate'
 import { runPlan } from '../planner/api'
 import { validatePlan } from '../planner/validation'
 import { DEFAULT_MAX_RESULTS, encodeQuery, fitFilters, queryMode, type PlanQuery } from '../planner/query'
 import { nextStopId, useQueryFromUrl } from '../planner/useQueryState'
-import { RouteSkeleton } from '../planner/components/RouteSkeleton'
 import { PlanEstimateBar } from '../planner/components/PlanEstimateBar'
-import { QueryFilters } from '../planner/components/QueryFilters'
+import { QueryEditor } from '../planner/components/QueryEditor'
 import { RecentSearches } from '../planner/components/RecentSearches'
 import { addRecent, loadRecent, removeRecent, type RecentSearch } from '../planner/recentSearches'
 
@@ -53,17 +51,6 @@ export function PlanPage() {
   const estimate = useMemo(() => estimatePlan(query.stops), [query.stops])
   const validation = useMemo(() => validatePlan(query.stops), [query.stops])
 
-  const setStops = (stops: PlannerStop[]) => setQuery(fitFilters({ ...query, stops }))
-  const updateStop = (i: number, patch: Partial<PlannerStop>) =>
-    setStops(query.stops.map((s, k) => (k === i ? { ...s, ...patch } : s)))
-  const addStop = () => {
-    const next = [...query.stops]
-    next.splice(Math.max(1, next.length - 1), 0, { id: nextStopId(), kind: 'cities', airports: [], window: ['', ''] })
-    setStops(next)
-  }
-  const removeStop = (i: number) => {
-    if (query.stops.length > 2) setStops(query.stops.filter((_, k) => k !== i))
-  }
 
   async function run() {
     if (!validation.ok || busy) return
@@ -89,12 +76,11 @@ export function PlanPage() {
     <>
       <header className="hero">
         <h1>🧭 Планировщик маршрута</h1>
-        <div className="sub">Города и даты, фильтры на каждое плечо — бэк соберёт билеты и покажет варианты.</div>
+        <div className="sub">Города, даты и условия одним списком — бэк соберёт билеты и покажет варианты.</div>
       </header>
 
       <div className="searchform">
-        <RouteSkeleton stops={query.stops} valid={validation.stopValid} onUpdate={updateStop} onAdd={addStop} onRemove={removeStop} />
-        <QueryFilters query={query} onChange={setQuery} />
+        <QueryEditor query={query} validation={validation} onChange={setQuery} />
         <PlanEstimateBar
           estimate={estimate}
           validation={validation}
@@ -112,7 +98,7 @@ export function PlanPage() {
 
       <RecentSearches
         items={recent}
-        onRestore={(stops) => setStops(stops.map((s) => ({ ...s, id: nextStopId() })))}
+        onRestore={(stops) => setQuery(fitFilters({ ...query, stops: stops.map((s) => ({ ...s, id: nextStopId() })) }))}
         onRemove={(key) => setRecent(removeRecent(key))}
       />
     </>
