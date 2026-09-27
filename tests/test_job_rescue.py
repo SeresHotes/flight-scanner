@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from api import worker
-from core import collector
+from core import graphql_api
 from core.planner import SearchAborted, build_itineraries
 from storage import hot
 from tests.test_job_stages import STOPS, _fake_fetch
@@ -55,7 +55,7 @@ def test_cancelled_plan_job_keeps_rescued_status(tmp_path, monkeypatch):
     db, conn = _db(tmp_path)
     hot.create_job(conn, "j1", {"kind": "plan"}, total=6, stage=worker.initial_stage("plan"))
     hot.update_job(conn, "j1", status="error", error="сброшена")
-    monkeypatch.setattr(collector, "fetch_flights", _fake_fetch)
+    monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
     monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
 
     worker.request_cancel("j1")
@@ -92,7 +92,7 @@ def test_rescue_unblocks_queue_behind_endless_build(tmp_path, monkeypatch):
     db, conn = _db(tmp_path)
     monkeypatch.setattr(main, "_conn", conn)
     monkeypatch.setattr(main, "HUNG_JOB_SECONDS", 0)
-    monkeypatch.setattr(collector, "fetch_flights", _fake_fetch)
+    monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
     monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
     real_build = worker.planner.build_itineraries_compact
 

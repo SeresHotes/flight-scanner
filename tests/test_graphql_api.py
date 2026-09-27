@@ -22,11 +22,13 @@ CITY_INFO = lambda code: {"city": code, "country": "", "flag": ""}
 
 def test_params_city_to_any_and_any_to_city():
     p = g.build_params("mow", None, "2026-10-15", value_min=20000, value_max=40000)
+    # Типы мест не передаём: источник сам распознаёт город/аэропорт (см. build_params).
     assert p == {"depart_date_min": "2026-10-15", "depart_date_max": "2026-10-15",
-                 "origin": "MOW", "origin_type": "CITY", "value_min": 20000, "value_max": 40000}
-    p = g.build_params(None, "SEL", "2026-10-15", direct=True, with_baggage=True)
-    assert "origin" not in p and p["destination"] == "SEL"
+                 "origin": "MOW", "value_min": 20000, "value_max": 40000}
+    p = g.build_params(None, "icn", "2026-10-15", direct=True, with_baggage=True)
+    assert "origin" not in p and p["destination"] == "ICN" and "destination_type" not in p
     assert p["direct"] is True and p["with_baggage"] is True
+    assert g.build_params("MOW", None, "2026-10-15", origin_type="CITY")["origin_type"] == "CITY"
     with pytest.raises(ValueError):
         g.build_params(None, None, "2026-10-15")
 

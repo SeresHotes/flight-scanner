@@ -5,7 +5,7 @@
 import json
 
 from api import main, worker
-from core import collector
+from core import graphql_api
 from storage import hot
 from tests.test_job_stages import STOPS, _fake_fetch
 
@@ -20,7 +20,7 @@ def test_done_job_returns_compact_result(tmp_path, monkeypatch):
     conn = hot.connect(db)
     hot.init_db(conn)
     monkeypatch.setattr(main, "_conn", conn)
-    monkeypatch.setattr(collector, "fetch_flights", _fake_fetch)
+    monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
     monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
     hot.create_job(conn, "j1", {"kind": "plan"}, total=6, stage=worker.initial_stage("plan"))
 

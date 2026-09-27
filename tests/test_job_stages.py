@@ -4,7 +4,7 @@
 import json
 
 from api import worker
-from core import collector
+from core import graphql_api, planner
 from storage import hot
 
 STOPS = [
@@ -15,28 +15,43 @@ STOPS = [
 
 
 def _flight(origin, dest, dep, price):
+    """Нормализованный билет GraphQL (core/graphql_api.normalize_ticket), прямой."""
     return {
         "origin": origin, "origin_airport": origin,
         "destination": dest, "destination_airport": dest,
-        "departure_at": dep, "duration": 180, "price": price, "transfers": 0,
-        "airline": "XX", "flight_number": "1", "link": "",
+        "departure_at": dep, "arrival_at": dep, "duration": 180, "duration_to": 180,
+        "price": price, "transfers": 0, "airline": "XX", "flight_number": "1", "link": "",
+        "chain": [origin, dest], "legs": [{"origin": origin, "destination": dest,
+                                          "departure_at": dep, "arrival_at": dep,
+                                          "flight_number": "1"}],
+        "transfer_points": [], "baggage": {"known": False, "included": False,
+                                           "pieces": None, "kg": None},
     }
 
 
-def _fake_fetch(origin=None, destination=None, departure_at=None, **_):
-    day = departure_at[:10]
+def _series(tickets):
+    return {"tickets": tickets, "pages": 1, "exhausted": True, "error": False}
+
+
+def _fake_fetch(origin=None, destination=None, day=None, **_):
+    """Подмена graphql_api.fetch_series: по билету на пару в день, A→ANY (hidden-city) пусто."""
+    if destination is None:
+        return _series([])
     if origin == "MOW":
-        return {"data": [_flight("MOW", "IST", f"{day}T10:00:00", 100)]}
-    return {"data": [_flight("IST", "DST", f"{day}T20:00:00", 100)]}
+        return _series([_flight("MOW", "IST", f"{day}T10:00:00", 100)])
+    return _series([_flight("IST", "DST", f"{day}T20:00:00", 100)])
+
+
+TOTAL = planner.request_count(planner.parse_stops(STOPS))   # 2 плеча × 3 дня × (1 + 4 стр.)
 
 
 def _run(tmp_path, monkeypatch, max_results=10):
     db = str(tmp_path / "jobs.db")
     conn = hot.connect(db)
     hot.init_db(conn)
-    hot.create_job(conn, "j1", {"kind": "plan"}, total=6, stage=worker.initial_stage("plan"))
+    hot.create_job(conn, "j1", {"kind": "plan"}, total=TOTAL, stage=worker.initial_stage("plan"))
 
-    monkeypatch.setattr(collector, "fetch_flights", _fake_fetch)
+    monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
     monkeypatch.setattr(worker.agg, "load_airport_network", lambda *a, **k: {})
     snapshots = []
     orig_update = hot.update_job
@@ -100,16 +115,18 @@ def test_plan_job_walks_stages_and_counts_steps(tmp_path, monkeypatch):
     keys = [s["key"] for s in snaps]
     assert [k for i, k in enumerate(keys) if i == 0 or keys[i - 1] != k] == ["fetch", "build"]
 
-    # Два перехода по 3 дня окна; на каждом счётчик доходит до total.
+    # Два перехода по 3 дня окна; на каждом счётчик доходит до total (страницы:
+    # пара A→B по 1 + hidden-city A→ANY по PAGES_HIDDEN в день).
     fetch_steps = [s["step"] for s in snaps if s["key"] == "fetch" and s["step"]]
     last_per_leg = {st["index"]: st for st in fetch_steps}
     assert set(last_per_leg) == {0, 1}
     assert all(st["count"] == 2 for st in fetch_steps)
-    assert [(st["done"], st["total"]) for st in last_per_leg.values()] == [(3, 3), (3, 3)]
+    per_leg = 3 * (1 + planner.PAGES_HIDDEN)
+    assert [(st["done"], st["total"]) for st in last_per_leg.values()] == [(per_leg, per_leg)] * 2
     assert last_per_leg[0]["label"].endswith("(IST)") and "→" in last_per_leg[0]["label"]
 
     assert snaps[-1]["flights"] == 6
-    assert job["progress"] == 6
+    assert job["progress"] == TOTAL
 
 
 def test_plan_quotes_saved_after_done(tmp_path, monkeypatch):
@@ -140,10 +157,10 @@ def test_plan_quotes_failure_keeps_job_done(tmp_path, monkeypatch):
 
 def test_cache_hits_are_counted(tmp_path, monkeypatch):
     conn, _ = _run(tmp_path, monkeypatch)  # первый прогон наполняет fetch_cache
-    hot.create_job(conn, "j2", {"kind": "plan"}, total=6, stage=worker.initial_stage("plan"))
+    hot.create_job(conn, "j2", {"kind": "plan"}, total=TOTAL, stage=worker.initial_stage("plan"))
     worker.run_plan_collection(str(tmp_path / "jobs.db"), "j2", STOPS, max_results=10)
     stage = json.loads(hot.get_job(conn, "j2")["stage_json"])
-    assert stage["cached"] == 6
+    assert stage["cached"] == 12   # серий: 2 плеча × 3 дня × (пара + hidden-city)
 
 
 def test_init_db_migrates_old_jobs_table(tmp_path):
