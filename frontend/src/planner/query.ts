@@ -55,9 +55,9 @@ export function fitFilters(q: PlanQuery): PlanQuery {
 }
 
 // Режим показа (как planquery.PlanQuery.mode): наборы городов, если где-то
-// «любой» или несколько городов, иначе сразу маршруты.
+// «любой» (набор городов заранее не известен), иначе сразу маршруты.
 export function queryMode(q: PlanQuery): 'combos' | 'routes' {
-  return q.stops.some((s) => s.kind === 'any' || s.airports.length > 1) ? 'combos' : 'routes'
+  return q.stops.some((s) => s.kind === 'any') ? 'combos' : 'routes'
 }
 
 // Тело POST /api/plan/run.

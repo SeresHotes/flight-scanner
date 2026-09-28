@@ -40,6 +40,8 @@ def test_parse_defaults_and_key_is_stable():
     other = PlanQuery.from_dict({**q.as_dict(), "legs": [{"baggage": "included"}, {}]})
     assert other.key() != q.key()
     assert PlanQuery.from_dict({"stops": q.stops[:1] + q.stops[2:]}).mode() == "routes"
+    multi = {"kind": "cities", "codes": ["IST", "DXB"], "window": ["2026-11-01", "2026-11-03"]}
+    assert PlanQuery.from_dict({"stops": [q.stops[0], multi, q.stops[2]]}).mode() == "routes"
 
 
 # --------------------------- фильтр плеча (accepts) ---------------------------
