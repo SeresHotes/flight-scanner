@@ -62,8 +62,7 @@ class Clock:
 def env(tmp_path):
     clock = Clock()
     settings = Settings(db_path=":memory:", lake_local_root=str(tmp_path / "lake"),
-                        s3_bucket=None, rate_per_minute=6000, flush_tickets=10_000,
-                        flush_seconds=300, lake_max_gb=1.0, ttl_seconds=3600)
+                        s3_bucket=None, rate_per_minute=6000, lake_max_gb=1.0, ttl_seconds=3600)
     source = Source({("MOW", "SEL"): [400, 400, 37], ("MOW", ""): [400, 5], ("SEL", ""): [3]})
     limiter = RateLimiter(6000, clock=clock, sleep=clock.sleep)
     engine = Engine(settings, LocalStore(settings.lake_local_root), Index(":memory:"),
@@ -109,24 +108,31 @@ def test_same_series_is_merged_and_reprioritized(env):
     assert env.stats()["counters"]["dedup"] == 1
 
 
-def test_cache_hit_from_buffer_then_from_file(env):
+def test_series_file_per_key_and_cache_hit_from_file(env):
     first = env.submit(SeriesRequest("MOW", "SEL", "2026-10-15"), client="app")
     _run(env)
     tickets = env.result(first)["tickets"]
-    # Ещё не сброшено в файл — свежая серия читается из буфера.
+    # Файл записан сразу по готовности, путь = ключ серии + момент загрузки.
+    row = env.index.get("MOW", "SEL", "2026-10-15", "")
+    key = row["file_key"]
+    assert key.startswith("tickets/date=2026-10-15/origin=MOW/MOW-SEL__") and key.endswith("Z.parquet")
+    assert row["row_group"] == 0 and (Path(env.settings.lake_local_root) / key).exists()
+    meta = lake.parse_file_key(key)
+    assert (meta["origin"], meta["destination"], meta["day"], meta["params_key"]) == ("MOW", "SEL", "2026-10-15", "")
+    assert env.index.files_bytes() > 0 and env.writer.files_written == 1
+    # Повторный запрос — из файла range-чтением, без похода в источник.
     second = env.submit(SeriesRequest("MOW", "SEL", "2026-10-15"), client="app")
     assert second.cached and second.done
     assert env.result(second)["tickets"] == tickets and env.stats()["counters"]["cache_hit_app"] == 1
     assert env.source.calls.count((("MOW", "SEL"), 0)) == 1
-    # После сброса — из Parquet range-чтением той же row group.
-    key = env.writer.flush(force=True)
-    assert key and key.startswith("tickets/observed=") and env.index.files_bytes() > 0
-    row = env.index.get("MOW", "SEL", "2026-10-15", "")
-    assert row["file_key"] == key and row["row_group"] == 0
-    third = env.submit(SeriesRequest("MOW", "SEL", "2026-10-15"), client="app")
-    assert third.cached and env.result(third)["tickets"] == tickets
     assert env.exists("MOW", "SEL", "2026-10-15", "", min_pages=3)
     assert not env.exists("MOW", "SEL", "2026-10-15", "max=1000")
+    # ANY-конец и коридор цен — в пути.
+    env.submit(SeriesRequest(None, "SEL", "2026-10-15", value_min=20000, value_max=40000), client="app")
+    _run(env)
+    key_any = env.index.get(None, "SEL", "2026-10-15", "min=20000&max=40000")["file_key"]
+    assert "/origin=ANY/ANY-SEL__min=20000,max=40000__" in key_any
+    assert lake.parse_file_key(key_any)["params_key"] == "min=20000&max=40000"
     # Просят глубже, чем есть в неисчерпанной серии → не кэш.
     env.source.sizes[("MOW", "")] = [400, 400, 400]
     trunc = env.submit(SeriesRequest("MOW", None, "2026-10-15", max_pages=2), client="app")
@@ -134,6 +140,30 @@ def test_cache_hit_from_buffer_then_from_file(env):
     assert trunc.done and not trunc.exhausted
     assert env.submit(SeriesRequest("MOW", None, "2026-10-15", max_pages=2), client="app").cached
     assert not env.submit(SeriesRequest("MOW", None, "2026-10-15", max_pages=3), client="app").cached
+
+
+def test_empty_series_is_written_as_empty_file(env):
+    env.source.sizes[("LED", "")] = [0]
+    job = env.submit(SeriesRequest("LED", None, "2026-10-15"), client="crawl")
+    _run(env)
+    row = env.index.get("LED", None, "2026-10-15", "")
+    assert job.done and row["tickets"] == 0 and row["file_key"].endswith("Z.parquet")
+    assert env.writer.read(row["file_key"]) == []
+    assert env.submit(SeriesRequest("LED", None, "2026-10-15"), client="app").cached
+
+
+def test_refetch_keeps_history_as_new_file(env):
+    env.submit(SeriesRequest("SEL", None, "2026-10-15"), client="crawl")
+    _run(env)
+    first_key = env.index.get("SEL", None, "2026-10-15", "")["file_key"]
+    later = datetime.now(timezone.utc) + timedelta(hours=2)
+    env._now = lambda: later
+    env.submit(SeriesRequest("SEL", None, "2026-10-15"), client="crawl")
+    _run(env)
+    second_key = env.index.get("SEL", None, "2026-10-15", "")["file_key"]
+    assert second_key != first_key and second_key.endswith(later.strftime("%Y-%m-%dT%H-%M-%SZ.parquet"))
+    files = [f["key"] for f in env.index.files_oldest_first()]
+    assert files == [first_key, second_key]   # старая копия осталась (история цен)
 
 
 def test_stale_series_is_refetched(env):
@@ -190,7 +220,6 @@ def test_retention_deletes_oldest_files(env):
     for d in days:
         env.submit(SeriesRequest("MOW", "SEL", d), client="crawl")
         _run(env)
-        env.writer.flush(force=True)
     files = env.index.files_oldest_first()
     assert len(files) == 3 and env.run_retention() == []
     total = env.index.files_bytes()
@@ -206,11 +235,13 @@ def test_retention_deletes_oldest_files(env):
 def test_reconcile_imports_unknown_files(env):
     env.submit(SeriesRequest("MOW", "SEL", "2026-10-15"), client="crawl")
     _run(env)
-    key = env.writer.flush(force=True)
+    key = env.index.get("MOW", "SEL", "2026-10-15", "")["file_key"]
     size = env.index.files_bytes()
     fresh = Engine(env.settings, env.store, Index(":memory:"), page_fn=env.source)
     assert fresh.reconcile_files() == 1
-    assert fresh.index.files_oldest_first()[0]["key"] == key and fresh.index.files_bytes() == size
+    imported = fresh.index.files_oldest_first()[0]
+    assert imported["key"] == key and fresh.index.files_bytes() == size
+    assert imported["created_at"] == lake.parse_file_key(key)["observed"].isoformat()
 
 
 def test_ticket_round_trip_through_parquet(tmp_path):
@@ -221,6 +252,8 @@ def test_ticket_round_trip_through_parquet(tmp_path):
     index = Index(":memory:")
     writer = lake.LakeWriter(store, index)
     sid = index.put("MOW", None, "2026-10-15", "", pages=1, exhausted=True, tickets=len(tickets))
-    writer.add(sid, tickets, "2026-09-28T00:00:00+00:00")
-    key = writer.flush(force=True)
-    assert writer.read(key, 0) == tickets
+    observed = datetime(2026, 9, 28, 16, 31, 35, tzinfo=timezone.utc)
+    key = writer.write(sid, "MOW", None, "2026-10-15", "", tickets, observed)
+    assert key == "tickets/date=2026-10-15/origin=MOW/MOW-ANY__2026-09-28T16-31-35Z.parquet"
+    assert writer.read(key) == tickets
+    assert lake.parse_file_key("tickets/observed=2026-09-28/part-x.parquet") is None
