@@ -64,6 +64,14 @@ class GraphQLError(RuntimeError):
     """Источник вернул `errors` (невалидные параметры, глубина пагинации и т.п.)."""
 
 
+class RateLimited(Exception):
+    """HTTP 429: превышен лимит ручки. retry_after — секунды из заголовка, если был."""
+
+    def __init__(self, retry_after: Optional[float] = None):
+        super().__init__(f"429 rate limited (retry after {retry_after})")
+        self.retry_after = retry_after
+
+
 def require_token() -> str:
     token = os.getenv("TRAVELPAYOUTS_TOKEN")
     if not token:
@@ -137,14 +145,23 @@ def _throttle() -> None:
 
 
 def query_page(params: Dict[str, Any], offset: int = 0, limit: int = PAGE_LIMIT,
-               session: Optional[requests.Session] = None) -> List[Dict[str, Any]]:
-    """Одна страница сырых билетов. Ошибки источника — GraphQLError, сетевые —
-    requests.RequestException (решает вызывающий: серия помечается error=True)."""
-    _throttle()
+               session: Optional[requests.Session] = None, throttle: bool = True) -> List[Dict[str, Any]]:
+    """Одна страница сырых билетов. Ошибки источника — GraphQLError, 429 — RateLimited,
+    сетевые — requests.RequestException (решает вызывающий: серия помечается error=True).
+    throttle=False — темп держит вызывающий (коллектор со своим лимитером)."""
+    if throttle:
+        _throttle()
     body = {"query": QUERY, "variables": {"p": params, "limit": limit, "offset": offset}}
     headers = {"X-Access-Token": require_token(), "Content-Type": "application/json"}
     http = session or requests
     resp = http.post(GRAPHQL_URL, json=body, headers=headers, timeout=REQUEST_TIMEOUT)
+    if resp.status_code == 429:
+        retry_after = resp.headers.get("Retry-After")
+        try:
+            retry_after = float(retry_after) if retry_after else None
+        except ValueError:
+            retry_after = None
+        raise RateLimited(retry_after)
     # Ошибки валидации («city ICN not found») приходят как HTTP 400 с JSON `errors` —
     # разбираем тело раньше raise_for_status, чтобы не потерять сообщение.
     try:

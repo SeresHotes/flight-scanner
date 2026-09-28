@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from core import airports as airports_mod
 from core import planner
+from core.collector_client import CollectorClient, CollectorError, collector_url
 from core.planquery import PlanQuery
 from storage import hot
 from api import worker
@@ -48,7 +49,17 @@ def _startup() -> None:
     hot.init_db(_conn)
     # Джобы, не пережившие прошлый рестарт, висят в running — помечаем error.
     stale = hot.fail_stale_jobs(_conn)
-    print(f"[startup] котировок в БД: {hot.count_quotes(_conn)}; зависших джоб сброшено: {stale}")
+    # С коллектором серии живут в озере: локальный кэш серий больше не нужен и не
+    # должен расти (на проде он раздул SQLite до 3.5 ГБ).
+    if collector_url():
+        hot.drop_ticket_cache(_conn)
+    print(f"[startup] котировок в БД: {hot.count_quotes(_conn)}; зависших джоб сброшено: {stale}; "
+          f"коллектор: {collector_url() or 'нет (прямой GraphQL)'}")
+
+
+def _collector() -> Optional[CollectorClient]:
+    url = collector_url()
+    return CollectorClient(url) if url else None
 
 
 # --------------------------------- health ------------------------------------
@@ -57,7 +68,14 @@ def _startup() -> None:
 def health() -> Dict[str, Any]:
     quotes = hot.count_quotes(_conn) if _conn else 0
     ticket_series = hot.count_ticket_series(_conn) if _conn else 0
-    return {"status": "ok", "quotes": quotes, "ticket_series": ticket_series}
+    out: Dict[str, Any] = {"status": "ok", "quotes": quotes, "ticket_series": ticket_series}
+    client = _collector()
+    if client:
+        try:
+            out["collector"] = client.health()
+        except CollectorError as e:
+            out["collector"] = {"status": "unreachable", "error": str(e)}
+    return out
 
 
 # -------------------------------- airports -----------------------------------
@@ -145,10 +163,18 @@ class PlanQueryRequest(BaseModel):
 
 
 def _cache_probe():
-    """is_cached для planner.estimate_plan: серия уже лежит в ticket_cache (TTL воркера)."""
+    """is_cached для planner.estimate_plan: серия уже свежая у коллектора (озеро) или,
+    без коллектора, в локальном ticket_cache (TTL воркера)."""
     conn = _conn
+    client = _collector()
 
     def is_cached(origin, dest, day, key, pages) -> bool:
+        if client:
+            try:
+                return client.has_series(origin, dest, day, key, pages,
+                                         ttl_seconds=worker.FETCH_CACHE_TTL_SECONDS)
+            except CollectorError:
+                return False
         return hot.ticket_cache_has(conn, origin, dest, day, key, worker.FETCH_CACHE_TTL_SECONDS,
                                     min_pages=pages)
     return is_cached

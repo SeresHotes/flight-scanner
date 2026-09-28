@@ -1,20 +1,36 @@
-# Локальная проверка прод-схемы (api + caddy) на своей машине.
+# Локальная проверка прод-схемы (planner + collector + caddy) на своей машине.
 #   cd deploy && SITE_DOMAIN=localhost docker compose up --build
 #   → http://localhost (Caddy редиректит на https://localhost с самоподписанным сертом)
 #
-# На VM используется НЕ этот файл, а /opt/flights/docker-compose.yml, который пишет
-# cloud-init (там образы тянутся из Container Registry, а не собираются). См. infra/terraform.
+# На VM используется НЕ этот файл, а deploy/compose.prod.yml (едет в образе planner,
+# run.sh копирует его в /opt/flights/docker-compose.yml). См. infra/terraform.
 services:
-  api:
+  planner:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile
-    image: flights-api:local
-    # Секреты/токен сбора — из корневого .env (нужен только для реального сбора).
+      dockerfile: deploy/Dockerfile.planner
+    image: flights-planner:local
     env_file:
       - ../.env
+    environment:
+      - COLLECTOR_URL=http://collector:8001
     # Горячее состояние (SQLite + collected + Parquet-озеро). Для локали засеивается
-    # bind-моунтом реального data/; в проде — именованный том, засеянный из Object Storage.
+    # bind-моунтом реального data/; в проде — том, засеянный из Object Storage.
+    volumes:
+      - ../data:/app/data
+    depends_on:
+      - collector
+    restart: unless-stopped
+
+  collector:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.collector
+    image: flights-collector:local
+    # Токен Travelpayouts и (если есть) S3_* — из корневого .env; без S3_* озеро
+    # пишется в локальный каталог data/lake.
+    env_file:
+      - ../.env
     volumes:
       - ../data:/app/data
     restart: unless-stopped
@@ -30,7 +46,7 @@ services:
       - "80:80"
       - "443:443"
     depends_on:
-      - api
+      - planner
     restart: unless-stopped
     volumes:
       - caddy-data:/data

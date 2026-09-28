@@ -150,6 +150,28 @@ def make_cached_ticket_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = 
     return fetch
 
 
+def make_collector_ticket_fetch(client, on_cache_hit: Optional[Callable[[], None]] = None,
+                                ttl_seconds: float = FETCH_CACHE_TTL_SECONDS):
+    """fetch_fn планировщика через коллектор (core.collector_client): серия идёт в
+    очередь с приоритетом приложения, свежая серия из озера приходит с cached=True."""
+    def fetch(origin=None, destination=None, day=None, **kw):
+        series = client.fetch_series(origin, destination, day, ttl_seconds=ttl_seconds, **kw)
+        if series.get("cached") and on_cache_hit:
+            on_cache_hit()
+        return series
+    return fetch
+
+
+def make_ticket_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None):
+    """Источник серий для джобы: коллектор, если задан COLLECTOR_URL (прод), иначе
+    прямой GraphQL с кэшем серий в SQLite (локальный запуск без коллектора)."""
+    from core.collector_client import CollectorClient, collector_url
+    url = collector_url()
+    if url:
+        return make_collector_ticket_fetch(CollectorClient(url), on_cache_hit)
+    return make_cached_ticket_fetch(conn, on_cache_hit)
+
+
 def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: str,
                  lake_root: str = lake.DEFAULT_LAKE_ROOT) -> None:
     """Котировки — в горячее хранилище SQLite + дозапись в озеро (если подключено).
@@ -191,7 +213,7 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         rep.stage("fetch", status="running", total=total, progress=0)
 
         collected = planner.collect_plan(stops, progress_cb=rep.tick,
-                                         fetch_fn=make_cached_ticket_fetch(conn, rep.cache_hit),
+                                         fetch_fn=make_ticket_fetch(conn, rep.cache_hit),
                                          leg_cb=rep.step, max_cost=max_cost,
                                          airport_city=hot.airport_city_map(conn))
         rep.flights(sum(len(v) for v in collected.values()))

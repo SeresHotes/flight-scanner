@@ -13,9 +13,14 @@ output "registry_id" {
   value       = yandex_container_registry.flights.id
 }
 
-output "image_api_ref" {
-  description = "Полное имя API-образа, который тянет VM"
-  value       = local.image_api_ref
+output "image_planner_ref" {
+  description = "Полное имя образа планировщика (FastAPI /api), который тянет VM"
+  value       = local.image_planner_ref
+}
+
+output "image_collector_ref" {
+  description = "Полное имя образа коллектора (очередь к GraphQL + Parquet-озеро)"
+  value       = local.image_collector_ref
 }
 
 output "image_web_ref" {
@@ -62,9 +67,11 @@ output "seed_and_push_hint" {
 
     # 2) Собрать и запушить образы (VM подхватит таймером flights-update):
     yc container registry configure-docker
-    docker build -t ${local.image_api_ref} -f deploy/Dockerfile .
+    docker build -t ${local.image_planner_ref} -f deploy/Dockerfile.planner .
+    docker build -t ${local.image_collector_ref} -f deploy/Dockerfile.collector .
     docker build -t ${local.image_web_ref} -f deploy/Dockerfile.web .
-    docker push ${local.image_api_ref}
+    docker push ${local.image_planner_ref}
+    docker push ${local.image_collector_ref}
     docker push ${local.image_web_ref}
 
     # 3) Завести A-запись ${var.site_domain} -> vm_external_ip в Cloudflare (proxy off).

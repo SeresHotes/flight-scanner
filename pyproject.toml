@@ -16,6 +16,7 @@ fastapi = "^0.115.0"
 uvicorn = {version = "^0.34.0", extras = ["standard"]}
 pyarrow = "^22.0.0"
 numpy = "^2.0"  # наборы городов на бэке (core/overview.py)
+boto3 = "^1.34"  # коллектор: Parquet-озеро в Object Storage (collector/store.py)
 
 
 [build-system]

@@ -7,10 +7,10 @@
 {$SITE_DOMAIN} {
 	encode zstd gzip
 
-	# API — на контейнер api (имя сервиса в compose-сети). reverse_proxy сохраняет путь,
+	# API — на контейнер planner (имя сервиса в compose-сети). reverse_proxy сохраняет путь,
 	# бэкенд ждёт префикс /api (роуты объявлены как /api/...), поэтому не стрипаем.
 	handle /api/* {
-		reverse_proxy api:8000
+		reverse_proxy planner:8000
 	}
 
 	# Всё остальное — SPA: отдаём файл, иначе index.html (client-side routing react-router).

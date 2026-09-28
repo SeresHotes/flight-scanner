@@ -24,6 +24,12 @@
 ## Полезное
 
 - Архитектура и фазы — `docs/PLAN.md`; локальный запуск — `docs/RUN.md`.
+- Коллектор и Parquet-озеро (очередь к GraphQL с приоритетами app > crawl, лимит
+  ручки, серии в S3, индекс, ретеншн, фазы 1–5) — `docs/COLLECTOR.md`. На VM три
+  Python-контейнера из трёх Dockerfile: `planner` (бывший `api`, FastAPI `/api/*`),
+  `collector` (порт 8001, единственный с токеном и S3), `crawler` (фаза 2) + `web`.
+  Прод-compose `deploy/compose.prod.yml` едет в образе planner; на уже созданной
+  VM один раз запускается `deploy/vm-migrate.sh`.
 - Все ручки Travelpayouts/Aviasales (GraphQL-схема, REST Data API, Search API, справочники, лимиты) — `docs/travelpayouts/README.md`.
 - Инфраструктура прод-деплоя (Terraform + cloud-init + registry) — `infra/terraform/`.
 - Фронтенд: Vite + React + TS (`frontend/`), только планировщик: `pages/PlanPage`
@@ -61,8 +67,9 @@
 группировка = минимум на группу (docs/travelpayouts/FINDINGS.md).
 Без ценового коридора первые страницы ANY-запроса — дешёвая ближняя Россия/СНГ,
 поэтому `value_min/value_max` обязательны для разумного объёма. `trip_duration`
-приходит 0 — длительность считаем по сегментам. Серии кэшируются в `ticket_cache`
-(TTL 24 ч, `api.worker.make_cached_ticket_fetch`). Проверить руками:
+приходит 0 — длительность считаем по сегментам. На проде серии получает коллектор
+(`COLLECTOR_URL`, свежесть сутки, озеро в S3); без него планировщик ходит в GraphQL
+сам и кэширует серии в `ticket_cache` (`api.worker.make_cached_ticket_fetch`). Проверить руками:
 
 ```sh
 poetry run python scripts/fetch_tickets.py MOW SEL 2026-10-15

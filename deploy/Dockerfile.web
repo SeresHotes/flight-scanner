@@ -1,5 +1,5 @@
 # Web-образ: собранный React-фронт (статика) + Caddy как единый origin.
-# Caddy отдаёт статику и reverse-proxy'ит /api/* на контейнер api; TLS — авто (Let's Encrypt).
+# Caddy отдаёт статику и reverse-proxy'ит /api/* на контейнер planner; TLS — авто (Let's Encrypt).
 
 # --- этап сборки фронта ---
 FROM node:20-alpine AS build

@@ -1,8 +1,9 @@
 name: Deploy
 
-# Собирает образы flights-api и flights-web, пушит в Yandex Container Registry и
-# (опционально) мгновенно выкатывает на VM по SSH. Если SSH-секреты не заданы —
-# VM подхватит свежие образы сама (systemd-таймер flights-update каждые 2 мин).
+# Собирает образы flights-planner, flights-collector и flights-web, пушит в Yandex
+# Container Registry и (опционально) мгновенно выкатывает на VM по SSH. Если
+# SSH-секреты не заданы — VM подхватит свежие образы сама (systemd-таймер
+# flights-update каждые 2 мин).
 #
 # Обязательные секреты (Settings → Secrets and variables → Actions):
 #   YC_SA_KEY_JSON  — authorized-key SA flights-ci (terraform output ci_sa_key_json)
@@ -18,6 +19,7 @@ on:
     branches: [main]
     paths:
       - "api/**"
+      - "collector/**"
       - "core/**"
       - "storage/**"
       - "frontend/**"
@@ -69,27 +71,20 @@ jobs:
           yc config set folder-id "$YC_FOLDER_ID"
           yc container registry configure-docker
 
-      - name: Build & push API image
+      # Три образа из трёх Dockerfile; общий код core/ и storage/ копируется в каждый.
+      - name: Build & push images
         if: steps.check.outputs.ok == 'true'
         env:
           REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
         run: |
-          IMAGE="cr.yandex/$REGISTRY_ID/flights-api"
           SHA="${GITHUB_SHA::7}"
-          docker build -t "$IMAGE:latest" -t "$IMAGE:$SHA" -f deploy/Dockerfile .
-          docker push "$IMAGE:latest"
-          docker push "$IMAGE:$SHA"
-
-      - name: Build & push web image
-        if: steps.check.outputs.ok == 'true'
-        env:
-          REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
-        run: |
-          IMAGE="cr.yandex/$REGISTRY_ID/flights-web"
-          SHA="${GITHUB_SHA::7}"
-          docker build -t "$IMAGE:latest" -t "$IMAGE:$SHA" -f deploy/Dockerfile.web .
-          docker push "$IMAGE:latest"
-          docker push "$IMAGE:$SHA"
+          for pair in planner:deploy/Dockerfile.planner collector:deploy/Dockerfile.collector web:deploy/Dockerfile.web; do
+            NAME="${pair%%:*}"; FILE="${pair#*:}"
+            IMAGE="cr.yandex/$REGISTRY_ID/flights-$NAME"
+            docker build -t "$IMAGE:latest" -t "$IMAGE:$SHA" -f "$FILE" .
+            docker push "$IMAGE:latest"
+            docker push "$IMAGE:$SHA"
+          done
 
       - name: Cleanup credentials
         if: always() && steps.check.outputs.ok == 'true'

@@ -1,0 +1,48 @@
+# Прод-compose: образы из Container Registry (НЕ сборка). Лежит в образе planner
+# (/app/deploy/compose.prod.yml); run.sh на VM копирует его в /opt/flights/docker-compose.yml
+# при каждом обновлении — состав контейнеров меняется обычным деплоем.
+#
+# Переменные подстановки и секреты — /opt/flights/.env (пишет terraform в cloud-init,
+# на существующей VM дополняет deploy/vm-migrate.sh): PLANNER_IMAGE, COLLECTOR_IMAGE,
+# WEB_IMAGE, SITE_DOMAIN, TRAVELPAYOUTS_TOKEN, S3_*, LAKE_MAX_GB, RATE_PER_MINUTE.
+services:
+  # Планировщик: FastAPI /api/*, джобы стыковки; серии билетов — у коллектора.
+  planner:
+    image: ${PLANNER_IMAGE}
+    env_file:
+      - /opt/flights/.env
+    environment:
+      - COLLECTOR_URL=http://collector:8001
+    volumes:
+      - /opt/flights/data:/app/data
+    depends_on:
+      - collector
+    restart: always
+
+  # Коллектор: очередь к GraphQL, лимит ручки, Parquet-озеро в Object Storage.
+  collector:
+    image: ${COLLECTOR_IMAGE}
+    env_file:
+      - /opt/flights/.env
+    volumes:
+      - /opt/flights/data:/app/data
+    restart: always
+
+  # Caddy: статика фронта, TLS, reverse-proxy /api → planner.
+  web:
+    image: ${WEB_IMAGE}
+    environment:
+      - SITE_DOMAIN=${SITE_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - planner
+    restart: always
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:
