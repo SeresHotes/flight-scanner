@@ -138,6 +138,7 @@ resource "yandex_compute_instance" "app" {
 locals {
   image_planner_ref   = "cr.yandex/${yandex_container_registry.flights.id}/flights-planner:${var.image_tag}"
   image_collector_ref = "cr.yandex/${yandex_container_registry.flights.id}/flights-collector:${var.image_tag}"
+  image_crawler_ref   = "cr.yandex/${yandex_container_registry.flights.id}/flights-crawler:${var.image_tag}"
   image_web_ref       = "cr.yandex/${yandex_container_registry.flights.id}/flights-web:${var.image_tag}"
 
   # /opt/flights/.env: и переменные подстановки compose (${PLANNER_IMAGE}...), и секреты
@@ -147,6 +148,7 @@ locals {
     "SITE_DOMAIN=${var.site_domain}",
     "PLANNER_IMAGE=${local.image_planner_ref}",
     "COLLECTOR_IMAGE=${local.image_collector_ref}",
+    "CRAWLER_IMAGE=${local.image_crawler_ref}",
     "WEB_IMAGE=${local.image_web_ref}",
     "TRAVELPAYOUTS_TOKEN=${var.travelpayouts_token}",
     "S3_ENDPOINT=https://storage.yandexcloud.net",

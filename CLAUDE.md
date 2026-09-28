@@ -27,7 +27,8 @@
 - Коллектор и Parquet-озеро (очередь к GraphQL с приоритетами app > crawl, лимит
   ручки, серии в S3, индекс, ретеншн, фазы 1–5) — `docs/COLLECTOR.md`. На VM три
   Python-контейнера из трёх Dockerfile: `planner` (бывший `api`, FastAPI `/api/*`),
-  `collector` (порт 8001, единственный с токеном и S3), `crawler` (фаза 2) + `web`.
+  `collector` (порт 8001, единственный с токеном и S3), `crawler` (фоновый обход
+  «город × день» на 180 дней, только HTTP к коллектору) + `web`.
   Прод-compose `deploy/compose.prod.yml` едет в образе planner; на уже созданной
   VM один раз запускается `deploy/vm-migrate.sh`.
 - Все ручки Travelpayouts/Aviasales (GraphQL-схема, REST Data API, Search API, справочники, лимиты) — `docs/travelpayouts/README.md`.

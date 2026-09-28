@@ -448,6 +448,22 @@ class Engine:
         return {"queued_app": queued["app"], "queued_crawl": queued["crawl"],
                 "running": running, "jobs_in_memory": jobs}
 
+    def queue_keys(self) -> List[Dict[str, Any]]:
+        """Серии в очереди и в работе: сборщик исключает их из подачи, чтобы каждый
+        тик добавлять новые, а не повторять уже стоящие (склейка сделала бы их no-op)."""
+        with self._cv:
+            seen = set()
+            out = []
+            jobs = ([self._running] if self._running else []) + [j for _, _, j in self._heap]
+            for job in jobs:
+                if job.done or job.id in seen:
+                    continue
+                seen.add(job.id)
+                out.append({"origin": job.req.origin, "destination": job.req.destination,
+                            "day": job.req.day, "params_key": job.req.params_key,
+                            "priority": "app" if job.priority == 0 else "crawl"})
+        return out
+
     def stats(self) -> Dict[str, Any]:
         st = self.queue_stats()
         st.update({

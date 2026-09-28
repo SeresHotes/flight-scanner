@@ -4,7 +4,8 @@
 #
 # Переменные подстановки и секреты — /opt/flights/.env (пишет terraform в cloud-init,
 # на существующей VM дополняет deploy/vm-migrate.sh): PLANNER_IMAGE, COLLECTOR_IMAGE,
-# WEB_IMAGE, SITE_DOMAIN, TRAVELPAYOUTS_TOKEN, S3_*, LAKE_MAX_GB, RATE_PER_MINUTE.
+# CRAWLER_IMAGE, WEB_IMAGE, SITE_DOMAIN, TRAVELPAYOUTS_TOKEN, S3_*, LAKE_MAX_GB,
+# RATE_PER_MINUTE, CRAWL_* (см. crawler/config.py).
 services:
   # Планировщик: FastAPI /api/*, джобы стыковки; серии билетов — у коллектора.
   planner:
@@ -26,6 +27,19 @@ services:
       - /opt/flights/.env
     volumes:
       - /opt/flights/data:/app/data
+    restart: always
+
+  # Фоновый сборщик: планирует покрытие город × день и подаёт серии в очередь crawl.
+  # Дефолт образа — на случай .env, созданного до фазы 2 (там нет CRAWLER_IMAGE);
+  # реестр тот же, что у остальных образов.
+  crawler:
+    image: ${CRAWLER_IMAGE:-cr.yandex/crp7odiamp18s3633n30/flights-crawler:latest}
+    env_file:
+      - /opt/flights/.env
+    environment:
+      - COLLECTOR_URL=http://collector:8001
+    depends_on:
+      - collector
     restart: always
 
   # Caddy: статика фронта, TLS, reverse-proxy /api → planner.

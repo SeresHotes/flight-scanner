@@ -23,6 +23,11 @@ output "image_collector_ref" {
   value       = local.image_collector_ref
 }
 
+output "image_crawler_ref" {
+  description = "Полное имя образа фонового сборщика (покрытие город × день)"
+  value       = local.image_crawler_ref
+}
+
 output "image_web_ref" {
   description = "Полное имя web-образа (Caddy + фронт), который тянет VM"
   value       = local.image_web_ref
@@ -69,9 +74,11 @@ output "seed_and_push_hint" {
     yc container registry configure-docker
     docker build -t ${local.image_planner_ref} -f deploy/Dockerfile.planner .
     docker build -t ${local.image_collector_ref} -f deploy/Dockerfile.collector .
+    docker build -t ${local.image_crawler_ref} -f deploy/Dockerfile.crawler .
     docker build -t ${local.image_web_ref} -f deploy/Dockerfile.web .
     docker push ${local.image_planner_ref}
     docker push ${local.image_collector_ref}
+    docker push ${local.image_crawler_ref}
     docker push ${local.image_web_ref}
 
     # 3) Завести A-запись ${var.site_domain} -> vm_external_ip в Cloudflare (proxy off).

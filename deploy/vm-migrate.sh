@@ -47,6 +47,11 @@ if [ -z "\${PLANNER_IMAGE:-}" ]; then
   echo "PLANNER_IMAGE=\$REG/flights-planner:\$TAG" >> .env
   echo "COLLECTOR_IMAGE=\$REG/flights-collector:\$TAG" >> .env
 fi
+if [ -z "\${CRAWLER_IMAGE:-}" ]; then
+  REG="\${PLANNER_IMAGE%/flights-planner:*}"
+  TAG="\${PLANNER_IMAGE##*:}"
+  echo "CRAWLER_IMAGE=\$REG/flights-crawler:\$TAG" >> .env
+fi
 grep -q '^LAKE_MAX_GB=' .env || echo "LAKE_MAX_GB=180" >> .env
 grep -q '^RATE_PER_MINUTE=' .env || echo "RATE_PER_MINUTE=60" >> .env
 

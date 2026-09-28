@@ -18,6 +18,8 @@ poetry install
 # Как в проде: коллектор отдельно, планировщик ходит в него за сериями (docs/COLLECTOR.md).
 poetry run uvicorn collector.main:app --port 8001            # озеро без S3_* — в data/lake
 COLLECTOR_URL=http://localhost:8001 poetry run uvicorn api.main:app --port 8000 --reload
+# Фоновый сборщик (по желанию; ест квоту источника): CRAWL_* — crawler/config.py
+COLLECTOR_URL=http://localhost:8001 CRAWL_HORIZON_DAYS=3 poetry run python -m crawler.main
 # Без коллектора: планировщик сам ходит в GraphQL и кэширует серии в SQLite.
 poetry run uvicorn api.main:app --port 8000 --reload
 PYTHONPATH=. poetry run pytest -q

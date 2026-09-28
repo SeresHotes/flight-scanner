@@ -116,6 +116,9 @@ class CollectorClient:
     def cities(self) -> List[Dict[str, Any]]:
         return self._get("/v1/cities").get("cities") or []
 
+    def queue(self) -> List[Dict[str, Any]]:
+        return self._get("/v1/queue").get("items") or []
+
     def stats(self) -> Dict[str, Any]:
         return self._get("/v1/stats")
 
