@@ -161,10 +161,12 @@ class PlanQuery:
         return hashlib.sha1(canon.encode()).hexdigest()[:16]
 
     def mode(self) -> str:
-        """Режим показа: 'combos' (наборы городов), если где-то «любой» — набор
-        городов заранее не известен; иначе 'routes' — сразу маршруты (несколько
-        городов в остановке — просто варианты маршрута)."""
-        return "combos" if any(s["kind"] == "any" for s in self.stops) else "routes"
+        """Режим показа: 'combos' (наборы городов), если где-то «любой» или несколько
+        городов, иначе 'routes' — сразу маршруты."""
+        for s in self.stops:
+            if s["kind"] == "any" or len(s["codes"]) > 1:
+                return "combos"
+        return "routes"
 
     def has_city_filters(self) -> bool:
         return any(not c.is_open() for c in self.cities)
