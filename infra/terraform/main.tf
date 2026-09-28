@@ -156,6 +156,7 @@ locals {
     "S3_SECRET_KEY=${yandex_iam_service_account_static_access_key.app.secret_key}",
     "LAKE_MAX_GB=${var.lake_max_gb}",
     "RATE_PER_MINUTE=${var.rate_per_minute}",
+    "", # завершающий перевод строки: иначе `echo >> .env` клеится к последней строке
   ])
 
   cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
