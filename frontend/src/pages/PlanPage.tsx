@@ -34,7 +34,7 @@ function initialQuery(): PlanQuery {
 
 // Главная страница: скелет маршрута + единые фильтры + оценка + «Найти».
 // Всё считает бэк: по кнопке уходим на страницу наборов городов (если где-то
-// «любой» или несколько городов) или сразу на страницу маршрутов.
+// «любой») или сразу на страницу маршрутов.
 export function PlanPage() {
   const navigate = useNavigate()
   const [, setSearchParams] = useSearchParams()
