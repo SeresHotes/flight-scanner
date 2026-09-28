@@ -38,12 +38,19 @@ set -euo pipefail
 cd /opt/flights
 set -a; source /opt/flights/.env; set +a
 
-# 1. .env: образы новой схемы по образцу API_IMAGE.
+# 1. .env: образы новой схемы по образцу API_IMAGE. Terraform писал файл без
+# завершающего перевода строки — иначе первая дописанная строка клеится к секрету S3.
+[ -z "\$(tail -c1 .env)" ] || echo >> .env
 if [ -z "\${PLANNER_IMAGE:-}" ]; then
   REG="\${API_IMAGE%/flights-api:*}"
   TAG="\${API_IMAGE##*:}"
   echo "PLANNER_IMAGE=\$REG/flights-planner:\$TAG" >> .env
   echo "COLLECTOR_IMAGE=\$REG/flights-collector:\$TAG" >> .env
+fi
+if [ -z "\${CRAWLER_IMAGE:-}" ]; then
+  REG="\${PLANNER_IMAGE%/flights-planner:*}"
+  TAG="\${PLANNER_IMAGE##*:}"
+  echo "CRAWLER_IMAGE=\$REG/flights-crawler:\$TAG" >> .env
 fi
 grep -q '^LAKE_MAX_GB=' .env || echo "LAKE_MAX_GB=180" >> .env
 grep -q '^RATE_PER_MINUTE=' .env || echo "RATE_PER_MINUTE=60" >> .env

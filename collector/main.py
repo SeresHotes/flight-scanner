@@ -8,6 +8,7 @@
 - GET  /v1/series/exists                 — есть ли свежая серия (оценка объёма в планировщике)
 - GET  /v1/coverage?params_key=&destination=  — покрытие X→ANY для сборщика
 - GET  /v1/cities                        — известные города
+- GET  /v1/queue                         — серии в очереди/в работе (сборщик не подаёт их повторно)
 - GET  /v1/stats, POST /v1/stats/crawler — счётчики / сводка сборщика (метрики)
 
 Запуск: uvicorn collector.main:app --host 0.0.0.0 --port 8001
@@ -148,6 +149,11 @@ def create_app(engine: Optional[Engine] = None, settings: Optional[Settings] = N
     @app.get("/v1/cities")
     def cities() -> Dict[str, Any]:
         return {"cities": eng().index.cities()}
+
+    @app.get("/v1/queue")
+    def queue() -> Dict[str, Any]:
+        items = eng().queue_keys()
+        return {"items": items, "count": len(items)}
 
     @app.get("/v1/stats")
     def stats() -> Dict[str, Any]:

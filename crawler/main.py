@@ -1,0 +1,68 @@
+"""Цикл фонового сборщика: раз в CRAWL_TICK_SECONDS берёт у коллектора города,
+покрытие и очередь, считает срочность пар «город × день» (crawler.schedule) и
+досыпает в очередь `crawl` столько серий, чтобы там было CRAWL_QUEUE_TARGET.
+Сводку покрытия отправляет коллектору (`/v1/stats/crawler`) — она уходит в метрики.
+
+Запуск: python -m crawler.main
+"""
+import time
+from datetime import date, datetime, timezone
+from typing import Any, Dict, Optional
+
+from core.collector_client import CollectorClient, CollectorError
+from crawler.config import Settings
+from crawler.schedule import Targets, merge_cities, plan
+
+
+def tick(client: CollectorClient, settings: Settings, *, today: Optional[date] = None,
+         now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Один шаг: план → подача недостающих серий → сводка. Возвращает сводку."""
+    now = now or datetime.now(timezone.utc)
+    today = today or now.date()
+    health = client.health()
+    queued = int(health.get("queued_crawl") or 0)
+    need = max(0, settings.queue_target - queued)
+    cities = merge_cities(settings.seeds, client.cities())
+    coverage = client.coverage()  # X→ANY без коридора
+    queued_keys = {(q["origin"], q["day"]) for q in client.queue()
+                   if q.get("origin") and not q.get("destination") and not q.get("params_key")}
+    targets = Targets(settings.near_days, settings.near_hours, settings.mid_days,
+                      settings.mid_hours, settings.far_hours, settings.error_retry_hours)
+    items, summary = plan(cities, coverage, today=today, horizon_days=settings.horizon_days,
+                          targets=targets, now=now, exclude=queued_keys, limit=need)
+    submitted = 0
+    if items:
+        ids = client.submit_batch([it.request(settings.max_pages) for it in items], client="crawl")
+        submitted = len(ids)
+    summary.update({"queued_crawl": queued, "submitted": submitted,
+                    "queued_app": int(health.get("queued_app") or 0),
+                    "horizon_days": settings.horizon_days, "tick_at": now.isoformat(timespec="seconds")})
+    try:
+        client.report_crawler_stats(summary)
+    except CollectorError as e:
+        print(f"[crawler] сводка не отправлена: {e}")
+    return summary
+
+
+def run(settings: Optional[Settings] = None) -> None:
+    settings = settings or Settings()
+    client = CollectorClient(settings.collector_url)
+    print(f"[crawler] старт: коллектор {settings.collector_url}, горизонт {settings.horizon_days} дн., "
+          f"очередь {settings.queue_target}, хабов {len(settings.seeds)}")
+    while True:
+        started = time.monotonic()
+        try:
+            s = tick(client, settings)
+            print(f"[crawler] городов {s['cities']}, пар {s['pairs']}: свежих {s['fresh']}, "
+                  f"устарело {s['stale']}, нет {s['missing']}, ошибок {s['errors']}; "
+                  f"в очереди {s['queued_crawl']}, подано {s['submitted']}, "
+                  f"проход {s['pass_progress'] * 100:.1f} %")
+        except CollectorError as e:
+            print(f"[crawler] коллектор недоступен: {e}")
+        except Exception as e:  # цикл не должен умирать
+            print(f"[crawler] ошибка тика: {e!r}")
+        time.sleep(max(1.0, settings.tick_seconds - (time.monotonic() - started)))
+
+
+if __name__ == "__main__":
+    run()

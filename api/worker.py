@@ -1,7 +1,7 @@
-"""Фоновая джоба планировщика: сбор билетов через GraphQL (core.graphql_api,
-кэш серий), стыковка цепочек (core.planner), наборы городов (core.overview),
-прогресс в таблице jobs, котировки — в SQLite + Parquet. Запускается в потоке
-однопоточного executor (rate-limit к источнику).
+"""Фоновая джоба планировщика: серии билетов от коллектора (core.collector_client;
+без COLLECTOR_URL — прямой GraphQL с кэшем серий), стыковка цепочек (core.planner),
+наборы городов (core.overview), прогресс в таблице jobs, котировки — в SQLite.
+Запускается в потоке однопоточного executor.
 """
 import json
 import threading
@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from core import planner
 from core.network import load_airport_network
 from core.segments import make_city_lookup
-from storage import hot, lake
+from storage import hot
 
 # Свежесть кэша серий (направление, день, коридор): источник (Travelpayouts
 # Data API) сам отдаёт кэш цен с задержкой ~суток, поэтому чаще перезапрашивать
@@ -172,18 +172,13 @@ def make_ticket_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None):
     return make_cached_ticket_fetch(conn, on_cache_hit)
 
 
-def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: str,
-                 lake_root: str = lake.DEFAULT_LAKE_ROOT) -> None:
-    """Котировки — в горячее хранилище SQLite + дозапись в озеро (если подключено).
-
-    lake_root — каталог озера; по умолчанию data/lake."""
+def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: str) -> None:
+    """Котировки — в горячее хранилище SQLite (карта аэропорт → город, статистика).
+    Локального Parquet-озера котировок больше нет: история наблюдений цены живёт в
+    озере серий коллектора (docs/COLLECTOR.md); прежнее data/lake на VM набрало
+    миллион мелких файлов и только тормозило обслуживание тома."""
     rows = hot.flights_to_quotes(flights, observed_at)
     hot.upsert_quotes(conn, rows)
-    if lake.available():
-        try:
-            lake.append_quotes(rows, root=lake_root, part_id=job_id)
-        except Exception as e:  # озеро не критично для serving
-            print(f"[worker] lake append failed: {e}")
 
 
 # ------------------------- планировщик цепочек A→B→C --------------------------
@@ -244,7 +239,7 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         print(f"[worker] plan job {job_id} done: {count} цепочек")
 
         # Котировки планировщику не нужны (результат — result_json, повторы — fetch_cache),
-        # они копят статистику /api/routes и историю цен в озере. Поэтому пишем их уже
+        # они копят карту аэропорт → город и статистику. Поэтому пишем их уже
         # после done, чтобы пользователь не ждал, и сбой тут не портит готовую джобу.
         # Виртуальные рейсы hidden-city — не котировки (такого билета A→B нет), их не пишем.
         flights: List[Dict[str, Any]] = []

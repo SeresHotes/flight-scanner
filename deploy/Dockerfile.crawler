@@ -1,0 +1,21 @@
+# Образ фонового сборщика (flights-crawler): планирует покрытие «город × день»
+# на горизонте и подаёт серии X→ANY в очередь коллектора (приоритет crawl).
+# Данных, токена и S3 у него нет — только HTTP к коллектору.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+      "requests>=2.32,<3" \
+      "python-dotenv>=1.2,<2"
+
+# core/ нужен ради core/collector_client.py (общий клиент коллектора).
+COPY core ./core
+COPY crawler ./crawler
+
+ENV PYTHONUNBUFFERED=1
+
+RUN useradd --create-home --uid 1000 app && chown -R app /app
+USER app
+
+CMD ["python", "-m", "crawler.main"]

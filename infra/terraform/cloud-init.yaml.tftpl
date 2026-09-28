@@ -50,7 +50,11 @@ write_files:
       /opt/flights/seed.sh
       # Контейнеры работают под непривилегированным uid 1000 — том должен быть его
       # (сид качает root-контейнер aws-cli). Иначе SQLite не создать: "unable to open database file".
-      chown -R 1000:1000 /opt/flights/data
+      # Один раз (маркер .owned): на томе больше миллиона файлов локального озера котировок,
+      # рекурсивный chown с холодным кэшем inode шёл десятки минут при каждом обновлении.
+      if [ ! -e /opt/flights/data/.owned ]; then
+        chown -R 1000:1000 /opt/flights/data && touch /opt/flights/data/.owned
+      fi
       cd /opt/flights
       # Каждый деплой оставлял старый образ (после pull :latest он теряет тег) — за
       # ~70 деплоев они забили диск 19 ГБ, pull падал "no space left on device", и

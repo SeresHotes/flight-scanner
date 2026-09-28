@@ -35,6 +35,17 @@ services:
       - ../data:/app/data
     restart: unless-stopped
 
+  crawler:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.crawler
+    image: flights-crawler:local
+    environment:
+      - COLLECTOR_URL=http://collector:8001
+    depends_on:
+      - collector
+    restart: unless-stopped
+
   web:
     build:
       context: ..
