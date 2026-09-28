@@ -108,6 +108,7 @@ class PlanStop(BaseModel):
     kind: str = "cities"               # 'cities' | 'any'
     codes: List[str] = []              # IATA-коды городов-кандидатов (пусто для 'any')
     window: List[str] = ["", ""]       # [start, end], YYYY-MM-DD; ['',''] у концов
+    radiusKm: int = 0                  # можно улететь дальше из соседнего города (core/nearby)
 
 
 class PlanRequest(BaseModel):
@@ -117,7 +118,8 @@ class PlanRequest(BaseModel):
 
 
 def _stops_payload(req: "PlanRequest") -> List[Dict[str, Any]]:
-    return [{"kind": s.kind, "codes": s.codes, "window": s.window} for s in req.stops]
+    return [{"kind": s.kind, "codes": s.codes, "window": s.window, "radiusKm": s.radiusKm}
+            for s in req.stops]
 
 
 
@@ -158,8 +160,8 @@ def _estimate(query: PlanQuery) -> Dict[str, Any]:
 
 
 def _query_from_request(req: "PlanQueryRequest") -> PlanQuery:
-    return PlanQuery.from_dict({"stops": [{"kind": s.kind, "codes": s.codes, "window": s.window}
-                                          for s in req.stops],
+    return PlanQuery.from_dict({"stops": [{"kind": s.kind, "codes": s.codes, "window": s.window,
+                                           "radiusKm": s.radiusKm} for s in req.stops],
                                 "cities": req.cities, "legs": req.legs, "tripLength": req.tripLength,
                                 "maxCost": req.maxCost, "maxResults": req.maxResults})
 

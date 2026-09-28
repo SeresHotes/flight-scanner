@@ -33,6 +33,8 @@ poetry.lock
 /data/
 *.json
 !tests/fixtures/*.json
+# координаты городов/аэропортов для переезда в соседний город (scripts/build_geo.py)
+!/core/geo.json
 *.csv
 # генерируется build_web_data.py
 web/data.js

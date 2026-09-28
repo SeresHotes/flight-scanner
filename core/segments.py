@@ -30,6 +30,11 @@ def make_city_lookup(network: dict):
             entry = _CITY_BY_CODE.get(code)
             if entry:
                 name, country = entry[2], entry[3]  # английское имя, ISO2 страны
+        if not name:  # справочник Travelpayouts (core/geo.json): соседние города и пр.
+            from core.nearby import city_entry
+            geo = city_entry(code) if code else None
+            if geo:
+                name, country = geo[3], country or geo[2]
         return {"city": name or code, "country": country, "flag": flag_emoji(country)}
     return city_info
 

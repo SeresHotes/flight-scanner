@@ -74,20 +74,28 @@ _INF = float("inf")
 # --------------------------------- модель ------------------------------------
 
 class Stop:
-    """Остановка запроса: набор городов (kind='cities') или «любой» + окно дат."""
+    """Остановка запроса: набор городов (kind='cities') или «любой» + окно дат.
 
-    def __init__(self, kind: str, codes: List[str], window: List[str]):
+    radius_km — можно улететь дальше из соседнего города в этом радиусе (core/nearby);
+    exact — прилёт строго в codes (маршруты выбранного набора городов)."""
+
+    def __init__(self, kind: str, codes: List[str], window: List[str],
+                 radius_km: float = 0, exact: bool = False):
         self.kind = kind                                    # 'cities' | 'any'
         self.codes = [c.upper() for c in codes if c]        # пусто для 'any'
         self.window = [window[0] if window else "", window[1] if window and len(window) > 1 else ""]
+        self.radius_km = radius_km
+        self.exact = exact
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Stop":
         # Принимаем и codes:[...], и airports:[{code}] (как во фронтовом PlannerStop).
+        from core.nearby import clamp_radius
         codes = d.get("codes")
         if codes is None:
             codes = [a.get("code") for a in (d.get("airports") or [])]
-        return Stop(d.get("kind", "cities"), codes or [], d.get("window") or ["", ""])
+        return Stop(d.get("kind", "cities"), codes or [], d.get("window") or ["", ""],
+                    radius_km=clamp_radius(d.get("radiusKm")))
 
     def cardinality(self) -> float:
         """Число городов; «любой» = бесконечность (сторону нельзя заякорить)."""
@@ -96,6 +104,17 @@ class Stop:
 
 def parse_stops(raw: List[Dict[str, Any]]) -> List[Stop]:
     return [Stop.from_dict(d) for d in raw]
+
+
+def collect_view(stops: List[Stop]) -> List[Stop]:
+    """Остановки для сбора и оценки: к городам остановки с радиусом добавлены соседи
+    (core/nearby) — рейсы из/в них нужны, чтобы стыковать с переездом."""
+    from core.nearby import Hops
+    hops = Hops(stops)
+    if not hops.active():
+        return stops
+    return [Stop(s.kind, hops.collect_codes(i), s.window) if s.kind == "cities" else s
+            for i, s in enumerate(stops)]
 
 
 # ----------------------------- окна и оценка ---------------------------------
@@ -158,6 +177,7 @@ def plan_series(stops: List[Stop], max_cost: Optional[float] = None):
     """Детерминированные серии сбора: (плечо, origin|None, dest|None, день, value_min,
     value_max, страниц). Серии hidden-city сюда не входят — их коридор зависит от
     лучшей цены дня и известен только в сборе (в оценке они всегда «холодные»)."""
+    stops = collect_view(stops)
     out = []
     vmax = int(max_cost) if max_cost else None
     for i in range(len(stops) - 1):
@@ -186,6 +206,7 @@ def estimate_plan(stops: List[Stop], city_info=None, max_cost: Optional[float] =
     без неё всё считается холодным."""
     if city_info is None:
         city_info = make_city_lookup(load_airport_network())
+    stops = collect_view(stops)
     from core.graphql_api import params_key
     cached_by_leg: Dict[int, int] = {}
     if is_cached is not None:
@@ -213,6 +234,7 @@ def estimate_plan(stops: List[Stop], city_info=None, max_cost: Optional[float] =
 
 
 def request_count(stops: List[Stop]) -> int:
+    stops = collect_view(stops)
     return sum(_leg_requests(stops, i) for i in range(len(stops) - 1))
 
 
@@ -327,6 +349,7 @@ def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
       по ходу сбора); network — не используется, оставлен для совместимости вызова."""
     from core import graphql_api
     fetch = fetch_fn or graphql_api.fetch_series
+    stops = collect_view(stops)
     airport_city = dict(airport_city or {})
     collected: Dict[int, List[Dict[str, Any]]] = {}
     for i in range(len(stops) - 1):
@@ -510,27 +533,29 @@ def _allowed(stop: Stop) -> Optional[set]:
 
 
 def _completion_lb(stops: List[Stop],
-                   legs_by_origin: Dict[int, Dict[str, List[Dict[str, Any]]]]
-                   ) -> List[Dict[str, float]]:
+                   legs_by_origin: Dict[int, Dict[str, List[Dict[str, Any]]]],
+                   hops=None) -> List[Dict[str, float]]:
     """Нижняя оценка стоимости «хвоста» цепочки для отсечения по бюджету.
 
-    lb[i][city] — минимально возможная суммарная цена, чтобы из `city` перед плечом i
-    добраться до финальной остановки, учитывая ТОЛЬКО цены рейсов и разрешённые города
-    остановок (БЕЗ ограничений на время вылета и на повторы городов). Это релаксация
-    задачи, поэтому оценка никогда не завышает реальную стоимость — ветку, где
-    накопленная_цена + lb > бюджета, можно резать, не теряя валидных цепочек
-    (admissible-эвристика).
+    lb[i][city] — минимально возможная суммарная цена, чтобы, ПРИЛЕТЕВ в `city` на
+    остановку i, добраться до финальной остановки, учитывая ТОЛЬКО цены рейсов,
+    разрешённые города остановок и переезды в соседний город (hops) — БЕЗ ограничений
+    на время вылета и на повторы городов. Это релаксация задачи, поэтому оценка никогда
+    не завышает реальную стоимость — ветку, где накопленная_цена + lb > бюджета, можно
+    резать, не теряя валидных цепочек (admissible-эвристика).
 
     Считается обратной динамикой по плечам (от последнего перехода к первому) — это
     и есть тот самый граф минимальных цен перелётов: город, из которого дешевле
     бюджета не собрать ни одной цепочки, отсекается целиком, не разворачивая поддерево."""
+    from core.nearby import Hops, neighbors
+    hops = hops or Hops(stops)
     last = len(stops) - 1
     lb: List[Dict[str, float]] = [dict() for _ in range(len(stops))]
     for i in range(last - 1, -1, -1):
-        allow_next = _allowed(stops[i + 1])
+        allow_next = hops.arrive_allowed(i + 1)
         nxt = lb[i + 1]
         terminal_next = (i + 1 == last)
-        cur = lb[i]
+        dep: Dict[str, float] = {}      # вылетев из города на плече i
         for city, flights in legs_by_origin[i].items():
             best = _INF
             for f in flights:
@@ -546,37 +571,68 @@ def _completion_lb(stops: List[Stop],
                 if cand < best:
                     best = cand
             if best < _INF:
-                cur[city] = best
+                dep[city] = best
+        if hops.radius[i] <= 0:
+            lb[i] = dep
+            continue
+        # прилёт в a → вылет из любого города departs(i, a); a — сам город вылета или сосед
+        cur = lb[i]
+        arrivals = set(dep)
+        for d in dep:
+            arrivals.update(neighbors(d, hops.radius[i]))
+        for a in arrivals:
+            best = min((dep[d] for d in hops.departs(i, a) if d in dep), default=_INF)
+            if best < _INF:
+                cur[a] = best
     return lb
+
+
+@lru_cache(maxsize=1 << 16)
+def _gap_ok(arrive_iso: str, depart_iso: str) -> bool:
+    """Хватает ли времени на переезд в соседний город (nearby.HOP_MIN_GAP_MIN).
+    Времена — локальные, таймзона срезана (соседи почти всегда в одном поясе)."""
+    from core.nearby import HOP_MIN_GAP_MIN
+    a = parse_datetime(arrive_iso).replace(tzinfo=None)
+    d = parse_datetime(depart_iso).replace(tzinfo=None)
+    return (d - a).total_seconds() >= HOP_MIN_GAP_MIN * 60
 
 
 def _onward_candidates(stops: List[Stop],
                        legs_by_origin: Dict[int, Dict[str, List[Dict[str, Any]]]],
-                       i: int, city: str, arrive_iso: str, visited: set
+                       i: int, city: str, arrive_iso: str, visited: set, hops=None
                        ) -> List[Any]:
-    """Валидные онворд-рейсы из `city` на плече i: вылет не раньше прилёта, посадка в
-    разрешённом для следующей остановки городе, без петель/повторов. Возвращает пары
-    (рейс, город_прилёта).
+    """Валидные онворд-рейсы после прилёта в `city` на плече i: вылет не раньше
+    прилёта (из соседнего города — с запасом на переезд), посадка в разрешённом для
+    следующей остановки городе, без петель/повторов. Возвращает пары (рейс, город_прилёта).
 
     Запрет повторов — только для «любой»-остановок: явно заданный город пользователь
     выбрал сам, и повтор там осмыслен (кольцо MOW → … → MOW). Иначе финал, совпадающий
     со стартом, не собирался никогда, а _completion_lb (не знает про visited) держал
     такие ветки живыми — A* перебирал бесконечно, не находя ни одной цепочки."""
+    from core.nearby import Hops
+    hops = hops or Hops(stops)
     arrive_day = date_only(arrive_iso)
-    allow_next = _allowed(stops[i + 1])
+    allow_next = hops.arrive_allowed(i + 1)
     out = []
-    for f in legs_by_origin[i].get(city, []):
-        dep = f.get("departure_at")
-        if not dep or date_only(dep) < arrive_day:  # нельзя вылететь раньше прилёта
-            continue
-        dest = (f.get("destination") or f.get("search_destination") or "").upper()
-        if not dest or dest == city:  # без петель
-            continue
-        if allow_next is None and dest in visited:  # «любой» не разрешаем в уже посещённый
-            continue
-        if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
-            continue
-        out.append((f, dest))
+    seen = set()
+    for d in hops.departs(i, city):
+        for f in legs_by_origin[i].get(d, []):
+            if id(f) in seen:
+                continue
+            seen.add(id(f))
+            dep = f.get("departure_at")
+            if not dep or date_only(dep) < arrive_day:  # нельзя вылететь раньше прилёта
+                continue
+            if i > 0 and city not in _side_codes(f, "origin") and not _gap_ok(arrive_iso, dep):
+                continue
+            dest = (f.get("destination") or f.get("search_destination") or "").upper()
+            if not dest or dest == city or dest == d:  # без петель
+                continue
+            if allow_next is None and dest in visited:  # «любой» не разрешаем в уже посещённый
+                continue
+            if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
+                continue
+            out.append((f, dest))
     return out
 
 
@@ -697,7 +753,9 @@ def _enumerate_all(ctx, max_cost: Optional[float],
     пользуются, только когда max_results не задан. max_cost, если задан, режет ветки
     по нижней оценке «хвоста»."""
     stops, legs_by_origin, builder, city_info, chain_start, last = ctx
-    lb = _completion_lb(stops, legs_by_origin) if max_cost is not None else None
+    from core.nearby import Hops
+    hops = Hops(stops)
+    lb = _completion_lb(stops, legs_by_origin, hops) if max_cost is not None else None
     results: List[Dict[str, Any]] = []
     seq = {"id": 1}
 
@@ -707,7 +765,7 @@ def _enumerate_all(ctx, max_cost: Optional[float],
             results.append(_assemble(stops, chosen, builder, city_info, chain_start, seq["id"]))
             seq["id"] += 1
             return
-        candidates = _onward_candidates(stops, legs_by_origin, i, city, arrive_iso, visited)
+        candidates = _onward_candidates(stops, legs_by_origin, i, city, arrive_iso, visited, hops)
         for f, dest in sorted(candidates, key=lambda p: _price_of(p[0])):
             g2 = g + _price_of(f)
             if lb is not None:
@@ -766,8 +824,10 @@ def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optio
     растёт на ≤2 записи за шаг, а не на всех детей сразу. Узел — кортеж, путь —
     связный список (родитель, рейс) без копирования."""
     stops, legs_by_origin, _, _, chain_start, last = ctx
-    lb = _completion_lb(stops, legs_by_origin)
-    cands = _Candidates(stops, legs_by_origin, table, lb)
+    from core.nearby import Hops
+    hops = Hops(stops)
+    lb = _completion_lb(stops, legs_by_origin, hops)
+    cands = _Candidates(stops, legs_by_origin, table, lb, hops)
     heap: List[Any] = []
     seq = 0  # tie-breaker: не даём heapq сравнивать узлы
     # Фильтры городов действуют у промежуточных остановок (1..last-1): пребывание —
@@ -782,7 +842,7 @@ def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optio
         """Кладёт в кучу первого валидного ребёнка узла, начиная с позиции start."""
         nonlocal seq
         i, city, arrive_day, visited, g, _, arrive_iso = node
-        keys, idxs = cands.get(i, city)
+        keys, idxs, hop = cands.get(i, city)
         any_next = stops[i + 1].kind == "any"
         cf = city_filters.get(i)
         for k in range(start, len(idxs)):
@@ -791,6 +851,8 @@ def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optio
                 return
             fi = idxs[k]
             if table.dep_day[fi] < arrive_day:  # нельзя вылететь раньше прилёта
+                continue
+            if hop[k] and i > 0 and not _gap_ok(arrive_iso, table.dep_iso[fi]):  # переезд к соседу
                 continue
             if any_next and table.dest[fi] in visited:  # «любой» — не в уже посещённый
                 continue
@@ -831,13 +893,16 @@ def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optio
 
 
 class _Candidates:
-    """Онворд-рейсы (плечо i, город), отсортированные по price + lb хвоста за
-    городом прилёта. Не зависят от времени прилёта и посещённых — поэтому один
-    список на (i, город) делят все узлы. Тупики (хвоста нет), петли и прилёт вне
-    разрешённых городов выкинуты сразу; дату и повторы проверяет push_next."""
+    """Онворд-рейсы (плечо i, город прилёта), отсортированные по price + lb хвоста за
+    городом прилёта. Вылет — из самого города или соседнего в радиусе остановки
+    (hops.departs; у таких рейсов флаг hop — push_next проверяет запас на переезд).
+    Не зависят от времени прилёта и посещённых — поэтому один список на (i, город)
+    делят все узлы. Тупики (хвоста нет), петли и прилёт вне разрешённых городов
+    выкинуты сразу; дату и повторы проверяет push_next."""
 
-    def __init__(self, stops, legs_by_origin, table: _FlightTable, lb):
+    def __init__(self, stops, legs_by_origin, table: _FlightTable, lb, hops):
         self.stops, self.legs_by_origin, self.table, self.lb = stops, legs_by_origin, table, lb
+        self.hops = hops
         self.last = len(stops) - 1
         self.cache: Dict[Any, Any] = {}
 
@@ -848,22 +913,28 @@ class _Candidates:
         return got
 
     def _build(self, i: int, city: str):
-        allow_next = _allowed(self.stops[i + 1])
+        allow_next = self.hops.arrive_allowed(i + 1)
         terminal = i + 1 == self.last
         pairs = []
-        for f in self.legs_by_origin[i].get(city, []):
-            fi = self.table.index[id(f)]
-            dest = self.table.dest[fi]
-            if not dest or dest == city or self.table.dep_day[fi] is None:
-                continue
-            if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
-                continue
-            tail = 0.0 if terminal else self.lb[i + 1].get(dest)
-            if tail is None:
-                continue
-            pairs.append((self.table.price[fi] + tail, fi))
+        seen = set()
+        for d in self.hops.departs(i, city):
+            for f in self.legs_by_origin[i].get(d, []):
+                fi = self.table.index[id(f)]
+                if fi in seen:
+                    continue
+                seen.add(fi)
+                dest = self.table.dest[fi]
+                if not dest or dest == city or dest == d or self.table.dep_day[fi] is None:
+                    continue
+                if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
+                    continue
+                tail = 0.0 if terminal else self.lb[i + 1].get(dest)
+                if tail is None:
+                    continue
+                pairs.append((self.table.price[fi] + tail, fi, city not in _side_codes(f, "origin")))
         pairs.sort()
-        return array("d", (p[0] for p in pairs)), array("i", (p[1] for p in pairs))
+        return (array("d", (p[0] for p in pairs)), array("i", (p[1] for p in pairs)),
+                bytes(p[2] for p in pairs))
 
 
 def _unwind(path) -> tuple:
@@ -1000,6 +1071,8 @@ def _assemble(stops: List[Stop], chosen: List[Dict[str, Any]], builder: "Builder
             "days": max(0, days),
             "weekendCovered": _has_both_weekend_days(arrive, depart),
             "resolvedFromAny": stops[k].kind == "any",
+            **_depart_from(code, segments[k] if 0 < k < len(segments) else None,
+                           lambda c: [city_info(c)["city"], city_info(c)["flag"]]),
         })
 
     total_price = sum(s["price"] or 0 for s in segments)
@@ -1016,6 +1089,21 @@ def _assemble(stops: List[Stop], chosen: List[Dict[str, Any]], builder: "Builder
         "total_transfers": total_transfers,
         "travel_minutes": travel_minutes,
     }
+
+
+def _depart_from(code: str, seg: Optional[Dict[str, Any]], names) -> Dict[str, Any]:
+    """{departFrom: {code, city, flag, km}} — если из остановки улетаем не из города
+    прилёта, а из соседнего (переезд, core/nearby); иначе пусто."""
+    if not seg:
+        return {}
+    origin = (seg.get("origin") or "").upper()
+    if not origin or origin == (code or "").upper():
+        return {}
+    from core.nearby import distance_km
+    km = distance_km(code, origin)
+    name = names(origin)
+    return {"departFrom": {"code": origin, "city": name[0], "flag": name[1],
+                           "km": round(km) if km is not None else None}}
 
 
 # ------------------------ материализация страницы результата ------------------
@@ -1054,6 +1142,8 @@ def materialize(result: Dict[str, Any], n: int) -> Dict[str, Any]:
             "days": result["days"][n * stop_count + k],
             "weekendCovered": bool((result["weekend"][n] >> k) & 1),
             "resolvedFromAny": bool(any_stops[k]),
+            **_depart_from(code, segments[k] if 0 < k < legs else None,
+                           lambda c: cities.get(c) or [c, ""]),
         })
     return {
         "id": n + 1,
@@ -1106,7 +1196,8 @@ def build_combo_routes(stops: List[Stop], collected: Dict[int, List[Dict[str, An
     for codes in combos:
         if len(codes) != len(stops):
             continue
-        fixed = [Stop("cities", [code], stop.window) for code, stop in zip(codes, stops)]
+        fixed = [Stop("cities", [code], stop.window, radius_km=stop.radius_km, exact=True)
+                 for code, stop in zip(codes, stops)]
         res = build_itineraries_compact(fixed, collected, max_results=per_combo, city_info=city_info,
                                         max_cost=max_cost, query=query)
         key = combo_key(codes)

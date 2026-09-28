@@ -180,12 +180,21 @@ function StayBar({ stop, endpoint = false }: { stop: ItineraryStop; endpoint?: b
       )}
       {stop.resolvedFromAny && <span className="pl-anytag">&nbsp;· подобран</span>}
       {!endpoint && stop.weekendCovered && <span className="pl-wknd">&nbsp;· выходные ✓</span>}
+      {stop.departFrom && (
+        <span
+          className="pl-hop"
+          title="Дальше летим из соседнего города: переезд по земле сами, билеты раздельные"
+        >
+          &nbsp;· 🚆 переезд в {stop.departFrom.flag} {stop.departFrom.city || stop.departFrom.code}
+          {stop.departFrom.km != null ? ` (${stop.departFrom.km} км)` : ''}
+        </span>
+      )}
     </div>
   )
 }
 
 export function ItineraryCard({ it }: { it: Itinerary }) {
-  const codes = it.stops.map((s) => s.code)
+  const codes = it.stops.map((s) => (s.departFrom ? `${s.code}⇢${s.departFrom.code}` : s.code))
   return (
     <div className="card">
       <div className="top">
