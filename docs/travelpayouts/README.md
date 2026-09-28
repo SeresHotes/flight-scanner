@@ -6,7 +6,11 @@ GraphQL-схемы, снятой introspection-запросом. Сохране�
 
 - `articles/` — статьи справки в Markdown (русский, актуальнее slate).
 - `slate/` — исходники developer-доков (английский, старее; есть ручки, которых нет в справке).
-- `graphql-schema.graphql` — полная схема GraphQL Data API (SDL из introspection).
+- `graphql-schema.graphql` — полная схема GraphQL Data API (SDL из introspection,
+  обновить: `poetry run python scripts/dump_graphql_schema.py > docs/travelpayouts/graphql-schema.graphql`).
+- **[FINDINGS.md](FINDINGS.md) — что проверено живыми запросами**: семантика `grouping`
+  (минимум на группу; `DATES` при ANY — один билет на дату), какие концы можно опускать,
+  как выгрузить все билеты A→ANY и сколько это стоит, мёртвая карта цен.
 
 Справка закрыта Cloudflare, но статьи отдаёт Zendesk API:
 `https://support.travelpayouts.com/api/v2/help_center/ru/articles/<id>.json`

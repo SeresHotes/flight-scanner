@@ -1,0 +1,103 @@
+# Travelpayouts / Aviasales API — проверено на практике
+
+Выводы из живых запросов (27–28.09.2026), которых нет или нет явно в документации.
+Справочник ручек — [README.md](README.md), схема — [graphql-schema.graphql](graphql-schema.graphql).
+
+## Как добывалась документация
+
+- Страницы support.travelpayouts.com закрыты Cloudflare (curl получает «Just a moment…»,
+  WebFetch — 403). Тело статьи отдаёт Zendesk API без авторизации:
+  `https://support.travelpayouts.com/api/v2/help_center/ru/articles/<id>.json` (поле `body`, HTML),
+  список статей категории «API и данные» — `…/ru/categories/200358578/articles.json`,
+  разделы — `…/ru/sections.json`. HTML → Markdown: `pandoc -f html -t gfm-raw_html --wrap=none`
+  (сложные таблицы pandoc заменяет на `[TABLE]` — разбирать руками).
+- Developer-доки (https://travelpayouts.github.io/slate/) — Markdown-исходники в GitHub
+  `travelpayouts/slate`, каталог `source/includes/`.
+- GraphQL-схемы в справке нет. Снимается introspection-запросом **с токеном** (без токена — 401):
+  `poetry run python scripts/dump_graphql_schema.py > docs/travelpayouts/graphql-schema.graphql`.
+
+## GraphQL `prices_one_way`: общие факты
+
+- Запросов в схеме пять: `prices_one_way`, `prices_round_trip`, `special_offers_one_way`,
+  `special_offers_round_trip`, `weekend_prices_round_trip`. Мутаций нет.
+- `origin`/`destination` — одно значение (город, аэропорт или страна; `*_type` определяется сам).
+  Без `destination` — A→ANY, без `origin` — ANY→B, без обоих — ошибка.
+- `paging.limit` ≤ 400; `offset` выше ~14 800 → ошибка «too high paging depth». Значит, один набор
+  параметров даёт не больше ~15 000 билетов.
+- Какие концы можно опускать (проверено 28.09, дата 15.10.2026, `grouping: NONE`) — **хотя бы один
+  конец обязан быть городом (или аэропортом)**, иначе HTTP 400 `GRAPHQL_VALIDATION_FAILED`
+  «at least one of origin_city_iata OR destination_city_iata fields should be provided»:
+
+  | origin → destination | Результат |
+  |---|---|
+  | город → ANY (MOW) | работает, ~1 450 билетов/день при ≤25k |
+  | ANY → город (→IST) | работает: 3 701 билет из 223 городов 75 стран, 2.5k–281k ₽, влезло без коридора; `DIRECTIONS` — 223 строки (по городу вылета) |
+  | страна → город (RU→IST) | работает: 448 билетов из 37 городов РФ — ровно российская часть ANY→IST |
+  | город → страна (MOW→CN) | работает |
+  | ANY → страна (→TR) | 400 |
+  | страна → страна (RU→TR) | 400 |
+  | ANY → ANY | 400 |
+
+- Фильтры на сервере (`ParamsOneWay`): даты (`depart_dates` / `depart_months` /
+  `depart_date_min..max`), `value_min/value_max`, `direct`, `convenient`, `no_visa_at_transfer`,
+  `with_baggage`, `trip_class`. `no_lowcost` игнорируется. Фильтров по длительности, времени вылета,
+  авиакомпании, точке пересадки нет — только у себя по ответу.
+- Сортировка `VALUE_ASC` по умолчанию; без ценового коридора первые страницы A→ANY — дешёвая ближняя
+  Россия/СНГ.
+- Данные — кеш поисков пользователей Aviasales (до 7 дней): направления, которые никто не искал,
+  не появятся ни при каких фильтрах.
+
+## Группировки (`grouping`) — один самый дешёвый билет на группу
+
+Проверено сравнением с полной выгрузкой `grouping: NONE`: сгруппированная строка — **полный билет
+с минимальной ценой в группе** (свои даты, пересадки, сегменты), а не агрегат. Фильтры из `params`
+применяются до группировки, поэтому «минимум среди прямых/с багажом» получается через `params`.
+
+| grouping | Группа | Проверка |
+|---|---|---|
+| `NONE` | нет, все билеты | — |
+| `DIRECTIONS` | (город отправления, город назначения) | MOW→ANY 15.10, ≤25k: NONE 1484 билета / 212 городов → DIRECTIONS 212 строк, цена = минимум в 212/212 |
+| `DEPART_DATE` | дата вылета | MOW→IST, октябрь: NONE 867 билетов / 31 дата → 31 строка, минимум в 31/31 |
+| `DATES` (по умолчанию!) | (дата вылета, дата возврата); для one-way = дата | см. ниже |
+| `DATES_NUM_OF_CHANGES` | дата + число пересадок | не проверялось |
+| `YEAR_MONTH` | месяц | не проверялось |
+
+**`DATES` без `destination` не группирует по направлению**: одна строка на дату — самый дешёвый
+билет из A куда угодно.
+- MOW→ANY 15.10, ≤25k: NONE 1445 билетов / 214 городов → DATES **1** строка (= общий минимум).
+- MOW→ANY 01.10–30.11 без коридора: DATES **61** строка (по дню), 8 направлений, все ≤3 900 ₽.
+
+Итого: `DATES` при ANY — «календарь минимальных цен из A», с `destination` — обычный календарь
+цен направления. Внимание: `DATES` — значение по умолчанию; если забыть `grouping: NONE`,
+получишь один билет на дату вместо всех.
+
+`DIRECTIONS` за период (`depart_months`) — одна строка на город (минимум за весь период, у каждой
+строки своя дата); для MOW за октябрь первая страница полная (400 городов) — нужно листать.
+
+## A→ANY: как получить все билеты
+
+Группировка всегда оставляет один билет на группу, поэтому «все рейсы на N месяцев» через неё не
+получить — только `grouping: NONE` c нарезкой:
+
+1. по дню (`depart_dates: [день]`);
+2. внутри дня — по ценовым коридорам `value_min/value_max`;
+3. коридор, упёршийся в `offset` ~14 800, делить пополам;
+4. кэшировать серии (в проекте — `ticket_cache`, TTL 24 ч, `api.worker.make_cached_ticket_fetch`).
+
+Объёмы (MOW): день ≤25k — ~1 450 билетов (4 страницы); весь день по 3–4 коридорам — порядка
+10–20 страниц; два месяца — ~600–1 200 запросов, при 60/мин это 10–20 минут на один город
+отправления. Для разведки дешевле `DIRECTIONS` (1–2 страницы: куда вообще летают и почём минимум),
+затем `NONE` только по интересным направлениям.
+
+## REST и прочие ручки
+
+- Лимиты — в минуту на метод (таблица в [articles/limits.md](articles/limits.md)); GraphQL — 60/мин,
+  `/v3/prices_for_dates` — 600/мин; превышение → 429, заголовки `X-Rate-Limit-*`.
+- REST `prices_for_dates` отдаёт один самый дешёвый билет на направление/дату — для планировщика
+  не годится (поэтому проект перешёл на GraphQL).
+- **Карта цен `map.aviasales.ru` мертва**: поддержка прекращена 30.05.2022, на 27.09.2026
+  `supported_directions.json` и `prices.json` отвечают `302 → https://www.aviasales.ru/`.
+  Замены по справке: `prices_one_way(grouping: DIRECTIONS)` (+ `data/ru/cities.json` для страны и
+  координат) и REST `/aviasales/v3/grouped_prices`. Визовых фильтров карты (`no_visa`, `schengen`,
+  `need_visa`) в заменах нет.
+- Flight Search API (живой поиск, полная выдача) — только проектам с подтверждёнными 50 000+ MAU.
