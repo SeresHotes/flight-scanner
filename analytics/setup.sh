@@ -8,9 +8,10 @@
 #   SSH_OPTS                 — ключ к аналитической VM, по умолчанию "-i ~/.ssh/mdfetcher_vm"
 #   FLIGHTS_TF_DIR           — terraform этого репозитория (S3-ключи бакета flights),
 #                              по умолчанию infra/terraform основного checkout
-#   MD_TFVARS                — terraform.tfvars market-data-fetcher (пароль admin Grafana)
-#   GRAFANA_URL              — по умолчанию http://<host без user@>:3000
-#   GRAFANA_ADMIN_PASSWORD   — вместо чтения MD_TFVARS
+#   FLIGHTS_CH_PASSWORD      — пароль пользователя ClickHouse flights_grafana (иначе генерируется;
+#                              users.d/flights.xml и datasource Grafana обновляются вместе)
+# Пароль admin Grafana берётся на самой VM из /opt/analytics/.env (GRAFANA_ADMIN_PASSWORD),
+# шаг Grafana выполняется там же через localhost:3000 — пароль не покидает VM.
 #
 # Что делает:
 #   1. Рендерит named collections бакета flights → /opt/analytics/clickhouse/config.d/
@@ -24,14 +25,11 @@ HOST="${1:?usage: analytics/setup.sh ubuntu@<analytics_vm_ip>}"
 SSH_OPTS="${SSH_OPTS:--i $HOME/.ssh/mdfetcher_vm}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FLIGHTS_TF_DIR="${FLIGHTS_TF_DIR:-$HOME/Projects/flight_scanner/infra/terraform}"
-MD_TFVARS="${MD_TFVARS:-$HOME/Projects/market-data-fetcher/infra/terraform/terraform.tfvars}"
-GRAFANA_URL="${GRAFANA_URL:-http://${HOST#*@}:3000}"
+GRAFANA_URL="http://${HOST#*@}:3000"
 
 BUCKET=$(terraform -chdir="$FLIGHTS_TF_DIR" output -raw bucket_name)
 S3_KEY=$(terraform -chdir="$FLIGHTS_TF_DIR" output -raw s3_access_key)
 S3_SECRET=$(terraform -chdir="$FLIGHTS_TF_DIR" output -raw s3_secret_key)
-GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-$(grep -E '^grafana_admin_password' "$MD_TFVARS" | sed -E 's/.*=\s*"([^"]*)".*/\1/')}"
-[ -n "$GRAFANA_ADMIN_PASSWORD" ] || { echo "нет пароля admin Grafana (GRAFANA_ADMIN_PASSWORD или $MD_TFVARS)" >&2; exit 1; }
 CH_PASSWORD="${FLIGHTS_CH_PASSWORD:-$(openssl rand -hex 16)}"
 
 render() { sed -e "s#__BUCKET__#$BUCKET#g" -e "s#__S3_KEY__#$S3_KEY#g" -e "s#__S3_SECRET__#$S3_SECRET#g" \
@@ -58,9 +56,16 @@ sudo docker exec "$CH" clickhouse-client --user flights_grafana --password "$CH_
 REMOTE
 } | ssh $SSH_OPTS "$HOST" "CH_PASSWORD='$CH_PASSWORD' bash -s"
 
-echo "== Grafana $GRAFANA_URL"
-export GRAFANA_URL GRAFANA_ADMIN_PASSWORD CH_PASSWORD
-python3 - "$ROOT/analytics/grafana/dashboards" <<'PY'
+echo "== Grafana (на VM, пароль admin из /opt/analytics/.env)"
+DASH_TAR_B64=$(COPYFILE_DISABLE=1 tar --no-xattrs -C "$ROOT/analytics/grafana/dashboards" -czf - . 2>/dev/null | base64)
+{
+  echo "DASH_TAR_B64=$DASH_TAR_B64"
+  cat <<'REMOTE'
+set -euo pipefail
+set -a; source <(sudo cat /opt/analytics/.env); set +a
+TMP=$(mktemp -d); echo "$DASH_TAR_B64" | base64 -d | tar -xzf - -C "$TMP"
+export GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
+python3 - "$TMP" <<'PY'
 import base64, glob, json, os, sys, urllib.request, urllib.error
 
 url, pw = os.environ["GRAFANA_URL"], os.environ["GRAFANA_ADMIN_PASSWORD"]
@@ -99,5 +104,8 @@ for path in sorted(glob.glob(sys.argv[1] + "/*.json")):
     code, resp = call("POST", "/api/dashboards/db", {"dashboard": dash, "folderUid": "flights", "overwrite": True})
     print(os.path.basename(path), "->", code, resp.get("url") or resp.get("message"))
 PY
+rm -rf "$TMP"
+REMOTE
+} | ssh $SSH_OPTS "$HOST" "CH_PASSWORD='$CH_PASSWORD' bash -s"
 
 echo "готово: $GRAFANA_URL/dashboards/f/flights"
