@@ -35,6 +35,8 @@ poetry.lock
 !tests/fixtures/*.json
 # координаты городов/аэропортов для переезда в соседний город (scripts/build_geo.py)
 !/core/geo.json
+# дашборды Grafana (analytics/grafana/build_dashboard.py → setup.sh заливает в Grafana)
+!/analytics/grafana/dashboards/*.json
 *.csv
 # генерируется build_web_data.py
 web/data.js

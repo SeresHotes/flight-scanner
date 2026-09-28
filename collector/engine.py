@@ -162,6 +162,7 @@ class Engine:
         self._last_retention = clock()
         self.started_at = now()
         self.crawler_stats: Dict[str, Any] = {}
+        self.bucket_stats: Dict[str, Any] = {}
 
     # ------------------------------ lifecycle ------------------------------
 
@@ -401,6 +402,7 @@ class Engine:
                 if self._clock() - self._last_retention >= self.settings.retention_interval_seconds:
                     self._last_retention = self._clock()
                     self.run_retention()
+                    self.refresh_bucket_stats()
             except Exception as e:
                 print(f"[collector] housekeeping: {e!r}")
 
@@ -411,6 +413,18 @@ class Engine:
                      if j.done and (j.finished or 0) < cutoff]
             for jid in stale:
                 self._jobs.pop(jid, None)
+
+    def refresh_bucket_stats(self) -> Dict[str, Any]:
+        """Объём и число объектов всего бакета (листинг S3; для метрик, раз в интервал
+        ретеншна — на сотни тысяч объектов это сотни запросов, чаще не нужно)."""
+        try:
+            objects = self.store.list("")
+        except Exception as e:
+            print(f"[collector] листинг бакета не удался: {e!r}")
+            return self.bucket_stats
+        self.bucket_stats = {"bytes": sum(o.size for o in objects), "objects": len(objects),
+                             "at": self._now().isoformat(timespec="seconds")}
+        return self.bucket_stats
 
     def run_retention(self) -> List[str]:
         """Озеро больше LAKE_MAX_GB → удаляем самые старые файлы до 95 % порога."""

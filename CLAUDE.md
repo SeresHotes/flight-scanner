@@ -31,6 +31,9 @@
   «город × день» на 180 дней, только HTTP к коллектору) + `web`.
   Прод-compose `deploy/compose.prod.yml` едет в образе planner; на уже созданной
   VM один раз запускается `deploy/vm-migrate.sh`.
+- Дашборд «Flights · Коллектор» — в общей Grafana аналитической VM Market Data
+  (`http://89.169.140.225:3000`, папка «Flights»); конфиги ClickHouse, генератор
+  дашборда и скрипт заливки — `analytics/` (`analytics/README.md`).
 - Все ручки Travelpayouts/Aviasales (GraphQL-схема, REST Data API, Search API, справочники, лимиты) — `docs/travelpayouts/README.md`.
 - Инфраструктура прод-деплоя (Terraform + cloud-init + registry) — `infra/terraform/`.
 - Фронтенд: Vite + React + TS (`frontend/`), только планировщик: `pages/PlanPage`

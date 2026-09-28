@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from collector.config import Settings
 from collector.engine import Engine, NotReady, SeriesRequest
 from collector.index import Index
+from collector.metrics import Metrics
 from collector.store import make_store
 
 
@@ -59,11 +60,21 @@ def create_app(engine: Optional[Engine] = None, settings: Optional[Settings] = N
         eng = engine or build_engine(settings)
         app.state.engine = eng
         eng.start()
+        metrics = None
+        if eng.settings.metrics_enabled:
+            metrics = Metrics(eng, interval=eng.settings.metrics_interval_seconds,
+                              flush_rows=eng.settings.metrics_flush_rows,
+                              coverage_interval=eng.settings.coverage_snapshot_seconds)
+            metrics.start()
+        app.state.metrics = metrics
         print(f"[collector] старт: серий в индексе {eng.index.count()}, "
-              f"озеро {eng.index.files_bytes() / 2**30:.2f} ГБ, {eng.limiter.per_minute:.0f} запр./мин")
+              f"озеро {eng.index.files_bytes() / 2**30:.2f} ГБ, {eng.limiter.per_minute:.0f} запр./мин, "
+              f"метрики {'вкл' if metrics else 'выкл'}")
         try:
             yield
         finally:
+            if metrics:
+                metrics.stop()
             eng.stop()
 
     app = FastAPI(title="Flight Scanner Collector", version="0.1.0", lifespan=lifespan)
