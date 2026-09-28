@@ -143,8 +143,7 @@ class Engine:
         self.settings = settings
         self.store = store
         self.index = index
-        self.writer = LakeWriter(store, index, flush_tickets=settings.flush_tickets,
-                                 flush_seconds=settings.flush_seconds)
+        self.writer = LakeWriter(store, index)
         self.limiter = limiter or RateLimiter(settings.rate_per_minute, clock=clock, sleep=sleep)
         self._session = requests.Session()
         self._page_fn = page_fn or self._query_page
@@ -181,7 +180,6 @@ class Engine:
         for t in self._threads:
             t.join(timeout=timeout)
         self._threads = []
-        self.writer.flush(force=True)
 
     def reconcile_files(self) -> int:
         """Файлы озера, неизвестные индексу (потерянный индекс), — в учёт объёма."""
@@ -235,9 +233,8 @@ class Engine:
             return job
 
     def _readable(self, row: Dict[str, Any]) -> bool:
-        """У свежей серии есть откуда прочитать билеты: файл, буфер или она пустая."""
-        return bool(row.get("file_key")) or int(row.get("tickets") or 0) == 0 \
-            or self.writer.pending(row["id"]) is not None
+        """У свежей серии есть файл в озере (запись могла сорваться — тогда перечитаем)."""
+        return bool(row.get("file_key"))
 
     def exists(self, origin: Optional[str], destination: Optional[str], day: str, params_key: str,
                min_pages: Optional[int] = None, ttl_seconds: Optional[float] = None) -> bool:
@@ -271,14 +268,9 @@ class Engine:
                 "error": bool(job.error), "cached": False}
 
     def _load(self, row: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not row or int(row.get("tickets") or 0) == 0:
+        if not row or int(row.get("tickets") or 0) == 0 or not row.get("file_key"):
             return []
-        pending = self.writer.pending(row["id"])
-        if pending is not None:
-            return pending
-        if row.get("file_key"):
-            return self.writer.read(row["file_key"], int(row["row_group"]))
-        return []
+        return self.writer.read(row["file_key"], int(row["row_group"] or 0))
 
     # ------------------------------ worker ---------------------------------
 
@@ -367,7 +359,12 @@ class Engine:
                                  pages=job.pages, exhausted=job.exhausted, tickets=len(job.tickets),
                                  client=job.client, fetched_at=now)
             job.series_id = sid
-            self.writer.add(sid, job.tickets, now.isoformat(timespec="seconds"))
+            try:
+                self.writer.write(sid, req.origin, req.destination, req.day, req.params_key,
+                                  job.tickets, now)
+            except Exception as e:  # озеро недоступно: серия без файла → кэшем не считается
+                self.counters.inc("lake_write_errors")
+                print(f"[collector] запись {req.label} в озеро не удалась: {e!r}")
             cities: Counter = Counter()
             for t in job.tickets:
                 cities[t.get("destination") or ""] += 1
@@ -400,7 +397,6 @@ class Engine:
     def _housekeeping(self) -> None:
         while not self._stop.wait(1.0):
             try:
-                self.writer.flush()
                 self._purge_jobs()
                 if self._clock() - self._last_retention >= self.settings.retention_interval_seconds:
                     self._last_retention = self._clock()
@@ -460,7 +456,6 @@ class Engine:
             "total_429": self.limiter.total_429,
             "lake": {"files": len(self.index.files_oldest_first()), "bytes": self.index.files_bytes(),
                      "max_bytes": int(self.settings.lake_max_gb * GIB),
-                     "buffered_series": len(self.writer._buffer),
                      "files_written": self.writer.files_written},
             "index": self.index.age_stats(now=self._now()),
             "cities": len(self.index.cities()),

@@ -8,7 +8,7 @@
 web (Caddy) ──/api/*──> planner (api/)  ──POST /v1/fetch──> collector (collector/) ──> GraphQL Data API
                                                              │  очередь app > crawl, лимит 60/мин
 crawler (фаза 2) ──POST /v1/batch (crawl)────────────────────┘  │
-                                                                └──> S3: tickets/observed=YYYY-MM-DD/part-*.parquet
+                                                                └──> S3: tickets/date=<день вылета>/origin=<город>/<A>-<B>__<время>.parquet
                                                                      индекс серий: data/collector.db (SQLite)
 ```
 
@@ -47,19 +47,25 @@ crawler (фаза 2) ──POST /v1/batch (crawl)──────────�
   На 429 — пауза `Retry-After` либо бэкофф 5 → 10 → … → 60 с, затем две минуты
   темп в полтора раза ниже. Сетевые ошибки — три повтора страницы, ошибка источника
   (400: неизвестный город и т.п.) — серия помечается `error` и кэшем не считается.
-- **Озеро** (`collector/lake.py`): буфер серий сбрасывается файлом
-  `tickets/observed=YYYY-MM-DD/part-<время>.parquet` по `LAKE_FLUSH_TICKETS`
-  (25 000 билетов) или `LAKE_FLUSH_SECONDS` (5 мин); одна серия = одна row group.
-  Колонки плоские (origin, destination, departure_at, price, airline, …) плюс
+- **Озеро** (`collector/lake.py`): один файл на серию, путь = ключ серии + момент
+  загрузки, читается без индекса:
+  `tickets/date=2026-11-12/origin=MOW/MOW-ANY__2026-09-28T16-31-35Z.parquet`,
+  серии планировщика с коридором цен и с пустым origin —
+  `tickets/date=2026-11-12/origin=ANY/ANY-SEL__min=20000,max=40000__2026-09-28T16-32-01Z.parquet`
+  (фоновый сборщик серий `ANY→X` не создаёт: у билета есть origin, обратная сторона
+  дублирует). Заходишь в дату — видишь города; у города — когда его читали.
+  Файл пишется сразу по готовности серии; повторная выборка — новый файл рядом
+  (история цен), пустая серия — пустой файл («читали, ничего нет»). Колонки плоские
+  (origin, destination, departure_at, price, airline, …, `observed_at`) плюс
   `legs_json`, `transfer_points_json`, `chain_json`; `from_row` восстанавливает
-  словарь `normalize_ticket` один в один.
+  словарь `normalize_ticket` один в один. Мерж/компакция не нужны.
 - **Индекс** (`collector/index.py`, SQLite `COLLECTOR_DB`): серии (когда получена,
   страниц, билетов, файл + row group, ошибка), файлы (объём для ретеншна), города
   (все origin/destination из билетов — список для сборщика). Потерян индекс →
   при старте файлы озера импортируются в учёт объёма (без серий).
 - **Ретеншн**: раз в `LAKE_RETENTION_INTERVAL` (30 мин) объём `tickets/` по индексу
-  сравнивается с `LAKE_MAX_GB` (180); выше — удаляются самые старые файлы до 95 %
-  порога, их серии выпадают из индекса. Lifecycle Object Storage умеет только по
+  сравнивается с `LAKE_MAX_GB` (180); выше — удаляются файлы с самым старым моментом
+  загрузки до 95 % порога, их серии выпадают из индекса. Lifecycle Object Storage умеет только по
   возрасту, поэтому по размеру чистим сами; `max_size` бакета 200 ГБ — аварийный потолок.
 
 ### HTTP API (порт 8001, только внутри compose-сети)
@@ -100,4 +106,4 @@ crawler (фаза 2) ──POST /v1/batch (crawl)──────────�
 
 Проверка после выкатки: `https://flights.sereshotes.dev/api/health` содержит блок
 `collector` (`status: ok`, очередь, серии, объём озера); джоба планировщика идёт
-через коллектор; в бакете появляются `tickets/observed=…/part-*.parquet`.
+через коллектор; в бакете появляются `tickets/date=…/origin=…/*.parquet`.

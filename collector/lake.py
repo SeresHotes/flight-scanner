@@ -1,17 +1,15 @@
-"""Parquet-озеро серий: буфер → файл `tickets/observed=YYYY-MM-DD/part-<время>.parquet`.
+"""Parquet-озеро серий: один файл на серию, путь = ключ серии + момент загрузки:
+`tickets/date=<день вылета>/origin=<город>/<A>-<B>[__<параметры>]__<UTC-время>.parquet`.
 
-Внутри файла одна серия = одна row group, поэтому серию можно прочитать одним
-range-запросом к S3 (footer + её row group), не скачивая файл целиком. Билет
-кладём плоскими колонками (для аналитики) плюс вложенные части JSON-строками
-(legs, transfer_points, chain); `from_row` восстанавливает ровно тот словарь,
-что отдаёт core.graphql_api.normalize_ticket."""
+Озеро читаемо без индекса (индекс в SQLite — ускоритель: свежесть, покрытие,
+объём для ретеншна). Билет кладём плоскими колонками (для аналитики) плюс
+вложенные части JSON-строками (legs, transfer_points, chain); `from_row`
+восстанавливает ровно тот словарь, что отдаёт core.graphql_api.normalize_ticket."""
 import io
 import json
-import secrets
-import threading
-import time
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -102,84 +100,60 @@ def read_series(source, row_group: int) -> List[Dict[str, Any]]:
     return [from_row(r) for r in pf.read_row_group(row_group).to_pylist()]
 
 
-def part_key(now: datetime) -> str:
-    stamp = now.strftime("%Y%m%dT%H%M%S") + f"{now.microsecond // 1000:03d}Z"
-    return f"{TICKETS_PREFIX}/observed={now:%Y-%m-%d}/part-{stamp}-{secrets.token_hex(2)}.parquet"
+def series_file_key(origin: Optional[str], destination: Optional[str], day: str,
+                    params_key: str, observed: datetime) -> str:
+    """Путь файла серии = её ключ + момент загрузки:
+    tickets/date=<день вылета>/origin=<город|ANY>/<A>-<B>[__<параметры>]__<UTC-время>.parquet
+    Заходишь в дату — видишь города; у города — когда его читали. Повторная выборка
+    той же серии — новый файл рядом (история цен), старые уходят ретеншном."""
+    o = (origin or "ANY").upper()
+    d = (destination or "ANY").upper()
+    params = f"__{params_key.replace('&', ',')}" if params_key else ""
+    stamp = observed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    return f"{TICKETS_PREFIX}/date={day}/origin={o}/{o}-{d}{params}__{stamp}.parquet"
+
+
+_KEY_RE = re.compile(
+    r"^" + TICKETS_PREFIX + r"/date=(?P<day>\d{4}-\d{2}-\d{2})/origin=[A-Z]+/"
+    r"(?P<origin>[A-Z]+)-(?P<dest>[A-Z]+)(?:__(?P<params>[^_]+))?__(?P<stamp>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})Z\.parquet$")
+
+
+def parse_file_key(key: str) -> Optional[Dict[str, Any]]:
+    """Обратно к ключу серии: {origin, destination, day, params_key, observed (datetime)}.
+    None — если файл не по схеме (чужой/старый)."""
+    m = _KEY_RE.match(key)
+    if not m:
+        return None
+    stamp = m.group("stamp")
+    observed = datetime.strptime(stamp, "%Y-%m-%dT%H-%M-%S").replace(tzinfo=timezone.utc)
+    return {"origin": None if m.group("origin") == "ANY" else m.group("origin"),
+            "destination": None if m.group("dest") == "ANY" else m.group("dest"),
+            "day": m.group("day"), "params_key": (m.group("params") or "").replace(",", "&"),
+            "observed": observed}
 
 
 class LakeWriter:
-    """Буфер серий → файл озера. flush по числу билетов или по времени; серии, ещё
-    не сброшенные, читаются из буфера (`pending`)."""
+    """Пишет серию файлом озера сразу по готовности (один файл = одна серия = одна
+    row group) и читает её обратно range-запросом. Пустая серия пишется пустым
+    файлом: в папке видно, что направление читали и там ничего нет."""
 
-    def __init__(self, store, index, flush_tickets: int = 25_000, flush_seconds: float = 300,
-                 clock=time.monotonic, now=lambda: datetime.now(timezone.utc)):
+    def __init__(self, store, index):
         self.store = store
         self.index = index
-        self.flush_tickets = flush_tickets
-        self.flush_seconds = flush_seconds
-        self._clock = clock
-        self._now = now
-        self._lock = threading.Lock()
-        self._buffer: List[Tuple[int, List[Dict[str, Any]], str]] = []
-        self._buffered = 0
-        self._since = clock()
         self.files_written = 0
 
-    def add(self, series_id: int, tickets: List[Dict[str, Any]], observed_at: str) -> None:
-        with self._lock:
-            # Повторная выборка той же серии до сброса — старая копия не нужна.
-            self._buffer = [b for b in self._buffer if b[0] != series_id]
-            self._buffer.append((series_id, tickets, observed_at))
-            self._buffered = sum(len(b[1]) for b in self._buffer)
-            if len(self._buffer) == 1:
-                self._since = self._clock()
-
-    def pending(self, series_id: int) -> Optional[List[Dict[str, Any]]]:
-        with self._lock:
-            for sid, tickets, _ in self._buffer:
-                if sid == series_id:
-                    return tickets
-        return None
-
-    def due(self) -> bool:
-        with self._lock:
-            if not self._buffer:
-                return False
-            return (self._buffered >= self.flush_tickets
-                    or self._clock() - self._since >= self.flush_seconds)
-
-    def flush(self, force: bool = False) -> Optional[str]:
-        """Пишет буфер одним файлом; возвращает ключ файла или None, если нечего/рано."""
-        if not force and not self.due():
-            return None
-        with self._lock:
-            batch, self._buffer, self._buffered = self._buffer, [], 0
-        if not batch:
-            return None
+    def write(self, series_id: int, origin: Optional[str], destination: Optional[str], day: str,
+              params_key: str, tickets: List[Dict[str, Any]], observed: datetime) -> str:
+        key = series_file_key(origin, destination, day, params_key, observed)
         sink = io.BytesIO()
-        placements: List[Tuple[int, int]] = []
-        writer = pq.ParquetWriter(sink, SCHEMA, compression="zstd")
-        try:
-            rg = 0
-            for sid, tickets, observed_at in batch:
-                if not tickets:
-                    continue  # пустая серия читается как [] без файла
-                writer.write_table(series_table(tickets, sid, observed_at),
-                                   row_group_size=max(len(tickets), 1))
-                placements.append((sid, rg))
-                rg += 1
-        finally:
-            writer.close()
-        if not placements:
-            return None
+        table = series_table(tickets, series_id, observed.isoformat(timespec="seconds"))
+        pq.write_table(table, sink, compression="zstd", row_group_size=max(len(tickets), 1))
         data = sink.getvalue()
-        now = self._now()
-        key = part_key(now)
         self.store.put_bytes(key, data)
-        self.index.attach_file(key, f"{now:%Y-%m-%d}", len(data), placements)
+        self.index.attach_file(key, day, len(data), [(series_id, 0)], observed=observed)
         self.files_written += 1
         return key
 
-    def read(self, file_key: str, row_group: int) -> List[Dict[str, Any]]:
+    def read(self, file_key: str, row_group: int = 0) -> List[Dict[str, Any]]:
         with self.store.open_input_file(file_key) as f:
             return read_series(f, row_group)

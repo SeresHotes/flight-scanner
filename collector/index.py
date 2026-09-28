@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_series_fetched ON series (fetched_at);
 
 CREATE TABLE IF NOT EXISTS files (
     key         TEXT PRIMARY KEY,
-    observed    TEXT NOT NULL,
+    observed    TEXT NOT NULL,   -- день вылета серии (date= в пути); момент загрузки — created_at
     bytes       INTEGER NOT NULL,
     series      INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
@@ -133,15 +133,14 @@ class Index:
                 "SELECT id FROM series WHERE origin=? AND destination=? AND search_date=? AND params_key=?",
                 (o, d, day, k)).fetchone()[0]
 
-    def attach_file(self, key: str, observed: str, size: int,
-                    placements: Sequence[Tuple[int, int]]) -> None:
-        """Файл записан: серии (id → row_group) теперь читаются из него."""
+    def attach_file(self, key: str, day: str, size: int, placements: Sequence[Tuple[int, int]],
+                    observed: Optional[datetime] = None) -> None:
+        """Файл записан: серии (id → row_group) теперь читаются из него. observed —
+        момент загрузки (порядок удаления при ретеншне: старейшие первыми)."""
         with self._lock:
-            # created_at с микросекундами: порядок удаления при ретеншне — по времени
-            # записи, а несколько файлов могут лечь в одну секунду.
             self._conn.execute(
                 "INSERT OR REPLACE INTO files (key, observed, bytes, series, created_at) VALUES (?, ?, ?, ?, ?)",
-                (key, observed, int(size), len(placements), utcnow().isoformat()))
+                (key, day, int(size), len(placements), (observed or utcnow()).isoformat()))
             self._conn.executemany("UPDATE series SET file_key=?, row_group=? WHERE id=?",
                                    [(key, rg, sid) for sid, rg in placements])
             self._conn.commit()
@@ -179,7 +178,7 @@ class Index:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT key, observed, bytes, series, created_at FROM files "
-                "ORDER BY observed, created_at, key").fetchall()
+                "ORDER BY created_at, key").fetchall()
         return [dict(r) for r in rows]
 
     def files_bytes(self) -> int:
@@ -199,16 +198,18 @@ class Index:
 
     def import_files(self, objects: Iterable[Tuple[str, int]]) -> int:
         """Сверка с озером после потери индекса: файлы, которых нет в таблице,
-        добавляются без серий (только для учёта объёма и ретеншна)."""
+        добавляются без серий (только для учёта объёма и ретеншна). Момент загрузки —
+        из имени файла (collector.lake.parse_file_key); чужие файлы — в самый конец."""
+        from collector.lake import parse_file_key
         added = 0
         with self._lock:
             for key, size in objects:
-                observed = key.split("observed=", 1)[-1][:10] if "observed=" in key else "0000-00-00"
-                # Импортированные файлы старше всего, что запишем после: сортируем их
-                # началом дня наблюдения, а между собой — по ключу (в нём время записи).
+                meta = parse_file_key(key)
+                day = meta["day"] if meta else "0000-00-00"
+                created = meta["observed"].isoformat() if meta else "0000-00-00T00:00:00+00:00"
                 cur = self._conn.execute(
                     "INSERT OR IGNORE INTO files (key, observed, bytes, series, created_at) VALUES (?, ?, ?, 0, ?)",
-                    (key, observed, int(size), f"{observed}T00:00:00+00:00"))
+                    (key, day, int(size), created))
                 added += cur.rowcount
             self._conn.commit()
         return added

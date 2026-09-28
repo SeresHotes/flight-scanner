@@ -35,9 +35,6 @@ class Settings:
     ttl_seconds: int = field(default_factory=lambda: _int("SERIES_TTL_SECONDS", 24 * 3600))
     # Предохранитель страниц на серию: offset > 14 800 источник не отдаёт (37 × 400).
     max_pages: int = field(default_factory=lambda: _int("COLLECTOR_MAX_PAGES", 37))
-    # Сброс буфера серий в файл озера: по числу билетов (оценка объёма) или по времени.
-    flush_tickets: int = field(default_factory=lambda: _int("LAKE_FLUSH_TICKETS", 25_000))
-    flush_seconds: int = field(default_factory=lambda: _int("LAKE_FLUSH_SECONDS", 300))
     # Ретеншн озера: потолок объёма tickets/ (ниже жёсткого max_size бакета 200 ГБ).
     lake_max_gb: float = field(default_factory=lambda: _float("LAKE_MAX_GB", 180.0))
     retention_interval_seconds: int = field(default_factory=lambda: _int("LAKE_RETENTION_INTERVAL", 1800))

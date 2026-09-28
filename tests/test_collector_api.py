@@ -16,7 +16,7 @@ from tests.test_collector_engine import Source
 @pytest.fixture
 def client(tmp_path):
     settings = Settings(db_path=":memory:", lake_local_root=str(tmp_path / "lake"), s3_bucket=None,
-                        rate_per_minute=100_000, flush_tickets=10_000, flush_seconds=300)
+                        rate_per_minute=100_000)
     source = Source({("MOW", "SEL"): [400, 12], ("MOW", ""): [7], ("LED", ""): [0]})
     engine = Engine(settings, LocalStore(settings.lake_local_root), Index(":memory:"), page_fn=source)
     with TestClient(create_app(engine)) as c:
@@ -33,7 +33,7 @@ def test_fetch_status_result_over_http(client):
     res = client.get(f"/v1/requests/{job['id']}/result").json()
     assert len(res["tickets"]) == 412 and res["pages"] == 2 and not res["cached"]
     assert res["tickets"][0]["origin"] == "MOW" and res["tickets"][0]["legs"][0]["origin"] == "SVO"
-    # Повторный запрос — из кэша (буфер озера), без похода в источник.
+    # Повторный запрос — из кэша (файл серии в озере), без похода в источник.
     again = client.post("/v1/fetch", json={"origin": "MOW", "destination": "SEL", "day": "2026-10-15"}).json()
     assert again["cached"] and again["status"] == "done"
     assert client.get("/v1/series/exists", params={"origin": "MOW", "destination": "SEL",

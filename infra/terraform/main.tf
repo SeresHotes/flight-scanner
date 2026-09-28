@@ -125,6 +125,14 @@ resource "yandex_compute_instance" "app" {
     ssh-keys  = "ubuntu:${var.ssh_public_key}"
     user-data = local.cloud_init
   }
+
+  # Семейство ubuntu-2204-lts обновляется — без этого каждый новый образ в семействе
+  # заставляет terraform ПЕРЕСОЗДАТЬ VM (и потерять /opt/flights/data). cloud-init
+  # (user-data) на живой VM тоже не перезапускается: правки шаблона применяются
+  # только к новым машинам, для существующей — deploy/vm-migrate.sh.
+  lifecycle {
+    ignore_changes = [boot_disk[0].initialize_params[0].image_id]
+  }
 }
 
 locals {
