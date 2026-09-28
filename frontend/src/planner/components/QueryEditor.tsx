@@ -56,6 +56,7 @@ export function QueryEditor({
           <Fragment key={s.id}>
             <div className={`pl-stopcard ${validation.stopValid[i] ? '' : 'invalid'}`}>
               <StopRow stop={s} index={i} endpoint={endpoint} canRemove={stops.length > 2} onUpdate={updateStop} onRemove={removeStop} />
+              <NearbyRow stop={s} index={i} last={stops.length - 1} onChange={(radiusKm) => updateStop(i, { radiusKm })} />
               {!endpoint && <StayRow filter={query.cities[i]} onChange={(patch) => patchCity(i, patch)} />}
             </div>
             {i < stops.length - 1 && (
@@ -161,6 +162,45 @@ function StopRow({
       <button type="button" className="pl-remove" disabled={!canRemove} title="Убрать остановку" onClick={() => onRemove(i)}>
         ✕
       </button>
+    </div>
+  )
+}
+
+// Радиус переезда: из остановки можно улететь из соседнего города (core/nearby).
+// Соседи докачиваются при сборе — каждый добавляет запросы, это видно в оценке.
+const RADII = [0, 50, 100, 150, 200, 300]
+
+function NearbyRow({
+  stop: s,
+  index: i,
+  last,
+  onChange,
+}: {
+  stop: PlannerStop
+  index: number
+  last: number
+  onChange: (radiusKm: number) => void
+}) {
+  const hint =
+    i === 0
+      ? 'Вылет — из этого города или соседнего'
+      : i === last
+        ? 'Прилёт — в этот город или соседний'
+        : 'Прилетели в один город — улетаем дальше из соседнего (переезд ≥ 4 ч)'
+  return (
+    <div className="pl-stayrow pl-nearbyrow">
+      <div className="pl-ficon">🚆</div>
+      <div className="pl-fname">Соседние города</div>
+      <div className="pl-fcell">
+        <div className="segbtns">
+          {RADII.map((r) => (
+            <button key={r} type="button" className={(s.radiusKm || 0) === r ? 'active' : ''} onClick={() => onChange(r)}>
+              {r === 0 ? 'нет' : `${r} км`}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="pl-fcell pl-nearby-hint">{hint}</div>
     </div>
   )
 }

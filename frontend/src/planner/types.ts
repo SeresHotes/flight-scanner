@@ -14,6 +14,8 @@ export interface PlannerStop {
   kind: StopKind
   airports: AirportOption[]
   window: [string, string]
+  // Можно улететь дальше из соседнего города в этом радиусе, км (0/нет — только свой).
+  radiusKm?: number
 }
 
 // Оценка объёма сбора: страниц GraphQL по переходам (planner/estimate.ts).
@@ -45,6 +47,8 @@ export interface ItineraryStop {
   days: number
   weekendCovered: boolean
   resolvedFromAny: boolean
+  // Дальше летим из соседнего города (переезд внутри остановки), а не из города прилёта.
+  departFrom?: { code: string; city: string; flag?: string; km: number | null }
 }
 
 export interface Itinerary {

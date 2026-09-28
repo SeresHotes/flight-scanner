@@ -27,6 +27,7 @@ from core.dates import parse_datetime
 from core.network import load_airport_network
 from core.planner import (FINAL_STAY_DAYS, Stop, _allowed, _apply_leg_filters, _index_leg,  # noqa
                           _leg_dates, _price_of, _side_codes, arrival_of, make_city_lookup)
+from core.nearby import HOP_MIN_GAP_MIN, Hops
 from core.planquery import PlanQuery
 
 _EPOCH = datetime(1970, 1, 1)
@@ -79,13 +80,19 @@ class _Leg:
                 by_origin.setdefault(code, []).append(i)
         self.by_origin = {c: np.array(ix, dtype=np.int64) for c, ix in by_origin.items()}
         self.dest_codes = [_side_codes(f, "dest") for f in flights]
+        self.origin_codes = [_side_codes(f, "origin") for f in flights]
 
 
-def _compat(prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf) -> np.ndarray:
-    """Матрица |p| × |f|: можно ли после рейса p лететь рейсом f (правила перебора)."""
+def _compat(prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf,
+            hop: Optional[np.ndarray] = None) -> np.ndarray:
+    """Матрица |p| × |f|: можно ли после рейса p лететь рейсом f (правила перебора).
+    hop — рейсы f из соседнего города: нужен запас на переезд (nearby.HOP_MIN_GAP_MIN)."""
     arr_ord = prev.arr_ord[p_idx][:, None]
     dep_ord = nxt.dep_ord[f_idx][None, :]
     ok = dep_ord >= arr_ord
+    if hop is not None and hop.any():
+        gap = nxt.dep_ts[f_idx][None, :] - prev.arr_ts[p_idx][:, None]
+        ok &= ~hop[None, :] | (gap >= HOP_MIN_GAP_MIN * 60)
     if cf is not None:
         stay = np.floor((nxt.dep_ts[f_idx][None, :] - prev.arr_ts[p_idx][:, None]) / _DAY)
         ok &= stay >= cf.min_stay
@@ -100,10 +107,11 @@ def _compat(prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf) -> 
     return ok
 
 
-def _extend(state, prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf):
+def _extend(state, prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf,
+            hop: Optional[np.ndarray] = None):
     """Состояние префикса (по рейсам p) → состояние по рейсам f (D × |f|)."""
     cnt, minp, tr_at, mintr = state
-    ok = _compat(prev, p_idx, nxt, f_idx, cf)                     # P × F
+    ok = _compat(prev, p_idx, nxt, f_idx, cf, hop)                     # P × F
     okf = ok.astype(float)
     new_cnt = cnt @ okf                                           # D × F
     big = np.where(ok[None, :, :], minp[:, :, None], _INF)        # D × P × F
@@ -133,15 +141,23 @@ def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
 
     combos: List[Dict[str, Any]] = []
     codes_used = set()
+    hops = Hops(stops)
+
+    def onward(leg: _Leg, k: int, city: str) -> np.ndarray:
+        """Рейсы плеча k после прилёта в city: из него самого и из соседей (переезд)."""
+        parts = [leg.by_origin[d] for d in hops.departs(k, city) if d in leg.by_origin]
+        if not parts:
+            return np.array([], dtype=np.int64)
+        return np.unique(np.concatenate(parts)) if len(parts) > 1 else parts[0]
 
     def groups(leg: _Leg, f_idx: np.ndarray, k: int, seq: Tuple[str, ...]):
         """Разрез кандидатов плеча k по городу прилёта с правилами остановки k+1."""
-        allow = _allowed(stops[k + 1])
+        allow = hops.arrive_allowed(k + 1)
         out: Dict[str, List[int]] = {}
         city = seq[-1]
         for fi in f_idx.tolist():
             dest = leg.dest[fi]
-            if not dest or dest == city:
+            if not dest or dest == city or dest in leg.origin_codes[fi]:
                 continue
             if allow is None and dest in seq:
                 continue
@@ -176,12 +192,13 @@ def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
     def expand(k: int, seq: Tuple[str, ...], prev: _Leg, p_idx: np.ndarray, state, first_days):
         """Префикс seq (последнее плечо k-1 рейсами p) → все города плеча k."""
         leg = legs[k]
-        f_all = leg.by_origin.get(seq[-1])
-        if f_all is None or not len(f_all):
+        f_all = onward(leg, k, seq[-1])
+        if not len(f_all):
             return
         for dest, fis in groups(leg, f_all, k, seq).items():
             f_idx = np.array(fis, dtype=np.int64)
-            new_state = _extend(state, prev, p_idx, leg, f_idx, city_filters.get(k))
+            hop = np.array([seq[-1] not in leg.origin_codes[fi] for fi in fis], dtype=bool)
+            new_state = _extend(state, prev, p_idx, leg, f_idx, city_filters.get(k), hop)
             if new_state[0].sum() <= 0:
                 continue
             new_seq = seq + (dest,)
@@ -191,7 +208,13 @@ def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
                 expand(k + 1, new_seq, leg, f_idx, new_state, first_days)
 
     leg0 = legs[0]
-    for start in stops[0].codes:
+    # Первый код набора — реальный город вылета (со стартом-соседом — сам сосед).
+    starts: List[str] = []
+    for code in stops[0].codes:
+        for d in hops.departs(0, code):
+            if d not in starts:
+                starts.append(d)
+    for start in starts:
         f_all = leg0.by_origin.get(start)
         if f_all is None:
             continue

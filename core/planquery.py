@@ -2,7 +2,9 @@
 
 Контракт с фронтом (docs/PLANNER_V2.md, «PlanQuery»):
 
-    stops[]:      {kind: cities|any, codes[], window[start, end]}
+    stops[]:      {kind: cities|any, codes[], window[start, end], radiusKm?}
+                  radiusKm — из остановки можно улететь из соседнего города в этом
+                  радиусе (core/nearby); 0/нет — выключено
     cities[]:     {minStay, maxStay, mustCover: [a, b] | null, requireWeekend}   # == stops
     legs[]:       {maxTransfers, minLayoverMin, travelMin: [lo, hi],
                    baggage: any|included|none, hiddenCity}                       # == stops - 1
@@ -125,11 +127,17 @@ class PlanQuery:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "PlanQuery":
-        stops = [{"kind": s.get("kind", "cities"),
-                  "codes": [c.upper() for c in (s.get("codes") or
-                                                 [a.get("code") for a in (s.get("airports") or [])]) if c],
-                  "window": list(s.get("window") or ["", ""])}
-                 for s in d.get("stops") or []]
+        from core.nearby import clamp_radius
+        stops = []
+        for s in d.get("stops") or []:
+            stop = {"kind": s.get("kind", "cities"),
+                    "codes": [c.upper() for c in (s.get("codes") or
+                                                   [a.get("code") for a in (s.get("airports") or [])]) if c],
+                    "window": list(s.get("window") or ["", ""])}
+            radius = clamp_radius(s.get("radiusKm"))
+            if radius:  # без радиуса ключ не пишем — хэши прежних запросов не меняются
+                stop["radiusKm"] = radius
+            stops.append(stop)
         n = len(stops)
         cities_raw = d.get("cities") or []
         legs_raw = d.get("legs") or []

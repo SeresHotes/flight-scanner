@@ -63,7 +63,12 @@ export function queryMode(q: PlanQuery): 'combos' | 'routes' {
 // Тело POST /api/plan/run.
 export function toApi(q: PlanQuery) {
   return {
-    stops: q.stops.map((s) => ({ kind: s.kind, codes: s.airports.map((a) => a.code), window: s.window })),
+    stops: q.stops.map((s) => ({
+      kind: s.kind,
+      codes: s.airports.map((a) => a.code),
+      window: s.window,
+      radiusKm: s.radiusKm || 0,
+    })),
     cities: q.cities.map((c) => ({
       minStay: c.minStay,
       maxStay: c.maxStay,
@@ -84,7 +89,7 @@ export function toApi(q: PlanQuery) {
 
 // --- URL ---
 // Компактно, без спецсимволов ('.' и '-' URLSearchParams не кодирует).
-//   st = kind.codes(-).winA.winB          — по остановке
+//   st = kind.codes(-).winA.winB.radius   — по остановке (radius — км переезда, нет — 0)
 //   cf = minStay.maxStay.coverA.coverB.wk — по остановке ('' = ∞ / нет)
 //   lf = maxTransfers.minLayover.travelLo.travelHi.baggage(a|i|n).hidden(1|0) — по переходу
 //   tl = lo.hi   mc = бюджет поездки
@@ -99,7 +104,9 @@ const numOrNull = (s: string | undefined): number | null => (s === undefined || 
 export function encodeQuery(q: PlanQuery): URLSearchParams {
   const sp = new URLSearchParams()
   for (const s of q.stops) {
-    sp.append('st', [s.kind === 'any' ? 'any' : 'c', s.airports.map((a) => a.code).join(L), s.window[0], s.window[1]].join(F))
+    const parts = [s.kind === 'any' ? 'any' : 'c', s.airports.map((a) => a.code).join(L), s.window[0], s.window[1]]
+    if (s.radiusKm) parts.push(String(s.radiusKm))
+    sp.append('st', parts.join(F))
   }
   for (const c of q.cities) {
     const cover = c.mustCover ?? ['', '']
@@ -117,12 +124,12 @@ export function encodeQuery(q: PlanQuery): URLSearchParams {
 export function decodeQuery(sp: URLSearchParams, nextId: () => string): PlanQuery | null {
   const stops: PlannerStop[] = []
   for (const raw of sp.getAll('st')) {
-    const [kind, codesRaw, winA, winB] = raw.split(F)
+    const [kind, codesRaw, winA, winB, radius] = raw.split(F)
     if (!kind) continue
     const k: StopKind = kind === 'any' ? 'any' : 'cities'
     const airports: AirportOption[] =
       k === 'cities' && codesRaw ? codesRaw.split(L).filter(Boolean).map((code) => ({ code, city: '', label: code })) : []
-    stops.push({ id: nextId(), kind: k, airports, window: [winA ?? '', winB ?? ''] })
+    stops.push({ id: nextId(), kind: k, airports, window: [winA ?? '', winB ?? ''], radiusKm: Number(radius) || 0 })
   }
   if (!stops.length) return null
   const cities = sp.getAll('cf').map((raw): CityQuery => {
