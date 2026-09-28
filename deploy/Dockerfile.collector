@@ -1,0 +1,28 @@
+# Образ коллектора (flights-collector): очередь запросов к GraphQL Data API с
+# приоритетами, лимит ручки, серии билетов в Parquet-озере (Object Storage).
+# Единственный контейнер, которому нужны TRAVELPAYOUTS_TOKEN и ключи S3.
+# Внутренний порт 8001, наружу не публикуется — к нему ходят planner и crawler.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+      "fastapi>=0.115,<0.116" \
+      "uvicorn[standard]>=0.34,<0.35" \
+      "pyarrow>=22,<23" \
+      "boto3>=1.34,<2" \
+      "requests>=2.32,<3" \
+      "python-dotenv>=1.2,<2"
+
+COPY core ./core
+COPY collector ./collector
+
+# Индекс серий (SQLite) — на том же томе /app/data, что и у планировщика.
+ENV COLLECTOR_DB=/app/data/collector.db \
+    PYTHONUNBUFFERED=1
+
+RUN useradd --create-home --uid 1000 app && mkdir -p /app/data && chown -R app /app
+USER app
+
+EXPOSE 8001
+CMD ["uvicorn", "collector.main:app", "--host", "0.0.0.0", "--port", "8001"]

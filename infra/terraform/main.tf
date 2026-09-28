@@ -128,14 +128,17 @@ resource "yandex_compute_instance" "app" {
 }
 
 locals {
-  image_api_ref = "cr.yandex/${yandex_container_registry.flights.id}/flights-api:${var.image_tag}"
-  image_web_ref = "cr.yandex/${yandex_container_registry.flights.id}/flights-web:${var.image_tag}"
+  image_planner_ref   = "cr.yandex/${yandex_container_registry.flights.id}/flights-planner:${var.image_tag}"
+  image_collector_ref = "cr.yandex/${yandex_container_registry.flights.id}/flights-collector:${var.image_tag}"
+  image_web_ref       = "cr.yandex/${yandex_container_registry.flights.id}/flights-web:${var.image_tag}"
 
-  # /opt/flights/.env: и переменные подстановки compose (${API_IMAGE}...), и секреты
-  # приложения (env_file для контейнера api). SITE_DOMAIN уходит в web (Caddy).
+  # /opt/flights/.env: и переменные подстановки compose (${PLANNER_IMAGE}...), и секреты
+  # (env_file для planner и collector). SITE_DOMAIN уходит в web (Caddy).
+  # На уже созданной VM файл дополняет deploy/vm-migrate.sh (cloud-init не перезапускается).
   env_file = join("\n", [
     "SITE_DOMAIN=${var.site_domain}",
-    "API_IMAGE=${local.image_api_ref}",
+    "PLANNER_IMAGE=${local.image_planner_ref}",
+    "COLLECTOR_IMAGE=${local.image_collector_ref}",
     "WEB_IMAGE=${local.image_web_ref}",
     "TRAVELPAYOUTS_TOKEN=${var.travelpayouts_token}",
     "S3_ENDPOINT=https://storage.yandexcloud.net",
@@ -143,6 +146,8 @@ locals {
     "S3_BUCKET=${var.bucket_name}",
     "S3_ACCESS_KEY=${yandex_iam_service_account_static_access_key.app.access_key}",
     "S3_SECRET_KEY=${yandex_iam_service_account_static_access_key.app.secret_key}",
+    "LAKE_MAX_GB=${var.lake_max_gb}",
+    "RATE_PER_MINUTE=${var.rate_per_minute}",
   ])
 
   cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {

@@ -197,8 +197,19 @@ def get_plan_flights(conn: sqlite3.Connection, job_id: str) -> Optional[Dict[int
 
 
 def count_ticket_series(conn: sqlite3.Connection) -> int:
-    """Сколько серий GraphQL лежит в ticket_cache (health / проверка деплоя)."""
-    return conn.execute("SELECT COUNT(*) FROM ticket_cache").fetchone()[0]
+    """Сколько серий GraphQL лежит в ticket_cache (health / проверка деплоя).
+    0, если таблицы нет (с коллектором она удалена, см. drop_ticket_cache)."""
+    try:
+        return conn.execute("SELECT COUNT(*) FROM ticket_cache").fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
+
+
+def drop_ticket_cache(conn: sqlite3.Connection) -> None:
+    """С коллектором серии живут в озере — локальный кэш не нужен. Таблица удаляется,
+    но файл SQLite не сжимается: на проде это делает deploy/vm-migrate.sh (VACUUM INTO)."""
+    conn.execute("DROP TABLE IF EXISTS ticket_cache")
+    conn.commit()
 
 
 # ----------------------------- fetch cache -----------------------------------

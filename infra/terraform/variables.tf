@@ -84,6 +84,18 @@ variable "image_tag" {
 
 variable "bucket_max_size_gb" {
   type        = number
-  description = "Жёсткий потолок размера бакета в ГБ (0 = без лимита)"
-  default     = 10
+  description = "Жёсткий потолок размера бакета в ГБ (0 = без лимита). Ретеншн озера (LAKE_MAX_GB) держится ниже него"
+  default     = 200
+}
+
+variable "lake_max_gb" {
+  type        = number
+  description = "Порог объёма Parquet-озера tickets/ в ГБ: выше — коллектор удаляет самые старые файлы"
+  default     = 180
+}
+
+variable "rate_per_minute" {
+  type        = number
+  description = "Темп запросов коллектора к GraphQL Data API (лимит источника — 60/мин)"
+  default     = 60
 }

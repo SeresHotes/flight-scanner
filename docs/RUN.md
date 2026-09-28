@@ -1,24 +1,30 @@
 # Локальный запуск
 
 ```
-React (Vite, :5173) ──POST /api/plan/run──> FastAPI (:8000) ──> core.planner / core.overview
-   /combos, /routes  ──GET  …/combos|routes─>        └──> core.graphql_api (Travelpayouts)
-   (Vite проксирует /api → :8000; в проде один origin через Caddy)   └──> storage.hot (SQLite)
+React (Vite, :5173) ──POST /api/plan/run──> planner FastAPI (:8000) ──> core.planner / core.overview
+   /combos, /routes  ──GET  …/combos|routes─>        │  └──> storage.hot (SQLite: джобы, котировки)
+   (Vite проксирует /api → :8000;                    └──COLLECTOR_URL──> collector (:8001) ──> GraphQL
+    в проде один origin через Caddy)                    очередь app>crawl, Parquet-озеро (S3 или data/lake)
 ```
 
-## Бэкенд (FastAPI)
+## Бэкенд: планировщик (FastAPI) и коллектор
 
 Зависимости — `pyproject.toml` (poetry). Токен Travelpayouts — `TRAVELPAYOUTS_TOKEN`
-в `.env` (нужен для сбора; страницы готовых джоб отдаются и без него).
+в `.env` (нужен коллектору или планировщику в прямом режиме; страницы готовых
+джоб отдаются и без него).
 
 ```sh
 poetry install
+# Как в проде: коллектор отдельно, планировщик ходит в него за сериями (docs/COLLECTOR.md).
+poetry run uvicorn collector.main:app --port 8001            # озеро без S3_* — в data/lake
+COLLECTOR_URL=http://localhost:8001 poetry run uvicorn api.main:app --port 8000 --reload
+# Без коллектора: планировщик сам ходит в GraphQL и кэширует серии в SQLite.
 poetry run uvicorn api.main:app --port 8000 --reload
 PYTHONPATH=. poetry run pytest -q
 ```
 
 Эндпоинты:
-- `GET  /api/health` — статус, число котировок и серий в кэше.
+- `GET  /api/health` — статус, число котировок, блок `collector` (очередь, серии, объём озера).
 - `GET  /api/airports?q=&limit=` — автокомплит городов/аэропортов.
 - `POST /api/plan/estimate` — оценка объёма сбора (страниц GraphQL).
 - `POST /api/plan/run` — запуск по PlanQuery (`core/planquery`), дедуп по хэшу запроса → `{job_id, mode}`.

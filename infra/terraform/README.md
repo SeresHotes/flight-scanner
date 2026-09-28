@@ -9,7 +9,7 @@ Object Storage (сид данных + бэкапы озера), Container Regist
 Cloudflare DNS: flights.sereshotes.dev ──A──> VM external IP
 Интернет ──443──> Caddy ──/api──> FastAPI(api) ──> SQLite + Parquet (том /opt/flights/data)
                     └──/──> статика фронта (/srv)     ▲ сид из Object Storage при первом бутe
-Container Registry: cr.yandex/<reg>/flights-api|flights-web:latest  (VM тянет по IAM SA)
+Container Registry: cr.yandex/<reg>/flights-planner|flights-collector|flights-web:latest  (VM тянет по IAM SA)
 ```
 
 ## Ресурсы (Terraform)
@@ -38,9 +38,11 @@ aws --endpoint-url https://storage.yandexcloud.net \
 
 # 2) Собрать и запушить образы (VM подхватит таймером через ~2 мин, либо сразу — см. ниже):
 yc container registry configure-docker
-docker build -t "$(terraform output -raw image_api_ref)" -f deploy/Dockerfile .
+docker build -t "$(terraform output -raw image_planner_ref)" -f deploy/Dockerfile.planner .
+docker build -t "$(terraform output -raw image_collector_ref)" -f deploy/Dockerfile.collector .
 docker build -t "$(terraform output -raw image_web_ref)" -f deploy/Dockerfile.web .
-docker push "$(terraform output -raw image_api_ref)"
+docker push "$(terraform output -raw image_planner_ref)"
+docker push "$(terraform output -raw image_collector_ref)"
 docker push "$(terraform output -raw image_web_ref)"
 
 # 3) DNS: A-запись site_domain -> vm_external_ip (Cloudflare, proxy OFF на время выпуска TLS).

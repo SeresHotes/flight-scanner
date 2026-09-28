@@ -1,13 +1,15 @@
-# API-образ Flight Scanner: FastAPI + встроенный asyncio-воркер сбора.
+# Образ планировщика (flights-planner): FastAPI-бэкенд `api/` + фоновая джоба стыковки.
+# Серии билетов берёт у коллектора (COLLECTOR_URL, deploy/Dockerfile.collector).
 # Раздача статики и TLS — на соседнем контейнере caddy (deploy/Dockerfile.web),
 # сюда приходит уже только /api/* через reverse-proxy.
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Рантайм-зависимости serving+сбора. Тяжёлый `datasets` (HuggingFace) НЕ ставим —
+# Рантайм-зависимости serving. Тяжёлый `datasets` (HuggingFace) НЕ ставим —
 # он нужен только офлайн-скрипту build_airport_network.py, не в проде.
-# requests — коллектор (Travelpayouts); pyarrow — Parquet-озеро; python-dotenv — .env.
+# requests — клиент коллектора и прямой GraphQL (локальный режим); pyarrow — локальное
+# Parquet-озеро котировок; python-dotenv — .env.
 RUN pip install --no-cache-dir \
       "fastapi>=0.115,<0.116" \
       "uvicorn[standard]>=0.34,<0.35" \
@@ -23,6 +25,9 @@ COPY storage ./storage
 COPY api ./api
 # CLI для проверки источника руками (scripts/fetch_tickets.py) из того же образа.
 COPY scripts ./scripts
+# Прод-compose едет вместе с образом: run.sh на VM достаёт его отсюда при каждом
+# обновлении, поэтому состав контейнеров меняется обычным деплоем (без cloud-init).
+COPY deploy/compose.prod.yml ./deploy/compose.prod.yml
 
 # Всё горячее состояние — на смонтированном томе /app/data (SQLite + lake).
 # Пути совпадают с дефолтами модулей (cwd=/app → data/... == /app/data/...).
