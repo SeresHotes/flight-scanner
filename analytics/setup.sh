@@ -94,7 +94,7 @@ if code == 409:
 print("datasource:", code)
 
 code, folder = call("POST", "/api/folders", {"uid": "flights", "title": "Flights"})
-if code == 409:
+if code in (409, 412):  # уже есть (412 — «version mismatch» у существующей папки)
     code, folder = call("GET", "/api/folders/flights")
 print("folder:", code, folder.get("uid"))
 
