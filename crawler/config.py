@@ -33,9 +33,11 @@ class Settings:
     tick_seconds: float = field(default_factory=lambda: _float("CRAWL_TICK_SECONDS", 120))
     queue_target: int = field(default_factory=lambda: _int("CRAWL_QUEUE_TARGET", 200))
     max_pages: int = field(default_factory=lambda: _int("CRAWL_MAX_PAGES", 37))
-    # Целевая свежесть по дальности даты вылета (часы): ближние — чаще.
+    # Целевая свежесть по дальности даты вылета (часы). Не чаще раза в трое суток:
+    # источник сам кэширует цены ~сутки, а ежедневный опрос ближних дат съедал бы
+    # квоту в ущерб первому проходу (решение пользователя 29.09.2026).
     near_days: int = field(default_factory=lambda: _int("CRAWL_FRESH_NEAR_DAYS", 14))
-    near_hours: float = field(default_factory=lambda: _float("CRAWL_FRESH_NEAR_HOURS", 24))
+    near_hours: float = field(default_factory=lambda: _float("CRAWL_FRESH_NEAR_HOURS", 72))
     mid_days: int = field(default_factory=lambda: _int("CRAWL_FRESH_MID_DAYS", 60))
     mid_hours: float = field(default_factory=lambda: _float("CRAWL_FRESH_MID_HOURS", 72))
     far_hours: float = field(default_factory=lambda: _float("CRAWL_FRESH_FAR_HOURS", 168))

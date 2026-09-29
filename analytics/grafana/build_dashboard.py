@@ -88,7 +88,16 @@ def build() -> dict:
               f"SELECT ts AS time, crawler_fresh AS \"свежие\", crawler_stale AS \"устарели\", "
               f"crawler_missing AS \"нет данных\", crawler_errors AS \"ошибки источника\" "
               f"FROM {OPS} WHERE $__timeFilter(ts) ORDER BY ts", 0, y, stack=True,
-              description="Цель свежести: до 14 дней вперёд — 24 ч, до 60 — 72 ч, дальше — неделя."),
+              description="Свежие + устарели + нет данных = все пары на горизонте (стек). "
+                          "Ошибки источника — отдельно, правая ось, без стека. "
+                          "Цель свежести: до 60 дней вперёд — 72 ч, дальше — неделя.",
+              extra={"fieldConfig": {"defaults": {"custom": {"fillOpacity": 12, "lineWidth": 2, "showPoints": "never",
+                                                             "stacking": {"mode": "normal", "group": "A"}}},
+                                     "overrides": [{"matcher": {"id": "byName", "options": "ошибки источника"},
+                                                    "properties": [{"id": "custom.axisPlacement", "value": "right"},
+                                                                   {"id": "custom.stacking", "value": {"mode": "none"}},
+                                                                   {"id": "custom.fillOpacity", "value": 0},
+                                                                   {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [6, 4]}}]}]}}),
         panel("Возраст серий в индексе, ч",
               f"SELECT ts AS time, series_age_p50_h AS \"медиана\", series_age_max_h AS \"максимум\" "
               f"FROM {OPS} WHERE $__timeFilter(ts) ORDER BY ts", 12, y, unit="h"),

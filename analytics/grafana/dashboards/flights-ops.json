@@ -418,10 +418,43 @@
       }
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "ошибки источника"
+      },
+      "properties": [
+       {
+        "id": "custom.axisPlacement",
+        "value": "right"
+       },
+       {
+        "id": "custom.stacking",
+        "value": {
+         "mode": "none"
+        }
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 0
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {},
-   "description": "Цель свежести: до 14 дней вперёд — 24 ч, до 60 — 72 ч, дальше — неделя."
+   "description": "Свежие + устарели + нет данных = все пары на горизонте (стек). Ошибки источника — отдельно, правая ось, без стека. Цель свежести: до 60 дней вперёд — 72 ч, дальше — неделя."
   },
   {
    "id": 9,
