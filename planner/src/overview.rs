@@ -154,7 +154,8 @@ fn extend(state: &State, prev: &Leg, p_idx: &[usize], nxt: &Leg, f_idx: &[usize]
     let (n_days, n_p, n_f) = (state.n_days, state.n_p, f_idx.len());
     debug_assert_eq!(n_p, p_idx.len());
     let arr_ts: Vec<f64> = p_idx.iter().map(|&p| prev.arr_ts[p]).collect();
-    let mut day_thr: Vec<i64> = p_idx.iter().map(|&p| prev.arr_ord[p]).collect();
+    // Вылет — строго в следующий календарный день после прилёта (search::min_depart_ord).
+    let mut day_thr: Vec<i64> = p_idx.iter().map(|&p| prev.arr_ord[p] + 1).collect();
     if cf.map(|c| c.require_weekend).unwrap_or(false) {
         for (k, &p) in p_idx.iter().enumerate() {
             day_thr[k] = day_thr[k].max(prev.weekend_ok_from[p]);
@@ -637,6 +638,23 @@ mod tests {
             assert_eq!(prices, sorted);
             assert_eq!(got.cities.keys().cloned().collect::<HashSet<_>>(), got.combos.iter().flat_map(|c| c.codes.clone()).collect::<HashSet<_>>());
         }
+    }
+
+    #[test]
+    fn same_day_connection_gives_no_combos() {
+        let three = vec![
+            Stop::new("cities", vec!["MOW"], ["", ""]),
+            Stop::new("any", vec![], ["2026-11-01", "2026-11-03"]),
+            Stop::new("cities", vec!["SEL"], ["2026-11-01", "2026-11-03"]),
+        ];
+        let q = PlanQuery::from_value(&json!({"stops": three.iter().map(|s| json!({"kind": s.kind, "codes": s.codes, "window": s.window})).collect::<Vec<_>>(), "maxResults": 10})).unwrap();
+        let first = vec![flight("MOW", "IST", 1, 10, 100.0)]; // прилёт 01.11 14:00
+        let same_day = FlightCols::from_collected(&[first.clone(), vec![flight("IST", "SEL", 1, 20, 100.0)]]);
+        assert!(build_overview(&three, &same_day, Some(&q)).combos.is_empty());
+        let next_day = FlightCols::from_collected(&[first, vec![flight("IST", "SEL", 2, 0, 100.0)]]);
+        let got = build_overview(&three, &next_day, Some(&q));
+        assert_eq!(got.combos.len(), 1);
+        assert_eq!(got.total_count, 1);
     }
 
     #[test]
