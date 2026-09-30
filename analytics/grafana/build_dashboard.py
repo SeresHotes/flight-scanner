@@ -118,22 +118,26 @@ def build() -> dict:
     ]
     y += 8
     # Запас свежести по дню вылета: 7 − возраст в сутках. Только что собранный день = 7,
-    # дальше убывает на 1 в сутки; ниже 0 — старше недели. Худший город и число городов —
-    # только в подсказке (скрыты с графика), чтобы 180 столбцов не двоились. Ось — весь
-    # горизонт сборщика (180 дней): дни без данных — пустые (NULL), а не 0.
+    # дальше убывает на 1 в сутки; ниже 0 — старше недели. Столбец — p95 по городам
+    # (95 % городов этого дня свежее): среднее прятало хвост, а максимум — один выброс.
+    # Среднее, худший город и число городов — только в подсказке (скрыты с графика),
+    # чтобы 180 столбцов не двоились. Ось — весь горизонт сборщика (180 дней): дни без
+    # данных — пустые (NULL), а не 0.
     hidden = {"id": "custom.hideFrom", "value": {"viz": True, "legend": True, "tooltip": False}}
     panels += [
-        panel("Запас свежести по дням вылета на 180 дней (7 − возраст в сутках)",
+        panel("Запас свежести по дням вылета на 180 дней, p95 городов (7 − возраст в сутках)",
               "SELECT formatDateTime(d.day, '%d.%m') AS \"день\", "
-              "c.avg_left AS \"среднее по городам\", c.min_left AS \"худший город\", "
-              "ifNull(c.cities, 0) AS \"городов\" "
+              "c.p95_left AS \"p95 городов\", c.avg_left AS \"среднее по городам\", "
+              "c.min_left AS \"худший город\", ifNull(c.cities, 0) AS \"городов\" "
               "FROM (SELECT today() + number AS day FROM numbers(180)) AS d "
-              "LEFT JOIN (SELECT day, round(7 - avg(age_h) / 24, 2) AS avg_left, "
+              "LEFT JOIN (SELECT day, round(7 - quantile(0.95)(age_h) / 24, 2) AS p95_left, "
+              "round(7 - avg(age_h) / 24, 2) AS avg_left, "
               "round(7 - max(age_h) / 24, 2) AS min_left, count() AS cities "
               "FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day) AS c ON c.day = d.day "
               "ORDER BY d.day SETTINGS join_use_nulls = 1",
               0, y, w=24, ptype="barchart", kind="table",
-              description="Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за "
+              description="Столбец — 95-й перцентиль по городам: у 95 % городов этого дня данные "
+                          "свежее. Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за "
                           "каждые сутки. ≥ 4 — в пределах 72 ч (цель до 60 дней вперёд), 0…4 — до недели "
                           "(цель для дальних дат), < 0 — старше недели. Пустой день — данных ещё нет; "
                           "пары с ошибкой источника не учитываются.",
@@ -145,7 +149,7 @@ def build() -> dict:
                                                       {"color": "green", "value": 4}]}},
                                      "overrides": [{"matcher": {"id": "byName", "options": name},
                                                     "properties": [hidden]}
-                                                   for name in ("худший город", "городов")]},
+                                                   for name in ("среднее по городам", "худший город", "городов")]},
                      "options": {"orientation": "vertical", "xField": "день", "showValue": "never",
                                  "xTickLabelSpacing": 100, "barWidth": 0.9,
                                  "tooltip": {"mode": "multi"}, "legend": {"showLegend": False}}}),
