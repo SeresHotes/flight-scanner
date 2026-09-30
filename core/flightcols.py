@@ -1,11 +1,14 @@
 """Рейсы джобы колонками (FlightCols): все плечи одной таблицей, поля стыковки уже
 числами. Из неё строят свои структуры перебор A* (core.planner) и наборы городов
 (core.overview) — векторно, без обхода 135 тыс. словарей рейсов при каждой смене
-фильтра. Полный рейс (словарь normalize_ticket / виртуальный hidden-city) лежит
-JSON-колонкой raw и разбирается только для рейсов из результата (flight(i)).
+фильтра. Для сегмента результата (segments.Builder.make_segment) рейс лежит
+JSON-колонкой seg — только поля сегмента (SEG_KEYS; ссылка — лишь там, где она
+нужна) — и разбирается только для рейсов из результата (flight(i)).
 
-Хранение — Parquet-файл на джобу (storage.hot.put_plan_flights): числовые колонки
-читаются без raw, raw — лениво при первом flight(i).
+Хранение — Parquet-файл на джобу (storage.hot.put_plan_flights): строковые колонки
+читаются словарём (уникальных значений — сотни–десятки тысяч на 135 тыс. строк),
+seg — лениво при первом flight(i), сжатие lz4 (читается в ~3 раза быстрее zstd).
+Файлы прежнего формата с полным рейсом в колонке raw читаются так же.
 
 Семантика полей — ровно как у словарных помощников планировщика:
   city/airport концов — planner._side_codes (город или search_*, аэропорт; UPPER),
@@ -31,6 +34,22 @@ _STR = ["orig_city", "orig_airport", "dest", "dest_airport", "dep_iso", "arr_iso
 _NUM = {"leg": np.int16, "price": np.float64, "transfers": np.int32, "duration": np.int64,
         "hidden": np.bool_, "bag_incl": np.bool_, "pts_min": np.float64, "layover": np.float64,
         "dep_ts": np.float64, "arr_ts": np.float64, "dep_ord": np.int64, "arr_ord": np.int64}
+# Поля рейса, которые читает segments.Builder.make_segment (и arrival_of). legs/chain
+# и прочее сегменту не нужны — в файл не пишем. link нужен только hidden-city (ссылка
+# на реальный билет) и рейсам без transfer_points (пересадки — из токена ссылки).
+SEG_KEYS = ["origin", "destination", "search_origin", "search_destination", "origin_airport",
+            "destination_airport", "departure_at", "arrival_at", "duration", "duration_to", "transfers",
+            "transfer_points", "airline", "flight_number", "price", "value", "baggage", "hidden_city"]
+
+
+def segment_source(f: Dict[str, Any]) -> Dict[str, Any]:
+    """Рейс, урезанный до полей сегмента: make_segment даёт тот же сегмент."""
+    out = {k: f[k] for k in SEG_KEYS if k in f}
+    if f.get("link") and (f.get("hidden_city") or f.get("transfer_points") is None):
+        out["link"] = f["link"]
+    return out
+
+
 _ARROW = {np.int16: pa.int16(), np.float64: pa.float64(), np.int32: pa.int32(), np.int64: pa.int64(),
           np.bool_: pa.bool_()}
 
@@ -108,17 +127,18 @@ class FlightCols:
     def to_table(self) -> pa.Table:
         arrays = {k: pa.array(getattr(self, k), type=pa.string()) for k in _STR}
         arrays.update({k: pa.array(getattr(self, k), type=_ARROW[dt]) for k, dt in _NUM.items()})
-        arrays["raw"] = pa.array([json.dumps(self.flight(i), ensure_ascii=False) for i in range(self.n)],
-                                 type=pa.string())
+        arrays["seg"] = pa.array([json.dumps(segment_source(self.flight(i)), ensure_ascii=False)
+                                  for i in range(self.n)], type=pa.string())
         return pa.table(arrays)
 
     def write(self, path: str) -> None:
-        pq.write_table(self.to_table(), path, compression="zstd")
+        table = self.to_table()
+        pq.write_table(table, path, compression={c: ("lz4" if c == "seg" else "zstd") for c in table.column_names})
 
     @classmethod
     def read(cls, path: str) -> "FlightCols":
-        table = pq.read_table(path, columns=_STR + list(_NUM))
-        cols: Dict[str, Any] = {k: table.column(k).to_pylist() for k in _STR}
+        table = pq.read_table(path, columns=_STR + list(_NUM), read_dictionary=_STR)
+        cols: Dict[str, Any] = {k: _dict_to_list(table.column(k)) for k in _STR}
         cols.update({k: table.column(k).to_numpy() for k in _NUM})
         return cls(cols, path=path)
 
@@ -127,7 +147,9 @@ class FlightCols:
     def flight(self, i: int) -> Dict[str, Any]:
         """Полный рейс строки i (словарь, как в сборе) — для сегментов результата."""
         if self._raw is None:
-            self._raw = pq.read_table(self._path, columns=["raw"]).column("raw").combine_chunks()
+            names = pq.ParquetFile(self._path).schema_arrow.names
+            col = "seg" if "seg" in names else "raw"      # raw — файлы прежнего формата
+            self._raw = pq.read_table(self._path, columns=[col]).column(col).combine_chunks()
         if isinstance(self._raw, list):
             return self._raw[i]
         got = self._parsed.get(i)
@@ -158,6 +180,17 @@ class FlightCols:
             if a and a != c:
                 out.setdefault(a, []).append(r)
         return {k: np.array(v, dtype=np.int64) for k, v in out.items()}
+
+
+def _dict_to_list(column: pa.ChunkedArray) -> List[Optional[str]]:
+    """Словарная строковая колонка → список строк: объект строки на каждое
+    уникальное значение, а не на каждую из 135 тыс. строк (to_pylist — ~0.9 с на проде)."""
+    out: List[Optional[str]] = []
+    for chunk in column.chunks:
+        vocab = np.array(chunk.dictionary.to_pylist() + [None], dtype=object)
+        idx = chunk.indices.fill_null(len(vocab) - 1).to_numpy()
+        out.extend(vocab[idx].tolist())
+    return out
 
 
 def as_cols(collected) -> FlightCols:
