@@ -124,15 +124,16 @@ def series_file_key(origin: Optional[str], destination: Optional[str], day: str,
 
 
 _DAY = r"\d{4}-\d{2}-\d{2}"
+# Код места: IATA латиницей или внутренний код источника кириллицей (АУР, БИХ).
 _KEY_RE = re.compile(
-    r"^" + TICKETS_PREFIX + r"/fetched=(?P<date>" + _DAY + r")/origin=[A-Z]+/"
-    r"(?P<origin>[A-Z]+)-(?P<dest>[A-Z]+)__(?P<day>" + _DAY + r")(?:\.\.(?P<day_to>" + _DAY + r"))?"
+    r"^" + TICKETS_PREFIX + r"/fetched=(?P<date>" + _DAY + r")/origin=[^/_-]+/"
+    r"(?P<origin>[^/_-]+)-(?P<dest>[^/_-]+)__(?P<day>" + _DAY + r")(?:\.\.(?P<day_to>" + _DAY + r"))?"
     r"(?:__(?P<params>[^_]+))?__(?P<time>\d{2}-\d{2}-\d{2})Z\.parquet$")
 # Раскладка до 30.09.2026: tickets/date=<день вылета>/origin=X/<A>-<B>[__<параметры>]__<UTC-время>.parquet,
-# окно — параметром `to=<последний день>` (scripts/migrate_lake_layout.py переносит в fetched=).
+# окно — параметром `to=<последний день>` (python -m collector.migrate переносит в fetched=).
 _LEGACY_KEY_RE = re.compile(
-    r"^" + TICKETS_PREFIX + r"/date=(?P<day>" + _DAY + r")/origin=[A-Z]+/"
-    r"(?P<origin>[A-Z]+)-(?P<dest>[A-Z]+)(?:__(?P<params>[^_]+))?__(?P<stamp>" + _DAY + r"T\d{2}-\d{2}-\d{2})Z\.parquet$")
+    r"^" + TICKETS_PREFIX + r"/date=(?P<day>" + _DAY + r")/origin=[^/_-]+/"
+    r"(?P<origin>[^/_-]+)-(?P<dest>[^/_-]+)(?:__(?P<params>[^_]+))?__(?P<stamp>" + _DAY + r"T\d{2}-\d{2}-\d{2})Z\.parquet$")
 
 
 def parse_file_key(key: str) -> Optional[Dict[str, Any]]:
