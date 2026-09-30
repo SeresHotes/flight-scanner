@@ -1,7 +1,9 @@
 """Объектное хранилище озера: S3 (Yandex Object Storage) или локальный каталог.
 
 Один интерфейс для записи файлов, листинга по префиксу, удаления и чтения
-Parquet range-запросами (pyarrow NativeFile — читается только нужная row group)."""
+Parquet (pyarrow NativeFile). Файл озера — одна маленькая серия (десятки КБ), поэтому
+из S3 он читается целиком одним GET: pyarrow S3FileSystem ходил отдельным range-GET
+за футером и каждой колонкой — ~0.7 с на серию против ~30 мс (замер на проде)."""
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,7 +11,6 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 import pyarrow as pa
-import pyarrow.fs as pafs
 
 
 @dataclass
@@ -56,7 +57,7 @@ class LocalStore:
 
 
 class S3Store:
-    """Object Storage через boto3 (put/list/delete) и pyarrow S3FileSystem (чтение)."""
+    """Object Storage через boto3: put/list/delete и чтение файла одним GET."""
 
     def __init__(self, bucket: str, access_key: str, secret_key: str,
                  endpoint: str = "https://storage.yandexcloud.net", region: str = "ru-central1"):
@@ -64,16 +65,13 @@ class S3Store:
         self.bucket = bucket
         self._s3 = boto3.client("s3", endpoint_url=endpoint, region_name=region,
                                 aws_access_key_id=access_key, aws_secret_access_key=secret_key)
-        host = endpoint.split("://", 1)[-1]
-        scheme = "https" if endpoint.startswith("https") else "http"
-        self._fs = pafs.S3FileSystem(access_key=access_key, secret_key=secret_key,
-                                     endpoint_override=host, scheme=scheme, region=region)
 
     def put_bytes(self, key: str, data: bytes) -> None:
         self._s3.put_object(Bucket=self.bucket, Key=key, Body=data)
 
     def open_input_file(self, key: str) -> pa.NativeFile:
-        return self._fs.open_input_file(f"{self.bucket}/{key}")
+        body = self._s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        return pa.BufferReader(body)
 
     def list(self, prefix: str) -> List[ObjectInfo]:
         out = []

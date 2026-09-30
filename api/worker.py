@@ -18,6 +18,10 @@ from storage import hot
 # Data API) сам отдаёт кэш цен с задержкой ~суток, поэтому чаще перезапрашивать
 # бессмысленно — те же цифры, впустую сожжённые запросы к API.
 FETCH_CACHE_TTL_SECONDS = 24 * 3600
+# Сколько серий джоба тянет у коллектора одновременно. Попадания в озеро квоту
+# источника не тратят, промахи коллектор сам ставит в очередь под лимит; прямой
+# GraphQL (без коллектора) — по одной: лимит 60/мин и общее SQLite-соединение кэша.
+COLLECTOR_FETCH_WORKERS = 8
 
 # Как часто стыковка пишет прогресс в jobs. Заодно держит свежим updated_at — иначе
 # долгая стыковка выглядела бы для /api/jobs/rescue как зависшая джоба.
@@ -75,6 +79,8 @@ class StageReporter:
         self.steps = steps
         self.state = initial_stage(kind)
         self.progress = 0
+        # tick/cache_hit зовутся из потоков параллельного сбора (collect_plan workers)
+        self._lock = threading.Lock()
 
     def _flush(self, **fields) -> None:
         if is_cancel_requested(self.job_id):  # не перетираем статус сброшенной джобы
@@ -94,13 +100,15 @@ class StageReporter:
         self._flush()
 
     def cache_hit(self) -> None:
-        self.state["cached"] += 1  # попадёт в БД вместе со следующим tick()
+        with self._lock:
+            self.state["cached"] += 1  # попадёт в БД вместе со следующим tick()
 
     def tick(self) -> None:
-        self.progress += 1
-        if self.state["step"] is not None:
-            self.state["step"]["done"] += 1
-        self._flush(progress=self.progress)
+        with self._lock:
+            self.progress += 1
+            if self.state["step"] is not None:
+                self.state["step"]["done"] += 1
+            self._flush(progress=self.progress)
 
     def flights(self, n: int) -> None:
         self.state["flights"] = n
@@ -163,13 +171,14 @@ def make_collector_ticket_fetch(client, on_cache_hit: Optional[Callable[[], None
 
 
 def make_ticket_fetch(conn, on_cache_hit: Optional[Callable[[], None]] = None):
-    """Источник серий для джобы: коллектор, если задан COLLECTOR_URL (прод), иначе
-    прямой GraphQL с кэшем серий в SQLite (локальный запуск без коллектора)."""
+    """Источник серий для джобы и сколько серий тянуть одновременно: коллектор, если
+    задан COLLECTOR_URL (прод), — параллельно; иначе прямой GraphQL с кэшем серий в
+    SQLite (локальный запуск без коллектора) — по одной."""
     from core.collector_client import CollectorClient, collector_url
     url = collector_url()
     if url:
-        return make_collector_ticket_fetch(CollectorClient(url), on_cache_hit)
-    return make_cached_ticket_fetch(conn, on_cache_hit)
+        return make_collector_ticket_fetch(CollectorClient(url), on_cache_hit), COLLECTOR_FETCH_WORKERS
+    return make_cached_ticket_fetch(conn, on_cache_hit), 1
 
 
 def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: str) -> None:
@@ -207,10 +216,11 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
         rep = StageReporter(conn, job_id, "plan", steps)
         rep.stage("fetch", status="running", total=total, progress=0)
 
-        collected = planner.collect_plan(stops, progress_cb=rep.tick,
-                                         fetch_fn=make_ticket_fetch(conn, rep.cache_hit),
+        fetch_fn, workers = make_ticket_fetch(conn, rep.cache_hit)
+        collected = planner.collect_plan(stops, progress_cb=rep.tick, fetch_fn=fetch_fn,
                                          leg_cb=rep.step, max_cost=max_cost,
-                                         airport_city=hot.airport_city_map(conn))
+                                         airport_city=hot.airport_city_map(conn),
+                                         workers=workers)
         rep.flights(sum(len(v) for v in collected.values()))
         # Рейсы — в БД: маршруты выбранных наборов городов строятся из них по требованию.
         hot.put_plan_flights(conn, job_id, collected)
