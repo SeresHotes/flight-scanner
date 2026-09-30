@@ -578,7 +578,7 @@
   },
   {
    "id": 12,
-   "title": "Запас свежести по дням вылета на 180 дней (7 − возраст в сутках)",
+   "title": "Запас свежести по дням вылета на 180 дней, p95 городов (7 − возраст в сутках)",
    "type": "barchart",
    "gridPos": {
     "x": 0,
@@ -597,7 +597,7 @@
       "uid": "flights-clickhouse"
      },
      "editorType": "sql",
-     "rawSql": "SELECT formatDateTime(d.day, '%d.%m') AS \"день\", c.avg_left AS \"среднее по городам\", c.min_left AS \"худший город\", ifNull(c.cities, 0) AS \"городов\" FROM (SELECT today() + number AS day FROM numbers(180)) AS d LEFT JOIN (SELECT day, round(7 - avg(age_h) / 24, 2) AS avg_left, round(7 - max(age_h) / 24, 2) AS min_left, count() AS cities FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day) AS c ON c.day = d.day ORDER BY d.day SETTINGS join_use_nulls = 1",
+     "rawSql": "SELECT formatDateTime(d.day, '%d.%m') AS \"день\", c.p95_left AS \"p95 городов\", c.avg_left AS \"среднее по городам\", c.min_left AS \"худший город\", ifNull(c.cities, 0) AS \"городов\" FROM (SELECT today() + number AS day FROM numbers(180)) AS d LEFT JOIN (SELECT day, round(7 - quantile(0.95)(age_h) / 24, 2) AS p95_left, round(7 - avg(age_h) / 24, 2) AS avg_left, round(7 - max(age_h) / 24, 2) AS min_left, count() AS cities FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day) AS c ON c.day = d.day ORDER BY d.day SETTINGS join_use_nulls = 1",
      "queryType": "table",
      "refId": "A"
     }
@@ -632,6 +632,22 @@
      }
     },
     "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "среднее по городам"
+      },
+      "properties": [
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": true,
+         "legend": true,
+         "tooltip": false
+        }
+       }
+      ]
+     },
      {
       "matcher": {
        "id": "byName",
@@ -679,7 +695,7 @@
      "showLegend": false
     }
    },
-   "description": "Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за каждые сутки. ≥ 4 — в пределах 72 ч (цель до 60 дней вперёд), 0…4 — до недели (цель для дальних дат), < 0 — старше недели. Пустой день — данных ещё нет; пары с ошибкой источника не учитываются."
+   "description": "Столбец — 95-й перцентиль по городам: у 95 % городов этого дня данные свежее. Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за каждые сутки. ≥ 4 — в пределах 72 ч (цель до 60 дней вперёд), 0…4 — до недели (цель для дальних дат), < 0 — старше недели. Пустой день — данных ещё нет; пары с ошибкой источника не учитываются."
   },
   {
    "id": 13,
