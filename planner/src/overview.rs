@@ -9,12 +9,14 @@
 //! предшественники рейса f — отрезок в списке, отсортированном по времени прилёта
 //! (число — разность накопленных сумм, минимумы — минимум на отрезке).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 use crate::dates::{date_ordinal, weekend_deadline, DAY_SECONDS};
-use crate::flightcols::FlightCols;
+use crate::flightcols::{FlightCols, NO_CODE};
 use crate::nearby::{Hops, HOP_MIN_GAP_MIN};
 use crate::planquery::{CityFilter, PlanQuery};
 use crate::search::leg_rows;
@@ -42,12 +44,13 @@ pub struct Overview {
     pub cities: HashMap<String, (String, String)>,
 }
 
-/// Рейсы плеча в локальных массивах + индекс по коду вылета.
+/// Рейсы плеча в локальных массивах + индекс по коду вылета. Коды — номера словаря
+/// FlightCols (NO_CODE — пусто): сравнение и хэширование чисел, а не строк.
 struct Leg {
-    dest: Vec<String>,
-    dest_air: Vec<String>,
-    orig_city: Vec<String>,
-    orig_air: Vec<String>,
+    dest: Vec<u32>,
+    dest_air: Vec<u32>,
+    orig_city: Vec<u32>,
+    orig_air: Vec<u32>,
     price: Vec<f64>,
     transfers: Vec<i64>,
     dep_ts: Vec<f64>,
@@ -55,27 +58,27 @@ struct Leg {
     dep_ord: Vec<i64>,
     arr_ord: Vec<i64>,
     weekend_ok_from: Vec<i64>,
-    by_origin: HashMap<String, Vec<usize>>,
+    by_origin: FxHashMap<u32, Vec<usize>>,
 }
 
 impl Leg {
     fn new(t: &FlightCols, rows: &[usize]) -> Leg {
         let rows: Vec<usize> = rows.iter().copied().filter(|&r| t.dep_ord[r] >= 0).collect();
-        let mut by_origin: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_origin: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
         for (i, &r) in rows.iter().enumerate() {
-            let (c, a) = (&t.orig_city[r], &t.orig_airport[r]);
-            if !c.is_empty() {
-                by_origin.entry(c.clone()).or_default().push(i);
+            let (c, a) = (t.orig_city_id[r], t.orig_airport_id[r]);
+            if c != NO_CODE {
+                by_origin.entry(c).or_default().push(i);
             }
-            if !a.is_empty() && a != c {
-                by_origin.entry(a.clone()).or_default().push(i);
+            if a != NO_CODE && a != c {
+                by_origin.entry(a).or_default().push(i);
             }
         }
         Leg {
-            dest: rows.iter().map(|&r| t.dest[r].clone()).collect(),
-            dest_air: rows.iter().map(|&r| t.dest_airport[r].clone()).collect(),
-            orig_city: rows.iter().map(|&r| t.orig_city[r].clone()).collect(),
-            orig_air: rows.iter().map(|&r| t.orig_airport[r].clone()).collect(),
+            dest: rows.iter().map(|&r| t.dest_id[r]).collect(),
+            dest_air: rows.iter().map(|&r| t.dest_airport_id[r]).collect(),
+            orig_city: rows.iter().map(|&r| t.orig_city_id[r]).collect(),
+            orig_air: rows.iter().map(|&r| t.orig_airport_id[r]).collect(),
             price: rows.iter().map(|&r| t.price[r]).collect(),
             transfers: rows.iter().map(|&r| t.transfers[r]).collect(),
             dep_ts: rows.iter().map(|&r| t.dep_ts[r]).collect(),
@@ -87,7 +90,7 @@ impl Leg {
         }
     }
 
-    fn origin_has(&self, i: usize, code: &str) -> bool {
+    fn origin_has(&self, i: usize, code: u32) -> bool {
         self.orig_city[i] == code || self.orig_air[i] == code
     }
 }
@@ -284,13 +287,32 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
     let trip_active = trip.0 != 0 || trip.1.is_some();
     let start_ord = date_ordinal(&leg_dates(stops, 0)[0]).unwrap_or(0);
     let hops = Hops::new(stops);
+    let n_codes = table.codes.len();
+    // Разрешённые города прилёта остановки — маской по номерам кодов (None — любой);
+    // коды, которых нет в рейсах, прилётом всё равно не встретятся.
+    let allow: Vec<Option<Vec<bool>>> = (0..=last)
+        .map(|i| {
+            hops.arrive_allowed(i).map(|set| {
+                let mut bits = vec![false; n_codes];
+                for code in &set {
+                    if let Some(id) = table.code_id(code) {
+                        bits[id as usize] = true;
+                    }
+                }
+                bits
+            })
+        })
+        .collect();
 
     let mut combos: Vec<Combo> = Vec::new();
-    let mut codes_used: HashSet<String> = HashSet::new();
+    let mut codes_used: HashSet<u32> = HashSet::new();
 
     struct Env<'a> {
         legs: &'a [Leg],
         hops: &'a Hops<'a>,
+        table: &'a FlightCols,
+        allow: &'a [Option<Vec<bool>>],
+        departs: RefCell<FxHashMap<(usize, u32), Vec<u32>>>,
         city_filters: &'a HashMap<usize, &'a CityFilter>,
         trip: (i64, Option<i64>),
         trip_active: bool,
@@ -298,10 +320,20 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
         last: usize,
     }
 
-    fn onward(env: &Env, k: usize, city: &str) -> Vec<usize> {
+    /// Hops::departs по номерам кодов (один раз на (плечо, город)).
+    fn departs(env: &Env, k: usize, city: u32) -> Vec<u32> {
+        if let Some(v) = env.departs.borrow().get(&(k, city)) {
+            return v.clone();
+        }
+        let got: Vec<u32> = env.hops.departs(k, &env.table.codes[city as usize]).iter().filter_map(|c| env.table.code_id(c)).collect();
+        env.departs.borrow_mut().insert((k, city), got.clone());
+        got
+    }
+
+    fn onward(env: &Env, k: usize, city: u32) -> Vec<usize> {
         let leg = &env.legs[k];
         let mut parts: Vec<usize> = Vec::new();
-        for d in env.hops.departs(k, city) {
+        for d in departs(env, k, city) {
             if let Some(v) = leg.by_origin.get(&d) {
                 parts.extend(v.iter().copied());
             }
@@ -311,37 +343,43 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
         parts
     }
 
-    /// Разрез кандидатов плеча k по городу прилёта с правилами остановки k+1.
-    fn groups(env: &Env, leg: &Leg, f_idx: &[usize], k: usize, seq: &[String]) -> Vec<(String, Vec<usize>)> {
-        let allow = env.hops.arrive_allowed(k + 1);
-        let city = seq.last().unwrap();
-        let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+    /// Разрез кандидатов плеча k по городу прилёта с правилами остановки k+1 (группы —
+    /// в порядке первого появления города, как раньше).
+    fn groups(env: &Env, leg: &Leg, f_idx: &[usize], k: usize, seq: &[u32]) -> Vec<(u32, Vec<usize>)> {
+        let allow = env.allow[k + 1].as_ref();
+        let city = *seq.last().unwrap();
+        let mut slot: FxHashMap<u32, usize> = FxHashMap::default();
+        let mut out: Vec<(u32, Vec<usize>)> = Vec::new();
         for &fi in f_idx {
-            let dest = &leg.dest[fi];
-            if dest.is_empty() || dest == city || leg.origin_has(fi, dest) {
+            let dest = leg.dest[fi];
+            if dest == NO_CODE || dest == city || leg.origin_has(fi, dest) {
                 continue;
             }
-            match &allow {
+            match allow {
                 None => {
-                    if seq.contains(dest) {
+                    if seq.contains(&dest) {
                         continue;
                     }
                 }
-                Some(a) => {
-                    if !a.contains(dest) && !a.contains(&leg.dest_air[fi]) {
+                Some(bits) => {
+                    let air = leg.dest_air[fi];
+                    if !bits[dest as usize] && (air == NO_CODE || !bits[air as usize]) {
                         continue;
                     }
                 }
             }
-            match out.iter_mut().find(|(d, _)| d == dest) {
-                Some((_, v)) => v.push(fi),
-                None => out.push((dest.clone(), vec![fi])),
+            match slot.get(&dest) {
+                Some(&g) => out[g].1.push(fi),
+                None => {
+                    slot.insert(dest, out.len());
+                    out.push((dest, vec![fi]));
+                }
             }
         }
         out
     }
 
-    fn finish(env: &Env, seq: &[String], leg: &Leg, f_idx: &[usize], state: &State, first_days: &[i64], combos: &mut Vec<Combo>, used: &mut HashSet<String>) {
+    fn finish(env: &Env, seq: &[u32], leg: &Leg, f_idx: &[usize], state: &State, first_days: &[i64], combos: &mut Vec<Combo>, used: &mut HashSet<u32>) {
         let (n_days, n_f) = (state.n_days, state.n_p);
         let mut cnt = state.cnt.clone();
         let mut minp = state.minp.clone();
@@ -380,22 +418,22 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
             }
         }
         combos.push(Combo {
-            codes: seq.to_vec(),
+            codes: seq.iter().map(|&c| env.table.codes[c as usize].clone()).collect(),
             min_price: minp[flat],
             transfers_at_min: state.tr_at[flat],
             min_transfers: mintr.iter().copied().min().unwrap_or(BIG_TR),
             count: total.round() as i64,
         });
-        used.extend(seq.iter().cloned());
+        used.extend(seq.iter().copied());
     }
 
-    fn expand(env: &Env, k: usize, seq: &[String], prev: &Leg, p_idx: &[usize], state: &State, first_days: &[i64], combos: &mut Vec<Combo>, used: &mut HashSet<String>) {
+    fn expand(env: &Env, k: usize, seq: &[u32], prev: &Leg, p_idx: &[usize], state: &State, first_days: &[i64], combos: &mut Vec<Combo>, used: &mut HashSet<u32>) {
         let leg = &env.legs[k];
-        let f_all = onward(env, k, seq.last().unwrap());
+        let city = *seq.last().unwrap();
+        let f_all = onward(env, k, city);
         if f_all.is_empty() {
             return;
         }
-        let city = seq.last().unwrap();
         for (dest, fis) in groups(env, leg, &f_all, k, seq) {
             let hop: Vec<bool> = fis.iter().map(|&fi| !leg.origin_has(fi, city)).collect();
             let new_state = extend(state, prev, p_idx, leg, &fis, env.city_filters.get(&k).copied(), Some(&hop));
@@ -412,19 +450,21 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
         }
     }
 
-    let env = Env { legs: &legs, hops: &hops, city_filters: &city_filters, trip, trip_active, budget, last };
+    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, budget, last };
     let leg0 = &legs[0];
-    let mut starts: Vec<String> = Vec::new();
+    let mut starts: Vec<u32> = Vec::new();
     for code in &stops[0].codes {
         for d in hops.departs(0, code) {
-            if !starts.contains(&d) {
-                starts.push(d);
+            if let Some(id) = table.code_id(&d) {
+                if !starts.contains(&id) {
+                    starts.push(id);
+                }
             }
         }
     }
-    for start in &starts {
-        let Some(f_all) = leg0.by_origin.get(start) else { continue };
-        let seq0 = vec![start.clone()];
+    for &start in &starts {
+        let Some(f_all) = leg0.by_origin.get(&start) else { continue };
+        let seq0 = vec![start];
         for (dest, fis) in groups(&env, leg0, f_all, 0, &seq0) {
             let ok: Vec<bool> = fis.iter().map(|&fi| leg0.dep_ord[fi] >= start_ord).collect();
             let n_f = fis.len();
@@ -456,7 +496,7 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
                     }
                 }
             }
-            let seq = vec![start.clone(), dest];
+            let seq = vec![start, dest];
             if last == 1 {
                 finish(&env, &seq, leg0, &fis, &state, &first_days, &mut combos, &mut codes_used);
             } else {
@@ -467,7 +507,7 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
 
     combos.sort_by(|a, b| a.min_price.partial_cmp(&b.min_price).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.codes.cmp(&b.codes)));
     let total_count = combos.iter().map(|c| c.count).sum();
-    let mut codes: Vec<String> = codes_used.into_iter().collect();
+    let mut codes: Vec<String> = codes_used.into_iter().map(|c| table.codes[c as usize].clone()).collect();
     codes.sort();
     let cities = codes.into_iter().map(|c| { let p = city_pair(&c); (c, p) }).collect();
     Overview { combos, total_count, cities }

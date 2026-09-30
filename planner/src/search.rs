@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::dates::{date_ordinal, date_only, naive_seconds, parse_naive, shift_date, stay_between, stay_days_secs, weekend_covered, ordinal};
+use crate::dates::{date_ordinal, date_only, naive_seconds, parse_naive, shift_date, stay_days_secs, weekend_covered, ordinal};
 use crate::flightcols::FlightCols;
 use crate::nearby::{distance_km, Hops, HOP_MIN_GAP_MIN};
 use crate::planquery::{trip_length_ok, CityFilter, PlanQuery};
@@ -371,11 +371,14 @@ pub struct View {
     pub total_days: Vec<i16>,
 }
 
+#[cfg(test)]
 fn stay_of(arrive: &str, depart: &str) -> (i64, bool) {
-    (stay_between(arrive, depart), crate::dates::has_both_weekend_days(arrive, depart))
+    (crate::dates::stay_between(arrive, depart), crate::dates::has_both_weekend_days(arrive, depart))
 }
 
-/// Дни в городах и маска выходных по остановкам.
+/// Дни в городах и маска выходных по остановкам (по строкам сегментов — эталон для
+/// chain_stays_num в тестах).
+#[cfg(test)]
 fn chain_stays(segs: &[&Segment], start_iso: &str) -> (Vec<i16>, u32) {
     let mut days = Vec::with_capacity(segs.len() + 1);
     let mut mask = 0u32;
@@ -397,14 +400,63 @@ fn chain_stays(segs: &[&Segment], start_iso: &str) -> (Vec<i16>, u32) {
     (days, mask)
 }
 
-/// Длина поездки — от даты первого вылета до даты последнего прилёта.
+/// Длина поездки — от даты первого вылета до даты последнего прилёта (эталон).
+#[cfg(test)]
 fn trip_days(segs: &[&Segment]) -> i64 {
     if segs.is_empty() {
         return 1;
     }
     let first = date_only(segs[0].departure_at.as_deref().unwrap_or(""));
     let last = date_only(segs[segs.len() - 1].arrival_at.as_deref().unwrap_or(""));
-    stay_between(&first, &last).max(1)
+    crate::dates::stay_between(&first, &last).max(1)
+}
+
+/// Номер дня 1970-01-01 (dates::ordinal): полночь дня ord — (ord − EPOCH_ORD) суток.
+const EPOCH_ORD: i64 = 719_163;
+
+fn midnight_secs(ord: i64) -> f64 {
+    (ord - EPOCH_ORD) as f64 * DAY_SECS
+}
+
+const DAY_SECS: f64 = 86_400.0;
+
+/// chain_stays по числовым колонкам рейсов цепочки (без разбора дат-строк): дни в
+/// городах и маска «оба выходных» — прилёт в первый город в начале окна (T00:00),
+/// последний город — FINAL_STAY_DAYS от даты прилёта.
+fn chain_stays_num(t: &FlightCols, chain: &[usize], start_ord: i64) -> (Vec<i16>, u32) {
+    let mut days = Vec::with_capacity(chain.len() + 1);
+    let mut mask = 0u32;
+    let (mut a_ts, mut a_ord) = (midnight_secs(start_ord), start_ord);
+    for k in 0..=chain.len() {
+        let (d_ts, d_ord) = if k < chain.len() {
+            (t.dep_ts[chain[k]], t.dep_ord[chain[k]])
+        } else {
+            (midnight_secs(a_ord + FINAL_STAY_DAYS), a_ord + FINAL_STAY_DAYS)
+        };
+        let (mut d, wk) = if a_ts.is_nan() || d_ts.is_nan() {
+            (0, false) // дата не разобралась — как у разбора строк
+        } else {
+            (stay_days_secs(a_ts, d_ts), weekend_covered(a_ts, a_ord, d_ts, d_ord))
+        };
+        if k == chain.len() {
+            d = d.max(1);
+        }
+        days.push(d.max(0) as i16);
+        mask |= (wk as u32) << k;
+        if k < chain.len() {
+            a_ts = t.arr_ts[chain[k]];
+            a_ord = t.arr_ord[chain[k]];
+        }
+    }
+    (days, mask)
+}
+
+/// trip_days по номерам дней: от даты первого вылета до даты последнего прилёта.
+fn trip_days_num(t: &FlightCols, chain: &[usize]) -> i64 {
+    match (chain.first(), chain.last()) {
+        (Some(&first), Some(&last)) => (t.arr_ord[last] - t.dep_ord[first]).max(1),
+        _ => 1,
+    }
 }
 
 pub fn pack_compact(ctx: &Ctx, chains: &[Vec<usize>]) -> View {
@@ -429,12 +481,12 @@ pub fn pack_compact(ctx: &Ctx, chains: &[Vec<usize>]) -> View {
     let start_iso = format!("{}T00:00:00", ctx.chain_start);
     let count = if legs > 0 { out_chains.len() / legs } else { 0 };
     let (mut days, mut weekend, mut total_days) = (Vec::with_capacity(count * (legs + 1)), Vec::with_capacity(count), Vec::with_capacity(count));
-    for n in 0..count {
-        let segs: Vec<&Segment> = (0..legs).map(|k| &segments[out_chains[n * legs + k] as usize]).collect();
-        let (d, mask) = chain_stays(&segs, &start_iso);
+    let start_ord = date_ordinal(&ctx.chain_start).unwrap_or(0);
+    for chain in chains.iter().take(count) {
+        let (d, mask) = chain_stays_num(ctx.table, chain, start_ord);
         days.extend(d);
         weekend.push(mask);
-        total_days.push(trip_days(&segs) as i16);
+        total_days.push(trip_days_num(ctx.table, chain) as i16);
     }
     let mut cities = HashMap::new();
     for s in &segments {
@@ -693,6 +745,30 @@ pub mod tests {
         }
         out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         out
+    }
+
+    #[test]
+    fn numeric_stays_match_segment_strings() {
+        // дни в городах, маска выходных и длина поездки по числовым колонкам ==
+        // прежний расчёт по строкам дат сегментов
+        let mut checked = 0;
+        for seed in 1..=8 {
+            let (stops, collected) = random_case(seed);
+            let table = FlightCols::from_collected(&collected);
+            let ctx = build_ctx(&stops, &table, None);
+            let mut check = |_: usize| Ok(());
+            let chains = search_cheapest(&ctx, 500, None, None, &mut check).unwrap();
+            let start_iso = format!("{}T00:00:00", ctx.chain_start);
+            let start_ord = date_ordinal(&ctx.chain_start).unwrap();
+            for chain in &chains {
+                let segs_owned: Vec<Segment> = chain.iter().map(|&fi| make_segment(&table.flight(fi))).collect();
+                let segs: Vec<&Segment> = segs_owned.iter().collect();
+                assert_eq!(chain_stays_num(&table, chain, start_ord), chain_stays(&segs, &start_iso), "seed {seed} {chain:?}");
+                assert_eq!(trip_days_num(&table, chain), trip_days(&segs), "seed {seed} {chain:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "мало цепочек: {checked}");
     }
 
     #[test]

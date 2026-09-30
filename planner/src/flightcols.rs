@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::sync::{Arc, Mutex};
 
+use rustc_hash::FxHashMap;
+
 use arrow::array::{Array, ArrayRef, BooleanArray, Float64Array, Int16Array, Int32Array, Int64Array, StringArray};
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -26,8 +28,19 @@ pub const STR_COLS: [&str; 6] = ["orig_city", "orig_airport", "dest", "dest_airp
 pub const NUM_COLS: [&str; 12] =
     ["leg", "price", "transfers", "duration", "hidden", "bag_incl", "pts_min", "layover", "dep_ts", "arr_ts", "dep_ord", "arr_ord"];
 
+/// Нет кода (пустая строка) в числовых колонках кодов.
+pub const NO_CODE: u32 = u32::MAX;
+
 pub struct FlightCols {
     pub n: usize,
+    /// Словарь кодов городов/аэропортов (все четыре колонки кодов) и числовые колонки:
+    /// перебор и наборы сравнивают и хэшируют числа, а не строки.
+    pub codes: Vec<String>,
+    pub code_ix: FxHashMap<String, u32>,
+    pub orig_city_id: Vec<u32>,
+    pub orig_airport_id: Vec<u32>,
+    pub dest_id: Vec<u32>,
+    pub dest_airport_id: Vec<u32>,
     pub leg: Vec<i16>,
     pub orig_city: Vec<String>,
     pub orig_airport: Vec<String>,
@@ -53,7 +66,9 @@ pub struct FlightCols {
 
 enum Raw {
     Tickets(Vec<Arc<Ticket>>),
-    Json(Vec<Option<String>>),
+    /// Колонка seg как есть (Arrow): строка разбирается только для запрошенного рейса,
+    /// без 135 тыс. отдельных String на всю джобу.
+    Json(StringArray),
     Lazy(String), // путь Parquet: колонка seg дочитывается при первом flight(i)
 }
 
@@ -83,12 +98,52 @@ impl FlightCols {
         }
         c.n = c.leg.len();
         c.raw = Mutex::new(Raw::Tickets(raw));
+        c.intern_codes();
         c
+    }
+
+    /// Числовые колонки кодов по словарю (строится здесь же).
+    fn intern_codes(&mut self) {
+        let mut ix: FxHashMap<String, u32> = FxHashMap::default();
+        let mut codes: Vec<String> = Vec::new();
+        let mut enc = |col: &[String]| -> Vec<u32> {
+            col.iter()
+                .map(|s| {
+                    if s.is_empty() {
+                        return NO_CODE;
+                    }
+                    if let Some(&id) = ix.get(s.as_str()) {
+                        return id;
+                    }
+                    let id = codes.len() as u32;
+                    codes.push(s.clone());
+                    ix.insert(s.clone(), id);
+                    id
+                })
+                .collect()
+        };
+        self.orig_city_id = enc(&self.orig_city);
+        self.orig_airport_id = enc(&self.orig_airport);
+        self.dest_id = enc(&self.dest);
+        self.dest_airport_id = enc(&self.dest_airport);
+        self.codes = codes;
+        self.code_ix = ix;
+    }
+
+    /// Номер кода (None — такого кода в рейсах нет).
+    pub fn code_id(&self, code: &str) -> Option<u32> {
+        self.code_ix.get(code).copied()
     }
 
     fn with_capacity(n: usize) -> FlightCols {
         FlightCols {
             n: 0,
+            codes: Vec::new(),
+            code_ix: FxHashMap::default(),
+            orig_city_id: Vec::new(),
+            orig_airport_id: Vec::new(),
+            dest_id: Vec::new(),
+            dest_airport_id: Vec::new(),
             leg: Vec::with_capacity(n),
             orig_city: Vec::with_capacity(n),
             orig_airport: Vec::with_capacity(n),
@@ -160,12 +215,12 @@ impl FlightCols {
         if let Raw::Lazy(path) = &*raw {
             let col = read_seg_column(path).unwrap_or_else(|e| {
                 eprintln!("[flightcols] {path}: колонка seg не прочитана: {e}");
-                Vec::new()
+                StringArray::from(Vec::<Option<&str>>::new())
             });
             *raw = Raw::Json(col);
         }
         match &*raw {
-            Raw::Json(v) => v.get(i).cloned().flatten(),
+            Raw::Json(a) if i < a.len() && !a.is_null(i) => Some(a.value(i).to_string()),
             _ => None,
         }
     }
@@ -311,11 +366,12 @@ impl FlightCols {
         }
         c.n = n;
         c.raw = Mutex::new(Raw::Lazy(path.to_string()));
+        c.intern_codes();
         Ok(c)
     }
 }
 
-fn read_seg_column(path: &str) -> Result<Vec<Option<String>>, String> {
+fn read_seg_column(path: &str) -> Result<StringArray, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| e.to_string())?;
     let schema = builder.schema().clone();
@@ -323,12 +379,17 @@ fn read_seg_column(path: &str) -> Result<Vec<Option<String>>, String> {
     let idx = schema.fields().iter().position(|f| f.name() == name).ok_or("нет колонки seg/raw")?;
     let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [idx]);
     let reader = builder.with_projection(mask).with_batch_size(1 << 16).build().map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
+    let mut parts: Vec<ArrayRef> = Vec::new();
     for b in reader {
         let b = b.map_err(|e| e.to_string())?;
-        out.extend(str_col(&b, name)?);
+        parts.push(cast(column(&b, name)?, &DataType::Utf8).map_err(|e| e.to_string())?);
     }
-    Ok(out)
+    if parts.is_empty() {
+        return Ok(StringArray::from(Vec::<Option<&str>>::new()));
+    }
+    let refs: Vec<&dyn Array> = parts.iter().map(|a| a.as_ref()).collect();
+    let all = arrow::compute::concat(&refs).map_err(|e| e.to_string())?;
+    all.as_any().downcast_ref::<StringArray>().cloned().ok_or_else(|| "seg не строка".to_string())
 }
 
 fn column<'a>(b: &'a RecordBatch, name: &str) -> Result<&'a ArrayRef, String> {
