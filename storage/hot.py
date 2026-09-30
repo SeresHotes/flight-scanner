@@ -181,7 +181,10 @@ def airport_city_map(conn: sqlite3.Connection) -> Dict[str, str]:
 def put_plan_flights(conn: sqlite3.Connection, job_id: str, collected: Dict[int, List[Dict[str, Any]]]) -> None:
     """Сохраняет собранные рейсы джобы (gzip JSON) для построения маршрутов по требованию."""
     import gzip
-    blob = gzip.compress(json.dumps({str(k): v for k, v in collected.items()}, ensure_ascii=False).encode())
+    # compresslevel=1: на 135 тыс. рейсов (200 МБ JSON) сжатие 5.5 с → 0.85 с при
+    # размере 25 → 35 МБ; уровень 9 по умолчанию держал джобу между загрузкой и стыковкой.
+    blob = gzip.compress(json.dumps({str(k): v for k, v in collected.items()}, ensure_ascii=False).encode(),
+                         compresslevel=1)
     conn.execute("INSERT OR REPLACE INTO plan_flights (job_id, created_at, data) VALUES (?, ?, ?)",
                  (job_id, datetime.now().isoformat(), blob))
     conn.commit()

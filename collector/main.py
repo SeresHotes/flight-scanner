@@ -13,10 +13,11 @@
 
 Запуск: uvicorn collector.main:app --host 0.0.0.0 --port 8001
 """
+import json
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from collector.config import Settings
@@ -24,6 +25,7 @@ from collector.engine import Engine, NotReady, SeriesRequest
 from collector.index import Index
 from collector.metrics import Metrics
 from collector.store import make_store
+from core.series_arrow import ARROW_MEDIA_TYPE, table_to_ipc
 
 
 class FetchItem(BaseModel):
@@ -135,15 +137,24 @@ def create_app(engine: Optional[Engine] = None, settings: Optional[Settings] = N
         return job.public()
 
     @app.get("/v1/requests/{job_id}/result")
-    def request_result(job_id: str) -> Dict[str, Any]:
+    def request_result(job_id: str, format: str = "json") -> Response:
+        """Билеты серии. format=arrow — Arrow IPC-поток в схеме озера (метаданные —
+        JSON в заголовке X-Series-Meta): без разбора в словари и JSON, так планировщик
+        берёт серию на порядок быстрее. По умолчанию — JSON {"tickets", …}, собранный
+        json.dumps напрямую (jsonable_encoder на тысячах билетов стоил ~0.6 с)."""
         e = eng()
         job = e.get_job(job_id)
         if job is None:
             raise HTTPException(404, "задание не найдено (истёк срок хранения?)")
         try:
-            return e.result(job)
+            res = e.result(job, as_table=(format == "arrow"))
         except NotReady:
             raise HTTPException(409, "задание ещё выполняется")
+        if format == "arrow":
+            table = res.pop("table")
+            return Response(content=table_to_ipc(table), media_type=ARROW_MEDIA_TYPE,
+                            headers={"X-Series-Meta": json.dumps(res)})
+        return Response(content=json.dumps(res, ensure_ascii=False), media_type="application/json")
 
     @app.get("/v1/series/exists")
     def series_exists(day: str, origin: Optional[str] = None, destination: Optional[str] = None,

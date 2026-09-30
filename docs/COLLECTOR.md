@@ -85,7 +85,7 @@ crawler (crawler/) ──POST /v1/batch (crawl)───────────
 |---|---|
 | `POST /v1/fetch` | одна серия `{origin, destination, day, value_min, value_max, direct, with_baggage, max_pages, client, ttl_seconds, wait}` → задание `{id, status, pages, tickets, cached, error}` |
 | `GET /v1/requests/{id}?wait=` | статус (long-poll до `wait` с) |
-| `GET /v1/requests/{id}/result` | `{tickets, pages, exhausted, error, cached}` — билеты отдаются один раз |
+| `GET /v1/requests/{id}/result` | `{tickets, pages, exhausted, error, cached}` — билеты отдаются один раз; `?format=arrow` — Arrow IPC-поток в схеме озера, метаданные в заголовке `X-Series-Meta` (так берёт планировщик: разбор по колонкам `core/series_arrow.py`, ~0.2 с на серию MOW→ANY против ~1.1 с через JSON) |
 | `POST /v1/batch` | список серий, `client: crawl`; у серии может быть `day_to` — окно дат |
 | `GET /v1/series/exists` | свежая ли серия (оценка объёма в планировщике) |
 | `GET /v1/coverage?params_key=&destination=` | `[origin, day, fetched_at, pages, tickets, exhausted, error]` |

@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from core.series_arrow import tickets_from_table
+
 TICKETS_PREFIX = "tickets"
 
 SCHEMA = pa.schema([
@@ -94,10 +96,14 @@ def series_table(tickets: List[Dict[str, Any]], series_id: int, observed_at: str
     return pa.Table.from_pylist(rows, schema=SCHEMA)
 
 
+def read_series_table(source, row_group: int) -> pa.Table:
+    """Одна row group файла Arrow-таблицей (source — pyarrow NativeFile или путь)."""
+    return pq.ParquetFile(source).read_row_group(row_group)
+
+
 def read_series(source, row_group: int) -> List[Dict[str, Any]]:
-    """Билеты одной row group файла (source — pyarrow NativeFile или путь)."""
-    pf = pq.ParquetFile(source)
-    return [from_row(r) for r in pf.read_row_group(row_group).to_pylist()]
+    """Билеты одной row group файла — словарями from_row (разбор по колонкам)."""
+    return tickets_from_table(read_series_table(source, row_group))
 
 
 def series_file_key(origin: Optional[str], destination: Optional[str], day: str,
@@ -184,5 +190,8 @@ class LakeWriter:
         return key
 
     def read(self, file_key: str, row_group: int = 0) -> List[Dict[str, Any]]:
+        return tickets_from_table(self.read_table(file_key, row_group))
+
+    def read_table(self, file_key: str, row_group: int = 0) -> pa.Table:
         with self.store.open_input_file(file_key) as f:
-            return read_series(f, row_group)
+            return read_series_table(f, row_group)
