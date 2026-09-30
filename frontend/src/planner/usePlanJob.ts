@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { JobStage } from '../data/jobsApi'
 import { fetchPlanJob } from './api'
+import { filtersParam, type PlanQuery } from './query'
 
 const POLL_MS = 1000
 
@@ -13,19 +14,21 @@ export interface PlanJobState {
   summary?: { count: number; combos: number; totalCount: number }
 }
 
-// Поллинг статуса джобы планировщика до готовности (или ошибки).
-export function usePlanJob(jobId: string | undefined): PlanJobState {
+// Поллинг статуса джобы планировщика до готовности (или ошибки): сбор рейсов, затем
+// стыковка под фильтры query (у готовой джобы с новыми фильтрами — только стыковка).
+export function usePlanJob(jobId: string | undefined, query: PlanQuery | null): PlanJobState {
   const [state, setState] = useState<PlanJobState>({ status: 'loading', progress: 0, total: 1 })
+  const fkey = query ? filtersParam(query) : ''
 
   useEffect(() => {
-    if (!jobId) return
+    if (!jobId || !query) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     setState({ status: 'loading', progress: 0, total: 1 })
 
     const poll = async () => {
       try {
-        const job = await fetchPlanJob(jobId)
+        const job = await fetchPlanJob(jobId, query)
         if (cancelled) return
         if (job.status === 'done') {
           setState({ status: 'done', progress: job.total, total: job.total, stage: job.stage, summary: job.summary })
@@ -46,7 +49,7 @@ export function usePlanJob(jobId: string | undefined): PlanJobState {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [jobId])
+  }, [jobId, fkey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return state
 }

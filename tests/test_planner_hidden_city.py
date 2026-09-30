@@ -7,7 +7,7 @@ H, цена всего билета. Город→любой: A→ANY с кор�
 промежуточные хабы. Любой→город: ANY→B, без hidden-city.
 """
 from core import planner
-from core.planner import PAGES_ANY, PAGES_CITY, PAGES_HIDDEN, Stop, collect_plan, estimate_plan, request_count
+from core.planner import PAGES_ANY, PAGES_CITY, Stop, collect_plan, estimate_plan, request_count
 from core.graphql_api import MAX_PAGES as MAX  # серия берётся целиком, PAGES_* — только оценка
 from core.segments import Builder, make_city_lookup
 
@@ -76,16 +76,17 @@ def _fetch(calls, any_tickets):
     return fetch
 
 
-def test_pair_plus_hidden_probe_with_corridor_below_best_regular():
+def test_pair_plus_full_any_series_hidden_below_best_regular():
     calls, ticks = [], []
     collected = collect_plan(STOPS, progress_cb=lambda: ticks.append(1),
                              fetch_fn=_fetch(calls, [VIA_PKX_HRB, VIA_PKX_CAN_EXPENSIVE,
                                                      VIA_OTHER_HUB, SECOND_HOP_PEK]),
                              airport_city={"PEK": "BJS"})
-    assert calls == [("MOW", "BJS", DAY, None, MAX),
-                     ("MOW", None, DAY, 36000, MAX)]   # коридор — лучший прямой A→B
-    assert mins[-2:] == [None, 18000]                         # нижняя граница — половина порога
-    assert len(ticks) == PAGES_CITY + PAGES_HIDDEN == request_count(STOPS)
+    # Обе серии — чистые «направление × день» (без ценового коридора): A→ANY та же,
+    # что у краулера; порог «дешевле лучшего прямого A→B» (36000) — при отборе.
+    assert calls == [("MOW", "BJS", DAY, None, MAX), ("MOW", None, DAY, None, MAX)]
+    assert mins[-2:] == [None, None]
+    assert len(ticks) == PAGES_CITY + PAGES_ANY == request_count(STOPS)
     leg = collected[0]
     assert [f["flight_number"] for f in leg] == ["10", "20", "50"]
     v = leg[1]                                            # SVO→PKX→HRB, выходим в PKX
@@ -121,23 +122,30 @@ def test_segment_from_virtual_flight_has_real_arrival_and_ticket_link():
     assert seg["baggage"]["included"] is True and seg["transfer_points"] == []
 
 
-def test_no_regular_flight_that_day_uses_max_cost_as_corridor():
+def test_no_regular_flight_that_day_takes_any_hidden():
     calls = []
 
     def fetch(origin=None, destination=None, day=None, *, value_max=None, max_pages=None, **_):
         calls.append((origin, destination, value_max))
         return _series([VIA_PKX_HRB] if destination is None else [])
-    collected = collect_plan(STOPS, fetch_fn=fetch, max_cost=80000, airport_city={"PKX": "BJS"})
-    assert calls == [("MOW", "BJS", None), ("MOW", None, 80000)]
+    collected = collect_plan(STOPS, fetch_fn=fetch, airport_city={"PKX": "BJS"})
+    assert calls == [("MOW", "BJS", None), ("MOW", None, None)]
     assert [f["flight_number"] for f in collected[0]] == ["20"]   # порога нет — берём
 
 
-def test_city_to_any_uses_corridor_and_free_hidden_city():
+def test_cheap_hidden_below_old_corridor_is_kept():
+    """Раньше A→ANY шла коридором [0.5 × порог, порог] (экономия страниц) и билет
+    сильно дешевле прямого терялся; из полной серии он теперь есть."""
+    cheap = {**VIA_PKX_HRB, "price": 12000, "flight_number": "60"}
+    collected = collect_plan(STOPS, fetch_fn=_fetch([], [cheap]))
+    assert [f["flight_number"] for f in collected[0]] == ["10", "60"]
+
+
+def test_city_to_any_full_series_and_free_hidden_city():
     stops = [Stop("cities", ["MOW"], ["", ""]), Stop("any", [], [DAY, DAY])]
     calls = []
-    collected = collect_plan(stops, fetch_fn=_fetch(calls, [DIRECT_PKX, VIA_PKX_HRB, VIA_OTHER_HUB]),
-                             max_cost=70000)
-    assert calls == [("MOW", None, DAY, 70000, MAX)]
+    collected = collect_plan(stops, fetch_fn=_fetch(calls, [DIRECT_PKX, VIA_PKX_HRB, VIA_OTHER_HUB]))
+    assert calls == [("MOW", None, DAY, None, MAX)]   # бюджет — фильтр стыковки, не сбора
     assert request_count(stops) == PAGES_ANY
     numbers = sorted(f["flight_number"] for f in collected[0])
     # обычные: 10 (SVO→PKX), 20 (→HRB), 40 (→HRB); hidden: 20 в PKX (25000 < 36000 прямого),
@@ -160,7 +168,7 @@ def test_estimate_matches_request_count_and_labels():
              Stop("any", [], ["2026-11-02", "2026-11-04"]), Stop("cities", ["MOW"], ["", ""])]
     est = estimate_plan(stops, CITY_INFO)
     assert [l["requests"] for l in est["legs"]] == [
-        2 * (2 * 1 * PAGES_CITY + 2 * PAGES_HIDDEN),   # 2 дня × (пары + hidden на город A)
+        2 * (2 * 1 * PAGES_CITY + 2 * PAGES_ANY),      # 2 дня × (пары + A→ANY на город A)
         2 * 1 * PAGES_ANY,                             # BJS → ANY: окно плеча — у BJS (2 дня)
         3 * 1 * PAGES_ANY,                             # ANY → MOW: окно «любого» (3 дня)
     ]

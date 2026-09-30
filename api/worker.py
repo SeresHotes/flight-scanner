@@ -192,23 +192,44 @@ def _save_quotes(conn, flights: List[Dict[str, Any]], observed_at: str, job_id: 
 
 # ------------------------- планировщик цепочек A→B→C --------------------------
 
+def build_view(stops: List[planner.Stop], collected: Dict[int, List[Dict[str, Any]]], pq,
+               city_info=None, on_progress: Optional[Callable[[int, int], None]] = None,
+               should_stop: Optional[Callable[[], bool]] = None,
+               on_stage: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+    """Результат джобы под фильтры pq («вид»): компактные цепочки (стыковка) +
+    наборы городов (core/overview). Зовут воркер сразу после сбора (рейсы ещё в
+    памяти) и API, когда те же рейсы смотрят с другими фильтрами."""
+    from core.overview import build_overview
+    city_info = city_info or make_city_lookup(load_airport_network())
+    # Компактный результат (сегменты один раз + плоские массивы индексов): на
+    # 100k+ цепочек словари Itinerary и их JSON съедали гигабайты → OOM api.
+    result = planner.build_itineraries_compact(
+        stops, collected, city_info=city_info, max_results=pq.max_results, max_cost=pq.max_cost,
+        should_stop=should_stop, on_progress=on_progress, query=pq)
+    if on_stage:
+        on_stage("combos")
+    # Наборы городов — все варианты под фильтры, без границ max_results/max_cost.
+    result["combos"] = build_overview(stops, collected, pq, city_info=city_info)
+    return result
+
+
 def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any]],
                         max_results: Optional[int] = None,
                         max_cost: Optional[float] = None,
-                        query: Optional[Dict[str, Any]] = None) -> None:
-    """Сбор данных под планировщик цепочек: обходит переходы, стыкует цепочки,
-    кладёт компактный результат в jobs.result_json. Котировки — в SQLite + озеро.
+                        query: Optional[Dict[str, Any]] = None,
+                        on_view: Optional[Callable[[Any, Dict[str, Any]], None]] = None) -> None:
+    """Джоба = сбор рейсов по остановкам запроса (серии «направление × день»), рейсы —
+    в plan_flights. Пока они в памяти, сразу стыкуем под фильтры запроса и отдаём
+    вид в on_view(pq, result) (кэш API) до выставления done. Котировки — в SQLite.
 
-    query — полный PlanQuery (core/planquery) со всеми фильтрами; без него
-    собирается из raw_stops/max_results/max_cost (фильтры открыты). max_results
-    обязателен (безлимит отклоняется на уровне API)."""
+    query — полный PlanQuery (core/planquery); без него собирается из raw_stops/
+    max_results/max_cost (фильтры открыты). Бюджет на сбор не влияет — это фильтр."""
     from core.planquery import PlanQuery
     conn = hot.connect(db_path)
     try:
         pq = PlanQuery.from_dict(query or {"stops": raw_stops, "maxResults": max_results,
                                            "maxCost": max_cost})
-        raw_stops, max_results, max_cost = pq.stops, pq.max_results, pq.max_cost
-        stops = planner.parse_stops(raw_stops)
+        stops = planner.parse_stops(pq.stops)
         total = planner.request_count(stops)
         city_info = make_city_lookup(load_airport_network())
         steps = [{"label": f"{leg['fromLabel']} → {leg['toLabel']}", "requests": leg["requests"]}
@@ -218,40 +239,29 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
 
         fetch_fn, workers = make_ticket_fetch(conn, rep.cache_hit)
         collected = planner.collect_plan(stops, progress_cb=rep.tick, fetch_fn=fetch_fn,
-                                         leg_cb=rep.step, max_cost=max_cost,
-                                         airport_city=hot.airport_city_map(conn),
+                                         leg_cb=rep.step, airport_city=hot.airport_city_map(conn),
                                          workers=workers)
         rep.flights(sum(len(v) for v in collected.values()))
-        # Рейсы — в БД: маршруты выбранных наборов городов строятся из них по требованию.
+        # Рейсы — в БД: из них строятся виды под другие фильтры и маршруты наборов.
         hot.put_plan_flights(conn, job_id, collected)
         rep.stage("build")
-
-        # Компактный результат (сегменты один раз + плоские массивы индексов): на
-        # 100k+ цепочек словари Itinerary и их JSON съедали гигабайты → OOM api.
-        result = planner.build_itineraries_compact(
-            stops, collected, city_info=city_info, max_results=max_results, max_cost=max_cost,
-            should_stop=lambda: is_cancel_requested(job_id),
-            on_progress=rep.build_progress(max_results), query=pq)
-
-        # Наборы городов — на бэке (core/overview): все варианты под фильтры запроса,
-        # без границ max_results/max_cost. Страницы отдаёт /api/plan/jobs/{id}/combos.
-        rep.stage("combos")
-        from core.overview import build_overview
-        result["combos"] = build_overview(stops, collected, pq, city_info=city_info)
+        result = build_view(stops, collected, pq, city_info=city_info,
+                            on_progress=rep.build_progress(pq.max_results),
+                            should_stop=lambda: is_cancel_requested(job_id), on_stage=rep.stage)
 
         if is_cancel_requested(job_id):  # не перетираем статус сброшенной джобы
             raise JobCancelled()
+        if on_view:
+            on_view(pq, result)
         count = result["count"]
-        result_json = planner.compact_to_json(result)
         del result
-        hot.update_job(conn, job_id, status="done", result_json=result_json)
-        del result_json
+        hot.update_job(conn, job_id, status="done")
         print(f"[worker] plan job {job_id} done: {count} цепочек")
 
-        # Котировки планировщику не нужны (результат — result_json, повторы — fetch_cache),
-        # они копят карту аэропорт → город и статистику. Поэтому пишем их уже
-        # после done, чтобы пользователь не ждал, и сбой тут не портит готовую джобу.
-        # Виртуальные рейсы hidden-city — не котировки (такого билета A→B нет), их не пишем.
+        # Котировки планировщику не нужны, они копят карту аэропорт → город и
+        # статистику. Поэтому пишем их уже после done, чтобы пользователь не ждал, и
+        # сбой тут не портит готовую джобу. Виртуальные рейсы hidden-city — не
+        # котировки (такого билета A→B нет), их не пишем.
         flights: List[Dict[str, Any]] = []
         for leg_flights in collected.values():
             flights += [f for f in leg_flights if not f.get("hidden_city")]

@@ -164,9 +164,33 @@ class PlanQuery:
         }
 
     def key(self) -> str:
-        """Хэш канонического запроса — ключ дедупликации джоб и кэша результата."""
-        canon = json.dumps(self.as_dict(), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        return hashlib.sha1(canon.encode()).hexdigest()[:16]
+        """Хэш всего запроса (сбор + фильтры) — ключ готового результата."""
+        return _hash(self.as_dict())
+
+    def collect_key(self) -> str:
+        """Ключ джобы: только то, что решает, КАКИЕ серии «направление × день» нужны, —
+        виды остановок, города, окна дат, радиус соседей. Фильтры и бюджет на сбор не
+        влияют (применяются при стыковке), поэтому смена фильтров — та же джоба."""
+        return _hash([{"kind": st["kind"], "codes": sorted(st["codes"]), "window": st["window"],
+                       "radiusKm": st.get("radiusKm") or 0} for st in self.stops])
+
+    def filters(self) -> Dict[str, Any]:
+        """Всё, кроме остановок: фильтры, бюджет, потолок цепочек (параметр f страниц
+        результата — core/planquery.PlanQuery.with_filters)."""
+        d = self.as_dict()
+        d.pop("stops")
+        return d
+
+    def view_key(self) -> str:
+        """Ключ результата стыковки внутри джобы: фильтры + бюджет + потолок цепочек."""
+        return _hash(self.filters())
+
+    def with_filters(self, filters: Optional[Dict[str, Any]]) -> "PlanQuery":
+        """Остановки этого запроса (джобы) + фильтры из filters (None — свои)."""
+        if filters is None:
+            return self
+        return PlanQuery.from_dict({**filters, "stops": self.stops,
+                                    "maxResults": filters.get("maxResults", self.max_results)})
 
     def mode(self) -> str:
         """Режим показа: 'combos' (наборы городов), если где-то «любой» или несколько
@@ -178,6 +202,11 @@ class PlanQuery:
 
     def has_city_filters(self) -> bool:
         return any(not c.is_open() for c in self.cities)
+
+
+def _hash(obj: Any) -> str:
+    canon = json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha1(canon.encode()).hexdigest()[:16]
 
 
 def filter_leg_flights(flights: List[Dict[str, Any]], leg: Optional[LegFilter]) -> List[Dict[str, Any]]:

@@ -44,10 +44,6 @@ FINAL_STAY_DAYS = 5           # пребывание в финальном го�
 # Это же — потолок страниц серии, поэтому прогресс никогда не перерастает оценку.
 PAGES_CITY = 1      # город → город: все билеты дня почти всегда в одной странице
 PAGES_ANY = 12      # город → любой / любой → город: до 4 800 самых дешёвых билетов в день
-PAGES_HIDDEN = 4    # A → ANY под hidden-city с коридором «дешевле лучшего A→B дня»
-HIDDEN_MIN_RATIO = 0.5  # нижняя граница коридора hidden-city: доля от порога. Без неё
-                        # страницы A→ANY (сортировка по цене) забивает дешёвая ближняя
-                        # Россия/СНГ и до зоны транзита через хаб серия не доходит.
 
 # Режимы REST-запроса (allow_indirect) — остались для core/anyscan (сбор X→ANY через
 # prices_for_dates); планировщик REST больше не использует.
@@ -163,41 +159,40 @@ def _leg_days(stops: List[Stop], i: int) -> int:
 
 def _leg_requests(stops: List[Stop], i: int) -> int:
     """Страниц на плечо i (см. раздел «сбор»): город→город — пары A×B по PAGES_CITY
-    плюс hidden-city A→ANY по PAGES_HIDDEN на город A; с «любым» концом — по
+    плюс hidden-city A→ANY по PAGES_ANY на город A; с «любым» концом — по
     PAGES_ANY на каждый конкретный город другого конца. Всё × дней окна."""
     from_stop, to_stop = stops[i], stops[i + 1]
     days = _leg_days(stops, i)
     if from_stop.kind == "cities" and to_stop.kind == "cities":
         a, b = max(1, len(from_stop.codes)), max(1, len(to_stop.codes))
-        return days * (a * b * PAGES_CITY + a * PAGES_HIDDEN)
+        return days * (a * b * PAGES_CITY + a * PAGES_ANY)
     anchor = from_stop if from_stop.kind == "cities" else to_stop
     return days * max(1, len(anchor.codes)) * PAGES_ANY
 
 
-def plan_series(stops: List[Stop], max_cost: Optional[float] = None):
-    """Детерминированные серии сбора: (плечо, origin|None, dest|None, день, value_min,
-    value_max, страниц). Серии hidden-city сюда не входят — их коридор зависит от
-    лучшей цены дня и известен только в сборе (в оценке они всегда «холодные»)."""
+def plan_series(stops: List[Stop]):
+    """Серии сбора «направление × день»: (плечо, origin|None, dest|None, день, страниц
+    в оценке). Ровно те, что запросит collect_plan (включая A→ANY под hidden-city)."""
     stops = collect_view(stops)
     out = []
-    vmax = int(max_cost) if max_cost else None
     for i in range(len(stops) - 1):
         from_stop, to_stop = stops[i], stops[i + 1]
         for day in _leg_dates(stops, i):
             if from_stop.kind == "cities" and to_stop.kind == "cities":
                 for a in from_stop.codes:
                     for b in to_stop.codes:
-                        out.append((i, a, b, day, None, None, PAGES_CITY))
+                        out.append((i, a, b, day, PAGES_CITY))
+                    out.append((i, a, None, day, PAGES_ANY))
             elif from_stop.kind == "cities":
                 for a in from_stop.codes:
-                    out.append((i, a, None, day, None, vmax, PAGES_ANY))
+                    out.append((i, a, None, day, PAGES_ANY))
             else:
                 for b in to_stop.codes:
-                    out.append((i, None, b, day, None, vmax, PAGES_ANY))
+                    out.append((i, None, b, day, PAGES_ANY))
     return out
 
 
-def estimate_plan(stops: List[Stop], city_info=None, max_cost: Optional[float] = None,
+def estimate_plan(stops: List[Stop], city_info=None,
                   is_cached: Optional[Callable[..., bool]] = None) -> Dict[str, Any]:
     """Оценка объёма сбора цепочки (совпадает с planner/estimate.ts): requests —
     всего страниц (по потолку серий), cached — сколько из них уже в кэше серий,
@@ -208,11 +203,10 @@ def estimate_plan(stops: List[Stop], city_info=None, max_cost: Optional[float] =
     if city_info is None:
         city_info = make_city_lookup(load_airport_network())
     stops = collect_view(stops)
-    from core.graphql_api import params_key
     cached_by_leg: Dict[int, int] = {}
     if is_cached is not None:
-        for i, origin, dest, day, vmin, vmax, pages in plan_series(stops, max_cost):
-            if is_cached(origin, dest, day, params_key(vmin, vmax), pages):
+        for i, origin, dest, day, pages in plan_series(stops):
+            if is_cached(origin, dest, day, "", pages):
                 cached_by_leg[i] = cached_by_leg.get(i, 0) + pages
     legs = []
     requests = cached = 0
@@ -243,10 +237,9 @@ def request_count(stops: List[Stop]) -> int:
 #
 # Источник — GraphQL prices_one_way (core/graphql_api): все билеты на дату. Планы
 # серий по видам плеча (серия = направление × день, страницы по 400):
-#   город → город   пары A×B, обычно одна страница; плюс hidden-city: A→ANY с
-#                   коридором «дешевле лучшего A→B того дня» (PAGES_HIDDEN);
-#   город → любой   A→ANY по дням, коридор value_max = max_cost, потолок PAGES_ANY
-#                   (сортировка по цене — теряются только самые дорогие);
+#   город → город   пары A×B, обычно одна страница; плюс hidden-city: вся A→ANY
+#                   дня, из неё — билеты через хаб B дешевле лучшего A→B того дня;
+#   город → любой   A→ANY по дням целиком (бюджет — фильтр стыковки, не сбора);
 #                   hidden-city выходит бесплатно: билет A→H→X даёт и рейс A→H;
 #   любой → город   ANY→B по дням, тот же потолок; hidden-city нет (нужен X→ANY).
 # «Запрос» в оценке = страница; прогресс идёт по страницам и добивается до оценки
@@ -294,10 +287,11 @@ def _airport_city_learn(flights: List[Dict[str, Any]], airport_city: Dict[str, s
 
 
 def _run_series(fetch_fn, origin: Optional[str], dest: Optional[str], day: str, pages: int,
-                value_max: Optional[float], progress_cb,
-                value_min: Optional[float] = None) -> List[Dict[str, Any]]:
-    """Одна серия с прогрессом: тик на каждую полученную страницу, в конце добивка
-    до `pages` (оценка серии), чтобы прогресс всегда сходился с total."""
+                progress_cb) -> List[Dict[str, Any]]:
+    """Одна серия «направление × день» целиком, без ценового коридора (ключ серии —
+    только направление и день, поэтому она общая у всех запросов и у краулера).
+    Прогресс: тик на каждую полученную страницу, в конце добивка до `pages` (оценка
+    серии), чтобы прогресс всегда сходился с total."""
     ticks = [0]
 
     def on_page(_page: int, _n: int) -> None:
@@ -308,9 +302,8 @@ def _run_series(fetch_fn, origin: Optional[str], dest: Optional[str], day: str, 
     # `pages` — только оценка для прогресса; серию берём целиком (до общего
     # предохранителя graphql_api.MAX_PAGES), иначе у крупных городов (MOW: до 21
     # страницы в день) терялись дорогие билеты.
-    series = fetch_fn(origin, dest, day, value_min=int(value_min) if value_min else None,
-                      value_max=int(value_max) if value_max else None,
-                      max_pages=max(pages, graphql_api.MAX_PAGES), progress_cb=on_page)
+    series = fetch_fn(origin, dest, day, max_pages=max(pages, graphql_api.MAX_PAGES),
+                      progress_cb=on_page)
     if progress_cb:
         for _ in range(pages - ticks[0]):
             progress_cb()
@@ -398,19 +391,18 @@ def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
 
             def city_unit(unit, to_codes=tuple(to_stop.codes)):
                 day, a = unit
-                direct = [_run_series(fetch, a, b, day, PAGES_CITY, None, progress_cb)
-                          for b in to_codes]
-                # hidden-city: A→ANY в коридоре [HIDDEN_MIN_RATIO × порог, порог],
-                # порог — лучший обычный A→B этого дня (без него — max_cost)
-                thr = _threshold([f for got in direct for f in got], lambda f: 0).get(0)
-                hidden = _run_series(fetch, a, None, day, PAGES_HIDDEN, thr or max_cost, progress_cb,
-                                     value_min=thr * HIDDEN_MIN_RATIO if thr else None)
-                return direct, thr, hidden
+                direct = [_run_series(fetch, a, b, day, PAGES_CITY, progress_cb) for b in to_codes]
+                # hidden-city: вся серия A→ANY дня (та же, что у краулера), отбор — ниже
+                hidden = _run_series(fetch, a, None, day, PAGES_ANY, progress_cb)
+                return direct, hidden
 
             units = [(day, a) for day in dates for a in from_stop.codes]
-            for direct, thr, hidden in _fetch_units(units, city_unit, workers):
+            for direct, hidden in _fetch_units(units, city_unit, workers):
                 for got in direct:
                     keep(got, "dest", allow_to)
+                # порог — лучший обычный A→B этого дня: виртуальный рейс через хаб B
+                # берём, только если он дешевле (без A→B — любой)
+                thr = _threshold([f for got in direct for f in got], lambda f: 0).get(0)
                 _airport_city_learn(hidden, airport_city)
                 hub_city = _hub_resolver(allow_to, airport_city)
                 virtual += hidden_city_flights(hidden, hub_city, {0: thr} if thr else {},
@@ -419,7 +411,7 @@ def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
             day_flights: Dict[str, List[Dict[str, Any]]] = {}
             units = [(day, a) for day in dates for a in from_stop.codes]
             got_all = _fetch_units(units, lambda u: _run_series(fetch, u[1], None, u[0], PAGES_ANY,
-                                                                max_cost, progress_cb), workers)
+                                                                progress_cb), workers)
             for (day, _a), got in zip(units, got_all):
                 keep(got, None, None)
                 day_flights.setdefault(day, []).extend(got)
@@ -434,7 +426,7 @@ def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
         else:                                                  # любой → город
             units = [(day, b) for day in dates for b in to_stop.codes]
             got_all = _fetch_units(units, lambda u: _run_series(fetch, None, u[1], u[0], PAGES_ANY,
-                                                                max_cost, progress_cb), workers)
+                                                                progress_cb), workers)
             for got in got_all:
                 keep(got, "dest", set(to_stop.codes))
         collected[i] = regular + virtual

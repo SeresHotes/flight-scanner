@@ -116,12 +116,12 @@ def test_plan_job_walks_stages_and_counts_steps(tmp_path, monkeypatch):
     assert [k for i, k in enumerate(keys) if i == 0 or keys[i - 1] != k] == ["fetch", "build", "combos"]
 
     # Два перехода по 3 дня окна; на каждом счётчик доходит до total (страницы:
-    # пара A→B по 1 + hidden-city A→ANY по PAGES_HIDDEN в день).
+    # пара A→B по 1 + A→ANY под hidden-city по PAGES_ANY в день).
     fetch_steps = [s["step"] for s in snaps if s["key"] == "fetch" and s["step"]]
     last_per_leg = {st["index"]: st for st in fetch_steps}
     assert set(last_per_leg) == {0, 1}
     assert all(st["count"] == 2 for st in fetch_steps)
-    per_leg = 3 * (1 + planner.PAGES_HIDDEN)
+    per_leg = 3 * (1 + planner.PAGES_ANY)
     assert [(st["done"], st["total"]) for st in last_per_leg.values()] == [(per_leg, per_leg)] * 2
     assert last_per_leg[0]["label"].endswith("(IST)") and "→" in last_per_leg[0]["label"]
 
@@ -152,7 +152,7 @@ def test_plan_quotes_failure_keeps_job_done(tmp_path, monkeypatch):
     conn, _ = _run(tmp_path, monkeypatch)
     job = hot.get_job(conn, "j1")
     assert job["status"] == "done", job["error"]
-    assert json.loads(job["result_json"])["count"] > 0
+    assert hot.get_plan_flights(conn, "j1")   # рейсы джобы сохранены до котировок
 
 
 def test_cache_hits_are_counted(tmp_path, monkeypatch):
