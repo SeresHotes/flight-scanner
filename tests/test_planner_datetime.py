@@ -19,6 +19,15 @@ def test_parse_datetime_always_naive():
     assert agg.parse_datetime("2026-11-05").tzinfo is None                 # только дата
 
 
+def test_fast_parse_matches_slow_path():
+    """Быстрый fromisoformat = прежний перебор форматов: смещение срезается, не
+    пересчитывается (локальное время как в строке)."""
+    for s in ("2026-11-05T10:00:00+09:00", "2026-11-05T10:00:00-05:00", "2026-11-05T23:59:59Z",
+              "2026-11-05T10:00:00", "2026-11-05 10:00:00", "2026-11-05"):
+        assert agg.parse_datetime(s) == agg._parse_datetime_slow(s), s
+    assert str(agg.parse_datetime("2026-11-05T10:00:00-05:00")) == "2026-11-05 10:00:00"
+
+
 def _flight(origin, dest, dep, dur=180, price=100):
     return {
         "origin": origin, "destination": dest, "departure_at": dep,

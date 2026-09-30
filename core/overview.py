@@ -103,8 +103,8 @@ def _compat(prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf,
         if cf.max_stay is not None:
             ok &= stay <= cf.max_stay
         if cf.must_cover:
-            f_ord = datetime.strptime(cf.must_cover[0], "%Y-%m-%d").date().toordinal()
-            t_ord = datetime.strptime(cf.must_cover[1], "%Y-%m-%d").date().toordinal()
+            f_ord = datetime.fromisoformat(cf.must_cover[0]).date().toordinal()
+            t_ord = datetime.fromisoformat(cf.must_cover[1]).date().toordinal()
             ok &= (arr_ord <= f_ord) & (dep_ord >= t_ord)
         if cf.require_weekend:
             ok &= dep_ord >= prev.weekend_ok_from[p_idx][:, None]
@@ -145,7 +145,7 @@ def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
                     if query is not None and i < len(query.cities) and not query.cities[i].is_open()}
     trip = query.trip_length if query is not None else [0, None]
     trip_active = bool(trip[0]) or trip[1] is not None
-    start_ord = datetime.strptime(_leg_dates(stops, 0)[0], "%Y-%m-%d").date().toordinal()
+    start_ord = datetime.fromisoformat(_leg_dates(stops, 0)[0]).date().toordinal()
 
     combos: List[Dict[str, Any]] = []
     codes_used = set()
