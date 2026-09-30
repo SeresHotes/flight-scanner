@@ -8,6 +8,7 @@ H, цена всего билета. Город→любой: A→ANY с кор�
 """
 from core import planner
 from core.planner import PAGES_ANY, PAGES_CITY, PAGES_HIDDEN, Stop, collect_plan, estimate_plan, request_count
+from core.graphql_api import MAX_PAGES as MAX  # серия берётся целиком, PAGES_* — только оценка
 from core.segments import Builder, make_city_lookup
 
 CITY_INFO = make_city_lookup({})
@@ -81,8 +82,8 @@ def test_pair_plus_hidden_probe_with_corridor_below_best_regular():
                              fetch_fn=_fetch(calls, [VIA_PKX_HRB, VIA_PKX_CAN_EXPENSIVE,
                                                      VIA_OTHER_HUB, SECOND_HOP_PEK]),
                              airport_city={"PEK": "BJS"})
-    assert calls == [("MOW", "BJS", DAY, None, PAGES_CITY),
-                     ("MOW", None, DAY, 36000, PAGES_HIDDEN)]   # коридор — лучший прямой A→B
+    assert calls == [("MOW", "BJS", DAY, None, MAX),
+                     ("MOW", None, DAY, 36000, MAX)]   # коридор — лучший прямой A→B
     assert mins[-2:] == [None, 18000]                         # нижняя граница — половина порога
     assert len(ticks) == PAGES_CITY + PAGES_HIDDEN == request_count(STOPS)
     leg = collected[0]
@@ -136,7 +137,7 @@ def test_city_to_any_uses_corridor_and_free_hidden_city():
     calls = []
     collected = collect_plan(stops, fetch_fn=_fetch(calls, [DIRECT_PKX, VIA_PKX_HRB, VIA_OTHER_HUB]),
                              max_cost=70000)
-    assert calls == [("MOW", None, DAY, 70000, PAGES_ANY)]
+    assert calls == [("MOW", None, DAY, 70000, MAX)]
     assert request_count(stops) == PAGES_ANY
     numbers = sorted(f["flight_number"] for f in collected[0])
     # обычные: 10 (SVO→PKX), 20 (→HRB), 40 (→HRB); hidden: 20 в PKX (25000 < 36000 прямого),
@@ -150,7 +151,7 @@ def test_any_to_city_has_no_hidden_city():
     stops = [Stop("any", [], [DAY, DAY]), Stop("cities", ["BJS"], ["", ""])]
     calls = []
     collected = collect_plan(stops, fetch_fn=_fetch(calls, [VIA_PKX_HRB]))
-    assert calls == [(None, "BJS", DAY, None, PAGES_ANY)]
+    assert calls == [(None, "BJS", DAY, None, MAX)]
     assert [f["flight_number"] for f in collected[0]] == ["10"]
 
 

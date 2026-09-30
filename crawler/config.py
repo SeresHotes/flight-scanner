@@ -31,8 +31,12 @@ class Settings:
     horizon_days: int = field(default_factory=lambda: _int("CRAWL_HORIZON_DAYS", 180))
     # Как часто пересчитывать план и досыпать очередь; сколько серий держать в очереди crawl.
     tick_seconds: float = field(default_factory=lambda: _float("CRAWL_TICK_SECONDS", 120))
-    queue_target: int = field(default_factory=lambda: _int("CRAWL_QUEUE_TARGET", 200))
-    max_pages: int = field(default_factory=lambda: _int("CRAWL_MAX_PAGES", 37))
+    queue_target: int = field(default_factory=lambda: _int("CRAWL_QUEUE_TARGET", 50))
+    max_pages: int = field(default_factory=lambda: _int("CRAWL_MAX_PAGES", 100))
+    # Окна дат: бюджет билетов на серию (≈ 25 страниц; окно = бюджет / плотность города)
+    # и длина окна для города без покрытия. CRAWL_WINDOW_TICKETS=0 — по одному дню.
+    window_tickets: int = field(default_factory=lambda: _int("CRAWL_WINDOW_TICKETS", 10_000))
+    unknown_window_days: int = field(default_factory=lambda: _int("CRAWL_UNKNOWN_WINDOW_DAYS", 30))
     # Целевая свежесть по дальности даты вылета (часы). Не чаще раза в трое суток:
     # источник сам кэширует цены ~сутки, а ежедневный опрос ближних дат съедал бы
     # квоту в ущерб первому проходу (решение пользователя 29.09.2026).

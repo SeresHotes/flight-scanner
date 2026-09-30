@@ -30,6 +30,7 @@ class FetchItem(BaseModel):
     origin: Optional[str] = None
     destination: Optional[str] = None
     day: str
+    day_to: Optional[str] = None   # окно дат (включительно): ответ раскладывается по дням
     value_min: Optional[int] = None
     value_max: Optional[int] = None
     direct: Optional[bool] = None
@@ -88,7 +89,8 @@ def create_app(engine: Optional[Engine] = None, settings: Optional[Settings] = N
             return SeriesRequest(item.origin, item.destination, item.day, value_min=item.value_min,
                                  value_max=item.value_max, direct=item.direct,
                                  with_baggage=item.with_baggage,
-                                 max_pages=min(item.max_pages or s.max_pages, s.max_pages))
+                                 max_pages=min(item.max_pages or s.max_pages, s.max_pages),
+                                 day_to=item.day_to)
         except ValueError as e:
             raise HTTPException(400, str(e))
 

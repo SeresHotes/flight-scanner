@@ -26,6 +26,7 @@ from array import array
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional
 
+from core import graphql_api
 from core.dates import get_date_range, parse_datetime
 from core.network import load_airport_network
 from core.segments import Builder, arrival_of, date_only, make_city_lookup, stay_between
@@ -304,9 +305,12 @@ def _run_series(fetch_fn, origin: Optional[str], dest: Optional[str], day: str, 
             ticks[0] += 1
             progress_cb()
 
+    # `pages` — только оценка для прогресса; серию берём целиком (до общего
+    # предохранителя graphql_api.MAX_PAGES), иначе у крупных городов (MOW: до 21
+    # страницы в день) терялись дорогие билеты.
     series = fetch_fn(origin, dest, day, value_min=int(value_min) if value_min else None,
                       value_max=int(value_max) if value_max else None,
-                      max_pages=pages, progress_cb=on_page)
+                      max_pages=max(pages, graphql_api.MAX_PAGES), progress_cb=on_page)
     if progress_cb:
         for _ in range(pages - ticks[0]):
             progress_cb()
@@ -347,7 +351,6 @@ def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
     max_cost — потолок цены всей поездки: коридор value_max для ANY-серий,
     airport_city — карта аэропорт → город из накопленных котировок (дополняется
       по ходу сбора); network — не используется, оставлен для совместимости вызова."""
-    from core import graphql_api
     fetch = fetch_fn or graphql_api.fetch_series
     stops = collect_view(stops)
     airport_city = dict(airport_city or {})

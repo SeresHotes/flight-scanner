@@ -9,7 +9,7 @@ import io
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -151,6 +151,35 @@ class LakeWriter:
         data = sink.getvalue()
         self.store.put_bytes(key, data)
         self.index.attach_file(key, day, len(data), [(series_id, 0)], observed=observed)
+        self.files_written += 1
+        return key
+
+    def write_window(self, parts: List[Tuple[int, str, List[Dict[str, Any]]]], origin: Optional[str],
+                     destination: Optional[str], day_from: str, day_to: str, params_key: str,
+                     observed: datetime) -> str:
+        """Окно дат одним файлом: parts — [(series_id, день, билеты)], row group на каждый
+        непустой день. Путь — как у серии первого дня с `to=<последний день>` в параметрах:
+        tickets/date=<первый день>/origin=X/X-ANY__to=<последний день>__<время>.parquet.
+        Пустые дни ссылаются на тот же файл (row group 0, билетов 0 — не читаются)."""
+        window_key = "&".join(p for p in (params_key, f"to={day_to}") if p)
+        key = series_file_key(origin, destination, day_from, window_key, observed)
+        sink = io.BytesIO()
+        placements: List[Tuple[int, int]] = []
+        stamp = observed.isoformat(timespec="seconds")
+        with pq.ParquetWriter(sink, SCHEMA, compression="zstd") as w:
+            rg = 0
+            for sid, _day, tickets in parts:
+                if tickets:
+                    w.write_table(series_table(tickets, sid, stamp), row_group_size=len(tickets))
+                    placements.append((sid, rg))
+                    rg += 1
+                else:
+                    placements.append((sid, 0))
+            if rg == 0:
+                w.write_table(series_table([], parts[0][0] if parts else 0, stamp))
+        data = sink.getvalue()
+        self.store.put_bytes(key, data)
+        self.index.attach_file(key, day_from, len(data), placements, observed=observed)
         self.files_written += 1
         return key
 
