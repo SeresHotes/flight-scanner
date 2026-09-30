@@ -27,7 +27,7 @@ use crate::airports::search_airports;
 use crate::collector::{collector_url, CollectorClient};
 use crate::hot::{self, Job};
 use crate::planquery::PlanQuery;
-use crate::search::{build_combo_routes, Aborted};
+use crate::search::{build_combo_views, Aborted, ComboRoutes};
 use crate::stops::{estimate_plan, is_valid_max_results, parse_stops, Estimate, Series, DEFAULT_MAX_RESULTS, MAX_REQUESTS, MAX_RESULTS};
 use crate::worker::{self, CancelSet, ViewResult, FETCH_CACHE_TTL_SECONDS};
 
@@ -68,7 +68,7 @@ impl Executor {
 pub struct ViewEntry {
     pub result: ViewResult,
     pub query: PlanQuery,
-    pub combo_routes: Mutex<Vec<(String, Arc<Vec<Value>>)>>,
+    pub combo_routes: Mutex<Vec<(String, Arc<ComboRoutes>)>>,
 }
 
 /// Строящийся вид: этап, прогресс стыковки, ошибка.
@@ -442,7 +442,7 @@ fn default_routes_limit() -> i64 {
 
 /// Маршруты выбранных наборов — по требованию из сохранённых рейсов джобы с фильтрами
 /// вида, кэш по набору ключей в записи вида.
-fn combo_routes(app: &AppState, job_id: &str, entry: &ViewEntry, wanted: &[String]) -> Option<Arc<Vec<Value>>> {
+fn combo_routes(app: &AppState, job_id: &str, entry: &ViewEntry, wanted: &[String]) -> Option<Arc<ComboRoutes>> {
     let mut keys: Vec<String> = wanted.to_vec();
     keys.sort();
     keys.dedup();
@@ -453,7 +453,7 @@ fn combo_routes(app: &AppState, job_id: &str, entry: &ViewEntry, wanted: &[Strin
     let table = hot::get_plan_flights(&app.db_path, job_id).ok().flatten()?;
     let stops = parse_stops(&entry.query.stops);
     let combos: Vec<Vec<String>> = keys.iter().map(|c| c.split('-').map(|s| s.to_string()).collect()).collect();
-    let items = Arc::new(build_combo_routes(&stops, &table, &combos, Some(&entry.query)));
+    let items = Arc::new(build_combo_views(&stops, &table, &combos, Some(&entry.query)));
     let mut cache = entry.combo_routes.lock().unwrap();
     if cache.len() >= 8 {
         cache.remove(0);
@@ -475,8 +475,7 @@ async fn plan_job_routes(State(app): State<Arc<AppState>>, Path(job_id): Path<St
             return page;
         }
         let Some(items) = combo_routes(&app, &job_id, &entry, &wanted) else { return json!({"status": "not_ready"}) };
-        let end = items.len().min(offset + limit);
-        json!({"status": "ok", "count": items.len(), "total": items.len(), "offset": offset, "limit": limit, "items": items[offset.min(end)..end]})
+        json!({"status": "ok", "count": items.len(), "total": items.len(), "offset": offset, "limit": limit, "items": items.page(offset, limit)})
     })
     .await
     .unwrap_or(Value::Null);

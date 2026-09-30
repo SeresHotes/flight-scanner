@@ -701,12 +701,45 @@ pub fn combo_key(codes: &[String]) -> String {
     codes.join("-")
 }
 
+/// Маршруты выбранных наборов: компактные виды наборов + общий порядок по цене.
+/// JSON маршрута собирается только для запрошенной страницы (page) — API отдаёт по
+/// 50, а наборы дают тысячи маршрутов.
+pub struct ComboRoutes {
+    views: Vec<(String, View)>,
+    /// (вид, номер цепочки) по возрастанию цены — как прежняя сортировка готовых JSON.
+    order: Vec<(usize, usize)>,
+}
+
+impl ComboRoutes {
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// Itinerary позиций offset..offset+limit (id — позиция + 1, combo — ключ набора).
+    pub fn page(&self, offset: usize, limit: usize) -> Vec<Value> {
+        let end = self.order.len().min(offset.saturating_add(limit));
+        (offset.min(end)..end)
+            .map(|pos| {
+                let (v, n) = self.order[pos];
+                let (key, view) = &self.views[v];
+                let mut it = view.materialize(n);
+                it["combo"] = Value::String(key.clone());
+                it["id"] = json!(pos + 1);
+                it
+            })
+            .collect()
+    }
+}
+
 /// Маршруты выбранных наборов городов: на каждый набор — тот же A* по сохранённым
-/// рейсам, но остановки зафиксированы кодами набора. Itinerary по возрастанию цены,
-/// у каждого поле combo.
-pub fn build_combo_routes(stops: &[Stop], table: &FlightCols, combos: &[Vec<String>], query: Option<&PlanQuery>) -> Vec<Value> {
+/// рейсам, но остановки зафиксированы кодами набора.
+pub fn build_combo_views(stops: &[Stop], table: &FlightCols, combos: &[Vec<String>], query: Option<&PlanQuery>) -> ComboRoutes {
     let max_cost = query.and_then(|q| q.max_cost);
-    let mut out: Vec<Value> = Vec::new();
+    let mut views: Vec<(String, View)> = Vec::new();
     for codes in combos {
         if codes.len() != stops.len() {
             continue;
@@ -718,18 +751,24 @@ pub fn build_combo_routes(stops: &[Stop], table: &FlightCols, combos: &[Vec<Stri
             .collect();
         let mut check = |_: usize| Ok(());
         let Ok(view) = build_itineraries_compact(&fixed, table, COMBO_MAX_RESULTS as usize, max_cost, query, &mut check) else { continue };
-        let key = combo_key(codes);
+        views.push((combo_key(codes), view));
+    }
+    // цена маршрута — сумма цен сегментов в порядке плеч (как total_price в materialize)
+    let mut priced: Vec<(f64, usize, usize)> = Vec::new();
+    for (v, (_, view)) in views.iter().enumerate() {
         for n in 0..view.count {
-            let mut it = view.materialize(n);
-            it["combo"] = Value::String(key.clone());
-            out.push(it);
+            let price: f64 = (0..view.legs).map(|k| view.segments[view.chains[n * view.legs + k] as usize].price).sum();
+            priced.push((price, v, n));
         }
     }
-    out.sort_by(|a, b| a["total_price"].as_f64().unwrap_or(0.0).partial_cmp(&b["total_price"].as_f64().unwrap_or(0.0)).unwrap_or(Ordering::Equal));
-    for (n, it) in out.iter_mut().enumerate() {
-        it["id"] = json!(n + 1);
-    }
-    out
+    priced.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal)); // устойчивая, как прежде
+    ComboRoutes { views, order: priced.into_iter().map(|(_, v, n)| (v, n)).collect() }
+}
+
+/// Все маршруты выбранных наборов готовыми Itinerary (по возрастанию цены, с combo и id).
+pub fn build_combo_routes(stops: &[Stop], table: &FlightCols, combos: &[Vec<String>], query: Option<&PlanQuery>) -> Vec<Value> {
+    let routes = build_combo_views(stops, table, combos, query);
+    routes.page(0, routes.len())
 }
 
 #[cfg(test)]
