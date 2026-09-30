@@ -578,24 +578,129 @@
   },
   {
    "id": 12,
+   "title": "Запас свежести по дням вылета (7 − возраст в сутках)",
+   "type": "barchart",
+   "gridPos": {
+    "x": 0,
+    "y": 21,
+    "w": 24,
+    "h": 8
+   },
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "flights-clickhouse"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "flights-clickhouse"
+     },
+     "editorType": "sql",
+     "rawSql": "SELECT formatDateTime(day, '%d.%m') AS \"день\", round(7 - avg(age_h) / 24, 2) AS \"среднее по городам\", round(7 - max(age_h) / 24, 2) AS \"худший город\", count() AS \"городов\" FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day ORDER BY day",
+     "queryType": "table",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 80,
+      "lineWidth": 0
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "softMax": 7,
+     "decimals": 1,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0
+       },
+       {
+        "color": "green",
+        "value": 4
+       }
+      ]
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "худший город"
+      },
+      "properties": [
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": true,
+         "legend": true,
+         "tooltip": false
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "городов"
+      },
+      "properties": [
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": true,
+         "legend": true,
+         "tooltip": false
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "orientation": "vertical",
+    "xField": "день",
+    "showValue": "never",
+    "xTickLabelSpacing": 100,
+    "barWidth": 0.9,
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": false
+    }
+   },
+   "description": "7 — только что обновлено, минус 1 за каждые сутки. ≥ 4 — в пределах 72 ч (цель до 60 дней вперёд), 0…4 — до недели (цель для дальних дат), < 0 — старше недели. Пары без данных и с ошибкой источника не учитываются."
+  },
+  {
+   "id": 13,
    "type": "row",
    "title": "Ручка GraphQL и очередь",
    "collapsed": false,
    "gridPos": {
     "x": 0,
-    "y": 21,
+    "y": 29,
     "w": 24,
     "h": 1
    },
    "panels": []
   },
   {
-   "id": 13,
+   "id": 14,
    "title": "Страниц в минуту по клиентам",
    "type": "timeseries",
    "gridPos": {
     "x": 0,
-    "y": 22,
+    "y": 30,
     "w": 12,
     "h": 8
    },
@@ -633,12 +738,12 @@
    "description": "Лимит источника — 60 запросов в минуту на токен."
   },
   {
-   "id": 14,
+   "id": 15,
    "title": "Очередь коллектора",
    "type": "timeseries",
    "gridPos": {
     "x": 12,
-    "y": 22,
+    "y": 30,
     "w": 12,
     "h": 8
    },
@@ -671,12 +776,12 @@
    "options": {}
   },
   {
-   "id": 15,
+   "id": 16,
    "title": "429 и ошибки в минуту",
    "type": "timeseries",
    "gridPos": {
     "x": 0,
-    "y": 30,
+    "y": 38,
     "w": 12,
     "h": 8
    },
@@ -709,12 +814,12 @@
    "options": {}
   },
   {
-   "id": 16,
+   "id": 17,
    "title": "Приложение: серии, кэш, задержка",
    "type": "timeseries",
    "gridPos": {
     "x": 12,
-    "y": 30,
+    "y": 38,
     "w": 12,
     "h": 8
    },
@@ -764,25 +869,25 @@
    "options": {}
   },
   {
-   "id": 17,
+   "id": 18,
    "type": "row",
    "title": "Машина и хранилище",
    "collapsed": false,
    "gridPos": {
     "x": 0,
-    "y": 38,
+    "y": 46,
     "w": 24,
     "h": 1
    },
    "panels": []
   },
   {
-   "id": 18,
+   "id": 19,
    "title": "Нагрузка VM",
    "type": "timeseries",
    "gridPos": {
     "x": 0,
-    "y": 39,
+    "y": 47,
     "w": 12,
     "h": 8
    },
@@ -816,12 +921,12 @@
    "options": {}
   },
   {
-   "id": 19,
+   "id": 20,
    "title": "Озеро и бакет, ГБ",
    "type": "timeseries",
    "gridPos": {
     "x": 12,
-    "y": 39,
+    "y": 47,
     "w": 12,
     "h": 8
    },
@@ -856,12 +961,12 @@
    "description": "Жёсткий потолок бакета — 200 ГБ (terraform), ретеншн удаляет старые файлы выше порога."
   },
   {
-   "id": 20,
+   "id": 21,
    "title": "Серий и билетов в минуту",
    "type": "timeseries",
    "gridPos": {
     "x": 0,
-    "y": 47,
+    "y": 55,
     "w": 12,
     "h": 8
    },
@@ -907,12 +1012,12 @@
    "options": {}
   },
   {
-   "id": 21,
+   "id": 22,
    "title": "Файлы озера и удаления ретеншном",
    "type": "timeseries",
    "gridPos": {
     "x": 12,
-    "y": 47,
+    "y": 55,
     "w": 12,
     "h": 8
    },

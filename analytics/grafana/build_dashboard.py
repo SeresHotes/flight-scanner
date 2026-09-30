@@ -117,6 +117,34 @@ def build() -> dict:
               "GROUP BY origin ORDER BY max(age_h) DESC LIMIT 20", 12, y, ptype="table", kind="table"),
     ]
     y += 8
+    # Запас свежести по дню вылета: 7 − возраст в сутках. Только что собранный день = 7,
+    # дальше убывает на 1 в сутки; ниже 0 — старше недели. Худший город и число городов —
+    # только в подсказке (скрыты с графика), чтобы 180 столбцов не двоились.
+    hidden = {"id": "custom.hideFrom", "value": {"viz": True, "legend": True, "tooltip": False}}
+    panels += [
+        panel("Запас свежести по дням вылета (7 − возраст в сутках)",
+              "SELECT formatDateTime(day, '%d.%m') AS \"день\", "
+              "round(7 - avg(age_h) / 24, 2) AS \"среднее по городам\", "
+              "round(7 - max(age_h) / 24, 2) AS \"худший город\", count() AS \"городов\" "
+              "FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day ORDER BY day",
+              0, y, w=24, ptype="barchart", kind="table",
+              description="7 — только что обновлено, минус 1 за каждые сутки. ≥ 4 — в пределах 72 ч "
+                          "(цель до 60 дней вперёд), 0…4 — до недели (цель для дальних дат), < 0 — старше недели. "
+                          "Пары без данных и с ошибкой источника не учитываются.",
+              extra={"fieldConfig": {"defaults": {"custom": {"fillOpacity": 80, "lineWidth": 0},
+                                                  "color": {"mode": "thresholds"}, "softMax": 7, "decimals": 1,
+                                                  "thresholds": {"mode": "absolute", "steps": [
+                                                      {"color": "red", "value": None},
+                                                      {"color": "orange", "value": 0},
+                                                      {"color": "green", "value": 4}]}},
+                                     "overrides": [{"matcher": {"id": "byName", "options": name},
+                                                    "properties": [hidden]}
+                                                   for name in ("худший город", "городов")]},
+                     "options": {"orientation": "vertical", "xField": "день", "showValue": "never",
+                                 "xTickLabelSpacing": 100, "barWidth": 0.9,
+                                 "tooltip": {"mode": "multi"}, "legend": {"showLegend": False}}}),
+    ]
+    y += 8
     panels.append(row("Ручка GraphQL и очередь", y))
     y += 1
     panels += [
