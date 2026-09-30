@@ -35,13 +35,21 @@ def p90(tickets: Optional[List[int]]) -> Optional[int]:
     return ranked[int(0.9 * (len(ranked) - 1))]
 
 
+def mean(tickets: Optional[List[int]]) -> Optional[int]:
+    """Средняя плотность города (билетов в день) — для оценки страниц: p90 режет окно с
+    запасом, но как оценка работы завышает её в разы (дальние даты реже)."""
+    if not tickets:
+        return None
+    return -(-sum(tickets) // len(tickets))
+
+
 def densities(coverage: Iterable[Sequence[Any]]) -> Dict[str, int]:
-    """Город → плотность (p90 билетов в день) по строкам /v1/coverage без ошибок."""
+    """Город → средняя плотность (билетов в день) по строкам /v1/coverage без ошибок."""
     by_city: Dict[str, List[int]] = {}
     for row in coverage:
         if not row[6]:
             by_city.setdefault(row[0], []).append(int(row[4] or 0))
-    return {c: p90(t) for c, t in by_city.items()}
+    return {c: mean(t) for c, t in by_city.items()}
 
 
 def estimate_pages(density: Optional[int], days: int) -> int:
@@ -165,14 +173,14 @@ def plan(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: dat
                 summary["queued_excluded"] += 1
                 continue
             due.append(Item(city, day, score, offset, reason))
-        density = p90(tickets_by_city.get(city))
+        known = tickets_by_city.get(city)
         if window_tickets is None or quarantined:
             for it in due:
-                it.est_pages = estimate_pages(density, 1)
+                it.est_pages = estimate_pages(mean(known), 1)
             items.extend(due)
         else:
             items.extend(_windows(due, targets, _window_days(
-                density, window_tickets, unknown_window_days, horizon_days), density))
+                p90(known), window_tickets, unknown_window_days, horizon_days), mean(known)))
     rank = {c: i for i, c in enumerate(cities)}
     items.sort(key=lambda it: (-it.score, it.offset, rank[it.origin]))
     summary["oldest_h"] = round(summary["oldest_h"], 1)

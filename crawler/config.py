@@ -31,10 +31,10 @@ class Settings:
     horizon_days: int = field(default_factory=lambda: _int("CRAWL_HORIZON_DAYS", 180))
     # Как часто пересчитывать план и досыпать очередь; сколько серий держать в очереди crawl.
     tick_seconds: float = field(default_factory=lambda: _float("CRAWL_TICK_SECONDS", 120))
-    # Глубина очереди — в оценочных страницах (плотность × дни / 400): ~4 минуты работы
-    # ручки на 60/мин, больше тика — коллектор не простаивает между тиками. Окон — не
+    # Глубина очереди — в оценочных страницах (средняя плотность × дни / 400): ~10 минут
+    # работы ручки на 60/мин (оценка грубая — с запасом к тику в 2 мин). Окон — не
     # больше queue_target (предохранитель: при неверной оценке очередь не раздувается).
-    queue_pages: int = field(default_factory=lambda: _int("CRAWL_QUEUE_PAGES", 240))
+    queue_pages: int = field(default_factory=lambda: _int("CRAWL_QUEUE_PAGES", 600))
     queue_target: int = field(default_factory=lambda: _int("CRAWL_QUEUE_TARGET", 500))
     max_pages: int = field(default_factory=lambda: _int("CRAWL_MAX_PAGES", 100))
     # Окна дат: бюджет билетов на серию (≈ 25 страниц; окно = бюджет / плотность города)
