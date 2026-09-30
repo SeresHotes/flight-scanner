@@ -28,7 +28,6 @@ export interface PlanQuery {
   cities: CityQuery[] // == stops
   legs: LegQuery[] // == stops - 1
   tripLength: [number, number | null]
-  maxCost: number | null // бюджет поездки: фильтр и коридор загрузки «любых» городов
 }
 
 // Границы слайдеров (запрос задаётся до данных, поэтому границы фиксированные).
@@ -90,7 +89,6 @@ export function toApi(q: PlanQuery) {
       hiddenCity: l.hiddenCity,
     })),
     tripLength: q.tripLength,
-    maxCost: q.maxCost,
   }
 }
 
@@ -123,7 +121,6 @@ export function encodeQuery(q: PlanQuery): URLSearchParams {
     sp.append('lf', [l.maxTransfers, l.minLayoverMin, l.travelMin[0], l.travelMin[1] ?? '', BAG[l.baggage], l.hiddenCity ? 1 : 0].join(F))
   }
   sp.set('tl', `${q.tripLength[0]}${F}${q.tripLength[1] ?? ''}`)
-  if (q.maxCost !== null) sp.set('mc', String(q.maxCost))
   return sp
 }
 
@@ -163,8 +160,7 @@ export function decodeQuery(sp: URLSearchParams, nextId: () => string): PlanQuer
     stops,
     cities,
     legs,
-    tripLength: tl ? [Number(tl[0]) || 0, numOrNull(tl[1])] : [0, null],
-    maxCost: numOrNull(sp.get('mc') ?? undefined),
+    tripLength: tl ? [Number(tl[0]) || 0, numOrNull(tl[1])] : [0, null], // параметр mc (бюджет) удалён — игнорируется
   })
 }
 

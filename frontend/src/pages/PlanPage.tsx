@@ -28,7 +28,6 @@ function initialQuery(): PlanQuery {
     cities: [],
     legs: [],
     tripLength: [0, null],
-    maxCost: null,
   })
 }
 

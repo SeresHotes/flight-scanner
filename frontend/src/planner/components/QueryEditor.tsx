@@ -74,12 +74,7 @@ export function QueryEditor({
         ＋ добавить остановку
       </button>
 
-      <TripLengthFilter
-        value={query.tripLength}
-        maxCost={query.maxCost}
-        onChange={(tripLength) => onChange({ ...query, tripLength })}
-        onMaxCost={(maxCost) => onChange({ ...query, maxCost })}
-      />
+      <TripLengthFilter value={query.tripLength} onChange={(tripLength) => onChange({ ...query, tripLength })} />
     </div>
   )
 }

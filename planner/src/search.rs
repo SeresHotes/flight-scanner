@@ -335,7 +335,7 @@ fn stay_ok(cf: &CityFilter, cover: Option<Option<(i64, i64)>>, arrive_ts: f64, a
 }
 
 /// Цепочки (индексы рейсов в table) по возрастанию цены, не больше max_results.
-pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, query: Option<&PlanQuery>, check: &mut StepCheck) -> Result<Vec<Vec<usize>>, Aborted> {
+pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>, check: &mut StepCheck) -> Result<Vec<Vec<usize>>, Aborted> {
     let t = ctx.table;
     let last = ctx.last;
     let lb = completion_lb(ctx);
@@ -385,11 +385,6 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, que
         let cf = city_filters[i];
         for k in start..list.idxs.len() {
             let f = node.g + list.keys[k];
-            if let Some(mc) = max_cost {
-                if f > mc {
-                    return;
-                }
-            }
             let fi = list.idxs[k];
             if t.dep_ord[fi] < min_depart_ord(i, node.arrive_ord) {
                 continue;
@@ -413,11 +408,8 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, que
 
     for start in &ctx.stops[0].codes {
         let sid = ctx.code_id(start);
-        let Some(tail) = lb[0].get(&sid) else { continue };
-        if let Some(mc) = max_cost {
-            if *tail > mc {
-                continue;
-            }
+        if !lb[0].contains_key(&sid) {
+            continue;
         }
         let list = cands.get(0, sid);
         nodes.push(Node { i: 0, city: sid, arrive_ord: start_ord, arrive_ts: start_ts, g: 0.0, parent: None, list });
@@ -623,9 +615,9 @@ pub fn pack_compact(ctx: &Ctx, chains: &[Vec<usize>]) -> View {
 }
 
 /// Стыковка под фильтры query: компактный результат N самых дешёвых цепочек.
-pub fn build_itineraries_compact(stops: &[Stop], table: &FlightCols, max_results: usize, max_cost: Option<f64>, query: Option<&PlanQuery>, check: &mut StepCheck) -> Result<View, Aborted> {
+pub fn build_itineraries_compact(stops: &[Stop], table: &FlightCols, max_results: usize, query: Option<&PlanQuery>, check: &mut StepCheck) -> Result<View, Aborted> {
     let ctx = build_ctx(stops, table, query);
-    let chains = search_cheapest(&ctx, max_results, max_cost, query, check)?;
+    let chains = search_cheapest(&ctx, max_results, query, check)?;
     Ok(pack_compact(&ctx, &chains))
 }
 
@@ -745,7 +737,6 @@ impl ComboRoutes {
 /// Маршруты выбранных наборов городов: на каждый набор — тот же A* по сохранённым
 /// рейсам, но остановки зафиксированы кодами набора.
 pub fn build_combo_views(stops: &[Stop], table: &FlightCols, combos: &[Vec<String>], query: Option<&PlanQuery>) -> ComboRoutes {
-    let max_cost = query.and_then(|q| q.max_cost);
     let mut views: Vec<(String, View)> = Vec::new();
     for codes in combos {
         if codes.len() != stops.len() {
@@ -757,7 +748,7 @@ pub fn build_combo_views(stops: &[Stop], table: &FlightCols, combos: &[Vec<Strin
             .map(|(code, stop)| Stop { kind: "cities".into(), codes: vec![code.clone()], window: stop.window.clone(), radius_km: stop.radius_km, exact: true })
             .collect();
         let mut check = |_: usize| Ok(());
-        let Ok(view) = build_itineraries_compact(&fixed, table, COMBO_MAX_RESULTS as usize, max_cost, query, &mut check) else { continue };
+        let Ok(view) = build_itineraries_compact(&fixed, table, COMBO_MAX_RESULTS as usize, query, &mut check) else { continue };
         views.push((combo_key(codes), view));
     }
     // цена маршрута — сумма цен сегментов в порядке плеч (как total_price в materialize)
@@ -845,7 +836,7 @@ pub mod tests {
     }
 
     /// Полный перебор-эталон: все цепочки по правилам онвордов (без фильтров).
-    pub fn brute_force(stops: &[Stop], table: &FlightCols, max_cost: Option<f64>) -> Vec<(f64, Vec<usize>)> {
+    pub fn brute_force(stops: &[Stop], table: &FlightCols) -> Vec<(f64, Vec<usize>)> {
         let ctx = build_ctx(stops, table, None);
         let t = table;
         let mut out = Vec::new();
@@ -891,9 +882,6 @@ pub mod tests {
         for start in &stops[0].codes {
             dfs(&ctx, t, 0, start, ordinal(start_dt.date()), naive_seconds(start_dt), &mut Vec::new(), &mut vec![start.clone()], 0.0, &mut out);
         }
-        if let Some(mc) = max_cost {
-            out.retain(|(g, _)| *g <= mc);
-        }
         out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         out
     }
@@ -917,16 +905,16 @@ pub mod tests {
             let table = FlightCols::from_collected(&[first.clone(), onward]);
             let ctx = build_ctx(&stops, &table, None);
             let mut check = |_: usize| Ok(());
-            let got = search_cheapest(&ctx, 10, None, None, &mut check).unwrap();
+            let got = search_cheapest(&ctx, 10, None, &mut check).unwrap();
             assert_eq!(got.len(), want);
-            assert_eq!(brute_force(&stops, &table, None).len(), want);
+            assert_eq!(brute_force(&stops, &table).len(), want);
         }
         // старт виртуальный: первое плечо может вылетать в первый день окна
         let table = FlightCols::from_collected(&[first.clone(), vec![flight("IST", "SEL", 2, 0, 100.0)]]);
         let ctx = build_ctx(&stops, &table, None);
         assert_eq!(ctx.chain_start, "2026-11-01");
         let mut check = |_: usize| Ok(());
-        assert_eq!(search_cheapest(&ctx, 10, None, None, &mut check).unwrap().len(), 1);
+        assert_eq!(search_cheapest(&ctx, 10, None, &mut check).unwrap().len(), 1);
     }
 
     #[test]
@@ -939,7 +927,7 @@ pub mod tests {
             let table = FlightCols::from_collected(&collected);
             let ctx = build_ctx(&stops, &table, None);
             let mut check = |_: usize| Ok(());
-            let chains = search_cheapest(&ctx, 500, None, None, &mut check).unwrap();
+            let chains = search_cheapest(&ctx, 500, None, &mut check).unwrap();
             let start_iso = format!("{}T00:00:00", ctx.chain_start);
             let start_ord = date_ordinal(&ctx.chain_start).unwrap();
             for chain in &chains {
@@ -958,11 +946,11 @@ pub mod tests {
         for seed in 1..=8 {
             let (stops, collected) = random_case(seed);
             let table = FlightCols::from_collected(&collected);
-            let full = brute_force(&stops, &table, None);
+            let full = brute_force(&stops, &table);
             let ctx = build_ctx(&stops, &table, None);
             for n in [1usize, 7, 50, full.len(), full.len() + 10] {
                 let mut check = |_: usize| Ok(());
-                let got = search_cheapest(&ctx, n, None, None, &mut check).unwrap();
+                let got = search_cheapest(&ctx, n, None, &mut check).unwrap();
                 let prices: Vec<f64> = got.iter().map(|c| c.iter().map(|&fi| table.price[fi]).sum()).collect();
                 let want: Vec<f64> = full.iter().take(n).map(|p| p.0).collect();
                 assert_eq!(prices, want, "seed {seed}, n {n}");
@@ -971,24 +959,16 @@ pub mod tests {
     }
 
     #[test]
-    fn respects_max_cost_and_abort() {
+    fn aborts_on_check() {
         let (stops, collected) = random_case(3);
         let table = FlightCols::from_collected(&collected);
-        let full = brute_force(&stops, &table, None);
-        assert!(!full.is_empty());
-        let budget = full[full.len() / 2].0;
         let ctx = build_ctx(&stops, &table, None);
-        let mut check = |_: usize| Ok(());
-        let got = search_cheapest(&ctx, 10_000, Some(budget), None, &mut check).unwrap();
-        let prices: Vec<f64> = got.iter().map(|c| c.iter().map(|&fi| table.price[fi]).sum()).collect();
-        let want: Vec<f64> = full.iter().filter(|p| p.0 <= budget).map(|p| p.0).collect();
-        assert_eq!(prices, want);
         let mut steps = 0;
         let mut abort = |_: usize| {
             steps += 1;
             if steps > 3 { Err(Aborted) } else { Ok(()) }
         };
-        assert!(search_cheapest(&ctx, 10_000, None, None, &mut abort).is_err());
+        assert!(search_cheapest(&ctx, 10_000, None, &mut abort).is_err());
     }
 
     #[test]
@@ -996,7 +976,7 @@ pub mod tests {
         let (stops, collected) = random_case(5);
         let table = FlightCols::from_collected(&collected);
         let mut check = |_: usize| Ok(());
-        let view = build_itineraries_compact(&stops, &table, 40, None, None, &mut check).unwrap();
+        let view = build_itineraries_compact(&stops, &table, 40, None, &mut check).unwrap();
         assert!(view.count > 0 && view.count <= 40);
         assert_eq!(view.chains.len(), view.count * 4);
         assert_eq!(view.days.len(), view.count * 5);
@@ -1036,7 +1016,7 @@ pub mod tests {
         .unwrap();
         let ctx = build_ctx(&stops, &table, Some(&q));
         let mut check = |_: usize| Ok(());
-        let got = search_cheapest(&ctx, 100000, None, Some(&q), &mut check).unwrap();
+        let got = search_cheapest(&ctx, 100000, Some(&q), &mut check).unwrap();
         // все выданные цепочки удовлетворяют фильтрам
         for chain in &got {
             let s1 = stay_days_secs(table.arr_ts[chain[0]], table.dep_ts[chain[1]]);
@@ -1046,7 +1026,7 @@ pub mod tests {
             assert!((3..=12).contains(&days));
         }
         // и это ровно те цепочки полного перебора, что проходят фильтры
-        let full = brute_force(&stops, &table, None);
+        let full = brute_force(&stops, &table);
         let want: Vec<f64> = full
             .iter()
             .filter(|(_, c)| {
