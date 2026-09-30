@@ -331,12 +331,28 @@ def _threshold(flights: List[Dict[str, Any]], key) -> Dict[Any, float]:
     return {**best_any, **best_direct}
 
 
+def _fetch_units(units: List[Any], fetch_unit: Callable[[Any], Any], workers: int) -> List[Any]:
+    """fetch_unit по каждой единице сбора; результаты — в порядке units. workers > 1 —
+    параллельно (серии коллектора: попадания в озеро квоту источника не тратят, промахи
+    он сам ставит в очередь под лимит). Ошибка/отмена — снимаем ещё не начатые."""
+    if workers <= 1 or len(units) <= 1:
+        return [fetch_unit(u) for u in units]
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(max_workers=min(workers, len(units)))
+    try:
+        futures = [pool.submit(fetch_unit, u) for u in units]
+        return [f.result() for f in futures]
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
                  fetch_fn=None,
                  leg_cb: Callable[[int], None] = None,
                  network: Optional[Dict[str, Dict[str, Any]]] = None,
                  max_cost: Optional[float] = None,
-                 airport_city: Optional[Dict[str, str]] = None) -> Dict[int, List[Dict[str, Any]]]:
+                 airport_city: Optional[Dict[str, str]] = None,
+                 workers: int = 1) -> Dict[int, List[Dict[str, Any]]]:
     """Собирает рейсы по каждому переходу через GraphQL (см. шапку раздела).
 
     Возвращает {индекс_перехода: [нормализованные билеты + виртуальные hidden-city]}.
@@ -346,7 +362,11 @@ def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
       (по умолчанию graphql_api.fetch_series; воркер даёт кэширующую обёртку),
     max_cost — потолок цены всей поездки: коридор value_max для ANY-серий,
     airport_city — карта аэропорт → город из накопленных котировок (дополняется
-      по ходу сбора); network — не используется, оставлен для совместимости вызова."""
+      по ходу сбора); network — не используется, оставлен для совместимости вызова,
+    workers — сколько серий плеча качать одновременно (единица — «день × город»;
+      внутри неё hidden-city ждёт порог A→B). Разбор — всегда в порядке обхода,
+      поэтому результат не зависит от workers. progress_cb и fetch_fn при workers > 1
+      вызываются из разных потоков."""
     from core import graphql_api
     fetch = fetch_fn or graphql_api.fetch_series
     stops = collect_view(stops)
@@ -372,29 +392,34 @@ def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
 
         if from_stop.kind == "cities" and to_stop.kind == "cities":
             allow_to = set(to_stop.codes)
-            for day in dates:
-                for a in from_stop.codes:
-                    day_regular: List[Dict[str, Any]] = []
-                    for b in to_stop.codes:
-                        got = _run_series(fetch, a, b, day, PAGES_CITY, None, progress_cb)
-                        keep(got, "dest", allow_to)
-                        day_regular += got
-                    # hidden-city: A→ANY в коридоре [HIDDEN_MIN_RATIO × порог, порог],
-                    # порог — лучший обычный A→B этого дня (без него — max_cost)
-                    thr = _threshold(day_regular, lambda f: 0).get(0)
-                    got = _run_series(fetch, a, None, day, PAGES_HIDDEN, thr or max_cost, progress_cb,
-                                      value_min=thr * HIDDEN_MIN_RATIO if thr else None)
-                    _airport_city_learn(got, airport_city)
-                    hub_city = _hub_resolver(allow_to, airport_city)
-                    virtual += hidden_city_flights(got, hub_city, {0: thr} if thr else {},
-                                                   lambda f: 0, seen)
+
+            def city_unit(unit, to_codes=tuple(to_stop.codes)):
+                day, a = unit
+                direct = [_run_series(fetch, a, b, day, PAGES_CITY, None, progress_cb)
+                          for b in to_codes]
+                # hidden-city: A→ANY в коридоре [HIDDEN_MIN_RATIO × порог, порог],
+                # порог — лучший обычный A→B этого дня (без него — max_cost)
+                thr = _threshold([f for got in direct for f in got], lambda f: 0).get(0)
+                hidden = _run_series(fetch, a, None, day, PAGES_HIDDEN, thr or max_cost, progress_cb,
+                                     value_min=thr * HIDDEN_MIN_RATIO if thr else None)
+                return direct, thr, hidden
+
+            units = [(day, a) for day in dates for a in from_stop.codes]
+            for direct, thr, hidden in _fetch_units(units, city_unit, workers):
+                for got in direct:
+                    keep(got, "dest", allow_to)
+                _airport_city_learn(hidden, airport_city)
+                hub_city = _hub_resolver(allow_to, airport_city)
+                virtual += hidden_city_flights(hidden, hub_city, {0: thr} if thr else {},
+                                               lambda f: 0, seen)
         elif from_stop.kind == "cities":                      # город → любой
             day_flights: Dict[str, List[Dict[str, Any]]] = {}
-            for day in dates:
-                for a in from_stop.codes:
-                    got = _run_series(fetch, a, None, day, PAGES_ANY, max_cost, progress_cb)
-                    keep(got, None, None)
-                    day_flights.setdefault(day, []).extend(got)
+            units = [(day, a) for day in dates for a in from_stop.codes]
+            got_all = _fetch_units(units, lambda u: _run_series(fetch, u[1], None, u[0], PAGES_ANY,
+                                                                max_cost, progress_cb), workers)
+            for (day, _a), got in zip(units, got_all):
+                keep(got, None, None)
+                day_flights.setdefault(day, []).extend(got)
             # hidden-city во все промежуточные хабы (кроме города вылета): дешевле
             # лучшего обычного рейса A→хаб того же дня из этой же выборки.
             hub_city = lambda apt, ac=airport_city: ac.get(apt, apt)   # noqa: E731
@@ -404,10 +429,11 @@ def collect_plan(stops: List[Stop], progress_cb: Callable[[], None] = None,
                     flights, hub_city, thr,
                     lambda f: (f.get("origin"), f.get("destination")), seen)
         else:                                                  # любой → город
-            for day in dates:
-                for b in to_stop.codes:
-                    got = _run_series(fetch, None, b, day, PAGES_ANY, max_cost, progress_cb)
-                    keep(got, "dest", set(to_stop.codes))
+            units = [(day, b) for day in dates for b in to_stop.codes]
+            got_all = _fetch_units(units, lambda u: _run_series(fetch, None, u[1], u[0], PAGES_ANY,
+                                                                max_cost, progress_cb), workers)
+            for got in got_all:
+                keep(got, "dest", set(to_stop.codes))
         collected[i] = regular + virtual
     return collected
 
