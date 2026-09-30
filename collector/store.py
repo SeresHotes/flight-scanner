@@ -48,6 +48,11 @@ class LocalStore:
                                       datetime.fromtimestamp(st.st_mtime, timezone.utc)))
         return out
 
+    def copy(self, src: str, dst: str) -> None:
+        path = self.root / dst
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((self.root / src).read_bytes())
+
     def delete(self, keys: Iterable[str]) -> None:
         for k in keys:
             try:
@@ -80,6 +85,10 @@ class S3Store:
             for obj in page.get("Contents") or []:
                 out.append(ObjectInfo(obj["Key"], int(obj["Size"]), obj.get("LastModified")))
         return out
+
+    def copy(self, src: str, dst: str) -> None:
+        """Копия внутри бакета (без скачивания) — перенос раскладки озера."""
+        self._s3.copy_object(Bucket=self.bucket, Key=dst, CopySource={"Bucket": self.bucket, "Key": src})
 
     def delete(self, keys: Iterable[str]) -> None:
         keys = list(keys)
