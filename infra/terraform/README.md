@@ -17,7 +17,7 @@ Container Registry: cr.yandex/<reg>/flights-planner|flights-collector|flights-cr
 - SA `flights-app` — `storage.admin` + `container-registry.images.puller`, статический S3-ключ; это SA самой VM.
 - SA `flights-ci` — `container-registry.images.pusher`, authorized-key для GitHub Actions.
 - Bucket `bucket_name` (Object Storage), Registry `flights`, сеть `flights-net` + подсеть.
-- VM `flights-app` (standard-v3, 2 vCPU / 20% / 4 ГБ, диск 20 ГБ, публичный IP) + cloud-init.
+- VM `flights-app` (standard-v3, 2 vCPU / 20% / 8 ГБ, диск 100 ГБ, статический публичный IP `yandex_vpc_address.app`) + cloud-init. Память меняется на месте с остановкой VM (`allow_stopping_for_update`); размер диска на живой VM — `yc compute disk update <id> --size N` (в Terraform игнорируется).
 
 ## Разовый провижининг
 

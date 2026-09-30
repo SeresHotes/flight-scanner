@@ -10,6 +10,8 @@
 - GET  /v1/cities                        — известные города
 - GET  /v1/queue                         — серии в очереди/в работе (сборщик не подаёт их повторно)
 - GET  /v1/stats, POST /v1/stats/crawler — счётчики / сводка сборщика (метрики)
+- GET  /v1/lake/files?since=             — файлы озера по индексу (сверка склада билетов)
+- GET  /v1/lake/file?key=                — байты файла озера (Parquet) для склада билетов
 
 Запуск: uvicorn collector.main:app --host 0.0.0.0 --port 8001
 """
@@ -187,6 +189,27 @@ def create_app(engine: Optional[Engine] = None, settings: Optional[Settings] = N
     def crawler_stats(payload: Dict[str, Any]) -> Dict[str, Any]:
         eng().crawler_stats = payload
         return {"ok": True}
+
+    @app.get("/v1/lake/files")
+    def lake_files(since: Optional[str] = None) -> Dict[str, Any]:
+        """Файлы озера по индексу: склад билетов сверяет с ними свой журнал и забирает
+        недостающие через /v1/lake/file. created_at — момент загрузки (ISO)."""
+        files = eng().index.files_since(since)
+        return {"files": files, "count": len(files)}
+
+    @app.get("/v1/lake/file")
+    def lake_file(key: str) -> Response:
+        if not key.startswith("tickets/") or ".." in key:
+            raise HTTPException(400, "ключ вне озера")
+        try:
+            data = eng().writer.read_bytes(key)
+        except FileNotFoundError:
+            raise HTTPException(404, "файла нет в озере")
+        except Exception as e:
+            if "NoSuchKey" in repr(e) or "Not Found" in repr(e) or "404" in repr(e):
+                raise HTTPException(404, "файла нет в озере")
+            raise HTTPException(502, f"озеро: {e!r}"[:300])
+        return Response(content=data, media_type="application/octet-stream")
 
     return app
 

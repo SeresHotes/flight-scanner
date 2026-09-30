@@ -278,3 +278,42 @@ def test_parse_legacy_date_layout_keys():
     moved = lake.series_file_key("АУР", None, cyr["day"], "", cyr["observed"])
     assert moved == "tickets/fetched=2026-09-28/origin=АУР/АУР-ANY__2026-09-28__18-33-46Z.parquet"
     assert lake.parse_file_key(moved)["origin"] == "АУР"
+
+
+def test_lake_writer_pushes_file_bytes_to_tickets_store(tmp_path):
+    """Записанный файл озера теми же байтами уходит в склад билетов (пуш — ускоритель,
+    очередь ограничена, недоступный склад не мешает записи)."""
+    from collector.push import TicketsPusher
+
+    class FakeSession:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, params=None, data=None, headers=None, timeout=None):
+            self.posts.append((url, params, data))
+
+            class R:
+                def raise_for_status(self):
+                    pass
+            return R()
+
+    session = FakeSession()
+    pusher = TicketsPusher("http://tickets:8002/", session=session)
+    store = LocalStore(str(tmp_path / "lake"))
+    index = Index(":memory:")
+    writer = lake.LakeWriter(store, index, pusher=pusher)
+    sid = index.put("MOW", None, "2026-10-15", "", pages=1, exhausted=True, tickets=1)
+    observed = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+    ticket = g.normalize_ticket(_raw(1, "MOW", "SEL"), "MOW", None, "2026-10-15")
+    key = writer.write(sid, "MOW", None, "2026-10-15", "", [ticket], observed)
+    assert pusher._q.qsize() == 1
+    k, data, obs = pusher._q.get_nowait()
+    pusher.send(k, data, obs)
+    url, params, body = session.posts[0]
+    assert url == "http://tickets:8002/v1/files"
+    assert params == {"key": key, "created_at": "2026-09-30T12:00:00+00:00"}
+    assert body == writer.read_bytes(key) and body[:4] == b"PAR1"
+    # переполнение очереди — файл просто не пушится (догонит сверка)
+    small = TicketsPusher("http://tickets:8002", session=session, queue_size=1)
+    assert small.push("a", b"x", observed) and not small.push("b", b"y", observed)
+    assert small.stats()["dropped"] == 1

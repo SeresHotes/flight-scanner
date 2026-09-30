@@ -12,9 +12,10 @@ crawler (crawler/) ──POST /v1/batch (crawl)───────────
                                                                      индекс серий: data/collector.db (SQLite)
 ```
 
-Три Python-образа из трёх Dockerfile (`deploy/Dockerfile.planner`, `.collector`,
-`.crawler`) плюс `flights-web`. Токен Travelpayouts и ключи S3 нужны
-только коллектору (на VM общий `.env`, планировщик их не использует).
+Образы: `deploy/Dockerfile.planner` (Rust), `.collector`, `.crawler` (Python), `.tickets`
+(Rust, склад билетов — `docs/TICKETS.md`) плюс `flights-web`. Токен Travelpayouts и ключи S3
+нужны только коллектору (на VM общий `.env`, планировщик их не использует). Каждый
+записанный в озеро файл коллектор пушит в склад (`TICKETS_URL`, `collector/push.py`).
 
 ## Фазы
 
@@ -98,7 +99,8 @@ crawler (crawler/) ──POST /v1/batch (crawl)───────────
 | `GET /v1/series/exists` | свежая ли серия (оценка объёма в планировщике) |
 | `GET /v1/coverage?params_key=&destination=` | `[origin, day, fetched_at, pages, tickets, exhausted, error]` |
 | `GET /v1/cities` | известные города по числу билетов |
-| `GET /v1/stats`, `POST /v1/stats/crawler` | счётчики очереди/страниц/429/кэша, сводка сборщика |
+| `GET /v1/stats`, `POST /v1/stats/crawler` | счётчики очереди/страниц/429/кэша, сводка сборщика, пуш в склад билетов |
+| `GET /v1/lake/files?since=`, `GET /v1/lake/file?key=` | файлы озера по индексу и их байты — сверка склада билетов (`docs/TICKETS.md`) |
 
 ## Фоновый сборщик (`crawler/`)
 

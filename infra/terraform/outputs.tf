@@ -28,6 +28,17 @@ output "image_crawler_ref" {
   value       = local.image_crawler_ref
 }
 
+output "tickets_pg_password" {
+  description = "Пароль Postgres склада билетов (TICKETS_PG_PASSWORD в .env VM; deploy/vm-tickets-env.sh)"
+  value       = random_password.tickets_pg.result
+  sensitive   = true
+}
+
+output "image_tickets_ref" {
+  description = "Полное имя образа склада билетов (Rust + Postgres, tickets/)"
+  value       = local.image_tickets_ref
+}
+
 output "image_web_ref" {
   description = "Полное имя web-образа (Caddy + фронт), который тянет VM"
   value       = local.image_web_ref
@@ -76,7 +87,9 @@ output "seed_and_push_hint" {
     docker build -t ${local.image_collector_ref} -f deploy/Dockerfile.collector .
     docker build -t ${local.image_crawler_ref} -f deploy/Dockerfile.crawler .
     docker build -t ${local.image_web_ref} -f deploy/Dockerfile.web .
+    docker build -t ${local.image_tickets_ref} -f deploy/Dockerfile.tickets .
     docker push ${local.image_planner_ref}
+    docker push ${local.image_tickets_ref}
     docker push ${local.image_collector_ref}
     docker push ${local.image_crawler_ref}
     docker push ${local.image_web_ref}
