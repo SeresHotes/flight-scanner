@@ -570,6 +570,7 @@ dependencies = [
  "parquet",
  "reqwest",
  "rusqlite",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha1",
