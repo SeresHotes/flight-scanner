@@ -133,6 +133,29 @@ class Index:
                 "SELECT id FROM series WHERE origin=? AND destination=? AND search_date=? AND params_key=?",
                 (o, d, day, k)).fetchone()[0]
 
+    def put_days(self, origin: Optional[str], destination: Optional[str], params_key: str,
+                 days: Sequence[Tuple[str, int, int]], *, exhausted: bool, error: bool = False,
+                 client: Optional[str] = None, fetched_at: Optional[datetime] = None) -> List[int]:
+        """put для окна дат одной транзакцией: days — [(день, страниц, билетов)].
+        Возвращает id серий в том же порядке."""
+        o, d, _, k = series_key(origin, destination, "", params_key)
+        ts = _iso(fetched_at or utcnow())
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO series (origin, destination, search_date, params_key, fetched_at, pages, "
+                "exhausted, tickets, error, client, file_key, row_group) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL) "
+                "ON CONFLICT(origin, destination, search_date, params_key) DO UPDATE SET "
+                "fetched_at=excluded.fetched_at, pages=excluded.pages, exhausted=excluded.exhausted, "
+                "tickets=excluded.tickets, error=excluded.error, client=excluded.client, "
+                "file_key=NULL, row_group=NULL",
+                [(o, d, day, k, ts, int(pages), int(bool(exhausted)), int(tickets), int(bool(error)), client)
+                 for day, pages, tickets in days])
+            self._conn.commit()
+            return [self._conn.execute(
+                "SELECT id FROM series WHERE origin=? AND destination=? AND search_date=? AND params_key=?",
+                (o, d, day, k)).fetchone()[0] for day, _, _ in days]
+
     def attach_file(self, key: str, day: str, size: int, placements: Sequence[Tuple[int, int]],
                     observed: Optional[datetime] = None) -> None:
         """Файл записан: серии (id → row_group) теперь читаются из него. observed —

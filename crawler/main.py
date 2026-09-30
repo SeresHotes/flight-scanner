@@ -6,12 +6,18 @@
 Запуск: python -m crawler.main
 """
 import time
-from datetime import date, datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 from core.collector_client import CollectorClient, CollectorError
 from crawler.config import Settings
 from crawler.schedule import Targets, merge_cities, plan
+
+
+def _days(day: str, day_to: Optional[str]) -> List[str]:
+    """Дни серии в очереди (окно дат — все дни окна)."""
+    start, end = date.fromisoformat(day), date.fromisoformat(day_to or day)
+    return [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
 
 
 def tick(client: CollectorClient, settings: Settings, *, today: Optional[date] = None,
@@ -24,12 +30,15 @@ def tick(client: CollectorClient, settings: Settings, *, today: Optional[date] =
     need = max(0, settings.queue_target - queued)
     cities = merge_cities(settings.seeds, client.cities())
     coverage = client.coverage()  # X→ANY без коридора
-    queued_keys = {(q["origin"], q["day"]) for q in client.queue()
-                   if q.get("origin") and not q.get("destination") and not q.get("params_key")}
+    queued_keys = {(q["origin"], day) for q in client.queue()
+                   if q.get("origin") and not q.get("destination") and not q.get("params_key")
+                   for day in _days(q["day"], q.get("day_to"))}
     targets = Targets(settings.near_days, settings.near_hours, settings.mid_days,
                       settings.mid_hours, settings.far_hours, settings.error_retry_hours)
     items, summary = plan(cities, coverage, today=today, horizon_days=settings.horizon_days,
-                          targets=targets, now=now, exclude=queued_keys, limit=need)
+                          targets=targets, now=now, exclude=queued_keys, limit=need,
+                          window_tickets=settings.window_tickets or None,
+                          unknown_window_days=settings.unknown_window_days)
     submitted = 0
     if items:
         ids = client.submit_batch([it.request(settings.max_pages) for it in items], client="crawl")
@@ -56,7 +65,7 @@ def run(settings: Optional[Settings] = None) -> None:
             print(f"[crawler] городов {s['cities']}, пар {s['pairs']}: свежих {s['fresh']}, "
                   f"устарело {s['stale']}, нет {s['missing']}, ошибок {s['errors']}; "
                   f"в очереди {s['queued_crawl']}, подано {s['submitted']}, "
-                  f"проход {s['pass_progress'] * 100:.1f} %")
+                  f"окон {s['windows']}, проход {s['pass_progress'] * 100:.1f} %")
         except CollectorError as e:
             print(f"[crawler] коллектор недоступен: {e}")
         except Exception as e:  # цикл не должен умирать

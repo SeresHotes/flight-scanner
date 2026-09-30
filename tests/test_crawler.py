@@ -83,7 +83,7 @@ def test_tick_submits_missing_series_and_reports(tmp_path):
     source = Source({("MOW", ""): [3], ("LED", ""): [0]})
     engine = Engine(csettings, LocalStore(csettings.lake_local_root), Index(":memory:"), page_fn=source)
     settings = Settings(collector_url="http://testserver", seeds=["MOW", "LED"], horizon_days=2,
-                        queue_target=3, max_pages=5)
+                        queue_target=3, max_pages=5, window_tickets=0)
     with TestClient(create_app(engine)) as c:
         client = CollectorClient("http://testserver", http=c, poll_wait=1)
         s = crawler_main.tick(client, settings, today=TODAY, now=NOW)

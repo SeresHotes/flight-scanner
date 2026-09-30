@@ -15,7 +15,7 @@ import time
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -44,6 +44,9 @@ class SeriesRequest:
     direct: Optional[bool] = None
     with_baggage: Optional[bool] = None
     max_pages: int = graphql_api.MAX_PAGES
+    # Последний день вылета включительно: серия «окно дат» (фоновый сборщик). Ответ
+    # раскладывается по дням — в индексе и озере это обычные посуточные серии.
+    day_to: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.origin = (self.origin or None) and self.origin.upper()
@@ -51,6 +54,18 @@ class SeriesRequest:
         if not self.origin and not self.destination:
             raise ValueError("нужен хотя бы один из origin/destination")
         self.max_pages = max(1, int(self.max_pages))
+        if self.day_to == self.day:
+            self.day_to = None
+        if self.day_to is not None and self.day_to < self.day:
+            raise ValueError("day_to раньше day")
+
+    @property
+    def days(self) -> List[str]:
+        """Дни вылета серии (один или окно)."""
+        if self.day_to is None:
+            return [self.day]
+        d, end = date.fromisoformat(self.day), date.fromisoformat(self.day_to)
+        return [(d + timedelta(days=i)).isoformat() for i in range((end - d).days + 1)]
 
     @property
     def params_key(self) -> str:
@@ -58,16 +73,19 @@ class SeriesRequest:
 
     @property
     def key(self) -> tuple:
-        return series_key(self.origin, self.destination, self.day, self.params_key)
+        return series_key(self.origin, self.destination, self.day, self.params_key) + (self.day_to or "",)
 
-    def params(self) -> Dict[str, Any]:
-        return graphql_api.build_params(self.origin, self.destination, self.day,
-                                        value_min=self.value_min, value_max=self.value_max,
+    def params(self, floor: Optional[int] = None) -> Dict[str, Any]:
+        """floor — нижняя граница цены при продолжении серии за потолком offset."""
+        value_min = self.value_min if floor is None else max(floor, self.value_min or 0)
+        return graphql_api.build_params(self.origin, self.destination, self.day, day_to=self.day_to,
+                                        value_min=value_min, value_max=self.value_max,
                                         direct=self.direct, with_baggage=self.with_baggage)
 
     @property
     def label(self) -> str:
-        return f"{self.origin or 'ANY'}→{self.destination or 'ANY'} {self.day}" + (
+        days = f"{self.day}..{self.day_to}" if self.day_to else self.day
+        return f"{self.origin or 'ANY'}→{self.destination or 'ANY'} {days}" + (
             f" [{self.params_key}]" if self.params_key else "")
 
 
@@ -90,6 +108,11 @@ class Job:
     consumed: bool = False
     keep_result: bool = True
     retries: int = 0
+    # Продолжение за потолком offset: запрос с value_min = цена последнего билета,
+    # страницы считаются от seg_start; билеты на границе цены отсекаются по ссылке.
+    floor: Optional[int] = None
+    seg_start: int = 0
+    boundary_links: set = field(default_factory=set)
     series_id: Optional[int] = None
     series_row: Optional[Dict[str, Any]] = None
     event: threading.Event = field(default_factory=threading.Event)
@@ -314,14 +337,30 @@ class Engine:
     def _query_page(self, params: Dict[str, Any], offset: int, limit: int) -> List[Dict[str, Any]]:
         return graphql_api.query_page(params, offset, limit, session=self._session, throttle=False)
 
+    def _continue_by_price(self, job: Job) -> bool:
+        """Упёрлись в потолок offset (~14 800): продолжаем тот же запрос с value_min =
+        цена последнего билета (сортировка VALUE_ASC). False — продолжать нечем."""
+        prices = [t["price"] for t in job.tickets if t.get("price") is not None]
+        if not prices:
+            return False
+        floor = int(max(prices))
+        if job.floor is not None and floor <= job.floor:
+            return False  # весь сегмент одной цены — граница не сдвигается
+        job.floor, job.seg_start = floor, job.pages
+        job.boundary_links = {t.get("link") for t in job.tickets
+                              if t.get("price") is not None and t["price"] >= floor}
+        self.counters.inc("price_continuations")
+        return True
+
     def _fetch_page(self, job: Job) -> None:
-        offset = job.pages * graphql_api.PAGE_LIMIT
-        if offset > graphql_api.MAX_OFFSET:
+        if (job.pages - job.seg_start) * graphql_api.PAGE_LIMIT > graphql_api.MAX_OFFSET \
+                and not self._continue_by_price(job):
             self._finish(job)
             return
+        offset = (job.pages - job.seg_start) * graphql_api.PAGE_LIMIT
         self.limiter.wait()
         try:
-            raw = self._page_fn(job.req.params(), offset, graphql_api.PAGE_LIMIT)
+            raw = self._page_fn(job.req.params(job.floor), offset, graphql_api.PAGE_LIMIT)
         except graphql_api.RateLimited as e:
             pause = self.limiter.on_429(e.retry_after)
             self.counters.inc("http_429")
@@ -345,7 +384,7 @@ class Engine:
         self.counters.inc(f"pages_{job.client}")
         for t in raw:
             f = graphql_api.normalize_ticket(t, job.req.origin, job.req.destination, job.req.day)
-            if f is not None:
+            if f is not None and not (job.boundary_links and f.get("link") in job.boundary_links):
                 job.tickets.append(f)
         if len(raw) < graphql_api.PAGE_LIMIT:
             job.exhausted = True
@@ -355,7 +394,9 @@ class Engine:
     def _finish(self, job: Job, error: Optional[str] = None) -> None:
         now = self._now()
         req = job.req
-        if error is None:
+        if error is None and req.day_to is not None:
+            self._finish_window(job, now)
+        elif error is None:
             sid = self.index.put(req.origin, req.destination, req.day, req.params_key,
                                  pages=job.pages, exhausted=job.exhausted, tickets=len(job.tickets),
                                  client=job.client, fetched_at=now)
@@ -366,6 +407,7 @@ class Engine:
             except Exception as e:  # озеро недоступно: серия без файла → кэшем не считается
                 self.counters.inc("lake_write_errors")
                 print(f"[collector] запись {req.label} в озеро не удалась: {e!r}")
+        if error is None:
             cities: Counter = Counter()
             for t in job.tickets:
                 cities[t.get("destination") or ""] += 1
@@ -377,9 +419,9 @@ class Engine:
         else:
             # Ошибка источника: помним, чтобы сборщик не долбил направление постоянно,
             # но кэшем такая серия не считается (index.fresh пропускает error=1).
-            self.index.put(req.origin, req.destination, req.day, req.params_key,
-                           pages=job.pages, exhausted=False, tickets=0, error=True,
-                           client=job.client, fetched_at=now)
+            self.index.put_days(req.origin, req.destination, req.params_key,
+                                [(d, job.pages if i == 0 else 0, 0) for i, d in enumerate(req.days)],
+                                exhausted=False, error=True, client=job.client, fetched_at=now)
             self.counters.inc(f"failed_{job.client}")
         job.error = error
         job.done = True
@@ -392,6 +434,35 @@ class Engine:
         if not job.keep_result:
             job.tickets = []
         job.event.set()
+
+    def _finish_window(self, job: Job, now: datetime) -> None:
+        """Окно дат → посуточные серии: билеты по дню вылета, строка индекса на каждый
+        день (страницы — на первом, чтобы сумма по индексу оставалась честной), один
+        файл озера на окно (row group на непустой день)."""
+        req = job.req
+        by_day: Dict[str, List[Dict[str, Any]]] = {d: [] for d in req.days}
+        outside = 0
+        for t in job.tickets:
+            day = (t.get("departure_at") or "")[:10]
+            if day in by_day:
+                t["search_date"] = day
+                by_day[day].append(t)
+            else:
+                outside += 1
+        if outside:
+            self.counters.inc("window_outside_tickets", outside)
+        days = list(by_day)
+        ids = self.index.put_days(req.origin, req.destination, req.params_key,
+                                  [(d, job.pages if i == 0 else 0, len(by_day[d])) for i, d in enumerate(days)],
+                                  exhausted=job.exhausted, client=job.client, fetched_at=now)
+        job.series_id = ids[0]
+        try:
+            self.writer.write_window([(sid, d, by_day[d]) for sid, d in zip(ids, days)],
+                                     req.origin, req.destination, req.day, req.day_to,
+                                     req.params_key, now)
+        except Exception as e:  # озеро недоступно: серии без файла → кэшем не считаются
+            self.counters.inc("lake_write_errors")
+            print(f"[collector] запись {req.label} в озеро не удалась: {e!r}")
 
     # --------------------------- housekeeping ------------------------------
 
@@ -474,7 +545,8 @@ class Engine:
                     continue
                 seen.add(job.id)
                 out.append({"origin": job.req.origin, "destination": job.req.destination,
-                            "day": job.req.day, "params_key": job.req.params_key,
+                            "day": job.req.day, "day_to": job.req.day_to,
+                            "params_key": job.req.params_key,
                             "priority": "app" if job.priority == 0 else "crawl"})
         return out
 

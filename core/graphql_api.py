@@ -37,7 +37,7 @@ load_dotenv()
 
 GRAPHQL_URL = "https://api.travelpayouts.com/graphql/v1/query"
 PAGE_LIMIT = 400              # больше источник не отдаёт
-MAX_PAGES = 12                # предохранитель на одну серию (день × направление)
+MAX_PAGES = 100               # предохранитель на серию (40 000 билетов); за потолком offset коллектор продолжает по цене
 MAX_OFFSET = 14_800           # «too high paging depth» выше
 MIN_INTERVAL_SECONDS = 1.0    # 60 запросов/мин
 REQUEST_TIMEOUT = 30

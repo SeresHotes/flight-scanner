@@ -8,8 +8,16 @@
   проход идёт от ближних дат к дальним, но устаревшая ближняя дата (возраст ≥ 2×
   цели) обгоняет отсутствующие дальние;
 - серия с ошибкой источника: возраст / интервал повтора ошибок.
+- обрезанная серия (упёрлась в предохранитель страниц) — как ошибка: возраст / интервал
+  повтора, следующий запрос возьмёт её целиком.
 Город, у которого одни ошибки (неизвестный источнику код), — в карантине: проверяется
 одна дата раз в интервал повтора, остальные не тратят запросы.
+
+Окна дат: источник отдаёт диапазон дат одним запросом (те же билеты, что посуточно),
+а платим минимум страницу за запрос — поэтому подряд идущие «пора» дни города
+склеиваются в окно. Длина окна = бюджет билетов / плотность города (p90 билетов в день
+по его покрытию; популярность хранить отдельно не нужно — она в индексе), для города
+без данных — `unknown_window_days`. Окно не пересекает смену целевой свежести.
 """
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -41,10 +49,15 @@ class Item:
     day: str
     score: float
     offset: int
-    reason: str  # missing | stale | error
+    reason: str  # missing | stale | error | truncated
+    day_to: Optional[str] = None  # окно дат: последний день включительно
+    days: int = 1
 
     def request(self, max_pages: int) -> Dict[str, Any]:
-        return {"origin": self.origin, "destination": None, "day": self.day, "max_pages": max_pages}
+        out = {"origin": self.origin, "destination": None, "day": self.day, "max_pages": max_pages}
+        if self.day_to and self.day_to != self.day:
+            out["day_to"] = self.day_to
+        return out
 
 
 def _parse_ts(s: str) -> datetime:
@@ -67,32 +80,38 @@ def merge_cities(seeds: Sequence[str], known: Iterable[Dict[str, Any]]) -> List[
 
 def plan(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: date,
          horizon_days: int, targets: Targets, now: Optional[datetime] = None,
-         exclude: Iterable[Tuple[str, str]] = (), limit: Optional[int] = None
+         exclude: Iterable[Tuple[str, str]] = (), limit: Optional[int] = None,
+         window_tickets: Optional[int] = None, unknown_window_days: int = 30
          ) -> Tuple[List[Item], Dict[str, Any]]:
     """coverage — строки /v1/coverage: [origin, day, fetched_at, pages, tickets, exhausted, error].
     exclude — пары (origin, day), уже стоящие в очереди коллектора.
+    window_tickets — бюджет билетов на окно дат (None — по одному дню на серию).
     Возвращает (серии по убыванию срочности, сводка покрытия для метрик)."""
     now = now or datetime.now(timezone.utc)
-    cov: Dict[Tuple[str, str], Tuple[float, bool]] = {}
+    cov: Dict[Tuple[str, str], Tuple[float, bool, bool]] = {}
     errors_by_city: Dict[str, int] = {}
     ok_by_city: Dict[str, int] = {}
+    tickets_by_city: Dict[str, List[int]] = {}
     for row in coverage:
-        origin, day, fetched_at, _pages, _tickets, _exhausted, error = row[:7]
+        origin, day, fetched_at, _pages, tickets, exhausted, error = row[:7]
         age_h = max(0.0, (now - _parse_ts(fetched_at)).total_seconds() / 3600)
-        cov[(origin, day)] = (age_h, bool(error))
+        cov[(origin, day)] = (age_h, bool(error), bool(exhausted))
         if error:
             errors_by_city[origin] = errors_by_city.get(origin, 0) + 1
         else:
             ok_by_city[origin] = ok_by_city.get(origin, 0) + 1
+            tickets_by_city.setdefault(origin, []).append(int(tickets or 0))
 
     excluded = set(exclude)
     items: List[Item] = []
     summary = {"cities": len(cities), "pairs": 0, "fresh": 0, "stale": 0, "missing": 0,
-               "errors": 0, "quarantined_cities": 0, "oldest_h": 0.0, "queued_excluded": 0}
+               "errors": 0, "truncated": 0, "quarantined_cities": 0, "oldest_h": 0.0,
+               "queued_excluded": 0}
     for city in cities:
         quarantined = errors_by_city.get(city, 0) >= QUARANTINE_ERRORS and not ok_by_city.get(city)
         if quarantined:
             summary["quarantined_cities"] += 1
+        due: List[Item] = []
         for offset in range(horizon_days + 1):
             if quarantined and offset != 1:
                 continue
@@ -103,26 +122,65 @@ def plan(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: dat
                 score, reason = 2.0 + (horizon_days - offset) / max(horizon_days, 1), "missing"
                 summary["missing"] += 1
             else:
-                age_h, error = entry
+                age_h, error, exhausted = entry
                 summary["oldest_h"] = max(summary["oldest_h"], age_h)
                 if error:
                     score, reason = age_h / targets.error_retry_hours, "error"
                     summary["errors"] += 1
                 else:
                     score, reason = age_h / targets.hours(offset), "stale"
-                    if score >= 1:
-                        summary["stale"] += 1
-                    else:
+                    if not exhausted and age_h / targets.error_retry_hours > score:
+                        score, reason = age_h / targets.error_retry_hours, "truncated"
+                    if score < 1:
                         summary["fresh"] += 1
+                    else:
+                        summary[reason] += 1
                 if score < 1:
                     continue
             if (city, day) in excluded:
                 summary["queued_excluded"] += 1
                 continue
-            items.append(Item(city, day, score, offset, reason))
+            due.append(Item(city, day, score, offset, reason))
+        if window_tickets is None or quarantined:
+            items.extend(due)
+        else:
+            items.extend(_windows(due, targets, _window_days(
+                tickets_by_city.get(city), window_tickets, unknown_window_days, horizon_days)))
     rank = {c: i for i, c in enumerate(cities)}
     items.sort(key=lambda it: (-it.score, it.offset, rank[it.origin]))
     summary["oldest_h"] = round(summary["oldest_h"], 1)
     summary["pass_progress"] = round(1 - summary["missing"] / summary["pairs"], 4) if summary["pairs"] else 1.0
-    summary["due"] = len(items)
+    summary["due"] = sum(it.days for it in items)
+    summary["windows"] = len(items)
     return (items[:limit] if limit is not None else items), summary
+
+
+def _window_days(tickets: Optional[List[int]], budget: int, unknown_days: int, horizon_days: int) -> int:
+    """Длина окна: бюджет билетов / плотность (p90 билетов в день по покрытию города)."""
+    if not tickets:
+        return max(1, unknown_days)
+    ranked = sorted(tickets)
+    p90 = ranked[int(0.9 * (len(ranked) - 1))]
+    return max(1, min(horizon_days + 1, budget // max(p90, 1)))
+
+
+def _windows(due: List[Item], targets: Targets, max_days: int) -> List[Item]:
+    """Подряд идущие дни (по возрастанию дальности) → окна до max_days дней; окно не
+    пересекает пропуск и смену целевой свежести. Срочность окна — самого срочного дня."""
+    out: List[Item] = []
+    cur: List[Item] = []
+
+    def flush() -> None:
+        if cur:
+            top = max(cur, key=lambda it: it.score)
+            out.append(Item(cur[0].origin, cur[0].day, top.score, cur[0].offset, top.reason,
+                            day_to=cur[-1].day, days=len(cur)))
+            cur.clear()
+
+    for it in sorted(due, key=lambda it: it.offset):
+        if cur and (it.offset != cur[-1].offset + 1 or len(cur) >= max_days
+                    or targets.hours(it.offset) != targets.hours(cur[0].offset)):
+            flush()
+        cur.append(it)
+    flush()
+    return out
