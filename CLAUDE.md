@@ -26,9 +26,8 @@
 - Архитектура и фазы — `docs/PLAN.md`; локальный запуск — `docs/RUN.md`.
 - Коллектор и Parquet-озеро (очередь к GraphQL с приоритетами app > crawl, лимит
   ручки, серии в S3, индекс, ретеншн, фазы 1–5) — `docs/COLLECTOR.md`. На VM три
-  контейнера из трёх Dockerfile: `planner` (**Rust**, крейт `planner/`, axum `/api/*`;
-  прежний Python `api/` + планировочные модули `core/` — устаревшая копия, в образ не
-  попадает), `collector` (Python, порт 8001, единственный с токеном и S3), `crawler`
+  контейнера из трёх Dockerfile: `planner` (**Rust**, крейт `planner/`, axum `/api/*`),
+  `collector` (Python, порт 8001, единственный с токеном и S3), `crawler`
   (Python, фоновый обход «город × день» на 180 дней, только HTTP к коллектору) + `web`.
   Прод-compose `deploy/compose.prod.yml` едет в образе planner; на уже созданной
   VM один раз запускается `deploy/vm-migrate.sh`.
@@ -97,7 +96,9 @@ poetry run python scripts/fetch_tickets.py MOW - 2026-10-15 --min 20000 --max 40
 Сервис `flights-planner` (axum + tokio, rusqlite, arrow/parquet, reqwest) повторяет
 контракт и семантику Python-планировщика один в один: те же `/api/*`, та же SQLite
 `data/flights.db` (jobs, quotes, ticket_cache), те же Parquet-файлы `plan_flights/<job>.parquet`
-(файлы прежних джоб читаются). Модули: `stops` (остановки, окна, оценка), `collect`
+(Python-планировщик `api/` + `storage/` + планировочные модули `core/` удалены 30.09.2026;
+в `core/` остались только общие с коллектором `graphql_api`, `collector_client`,
+`series_arrow`). Модули: `stops` (остановки, окна, оценка), `collect`
 (сбор серий, hidden-city), `search` (ленивый A*, компактный результат, маршруты
 наборов), `overview` (наборы городов, динамика по префиксам), `planquery` (фильтры,
 хэши `collect_key`/`view_key` — те же sha1, что у Python), `collector` (клиент коллектора,

@@ -3,7 +3,6 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from api import worker
 from collector.config import Settings
 from collector.engine import Engine
 from collector.index import Index
@@ -74,11 +73,9 @@ def test_planner_client_progress_and_cache_hit(client):
     assert len(series["tickets"]) == 412 and ticks == [1, 2]
     assert cc.has_series("MOW", "SEL", "2026-10-15", "", pages=12)
     assert not cc.has_series("MOW", "SEL", "2026-10-15", "max=5000")
-    # Обёртка воркера: cached → on_cache_hit, формат серии тот же, что у fetch_series.
-    hits = []
-    fetch = worker.make_collector_ticket_fetch(cc, on_cache_hit=lambda: hits.append(1))
-    s2 = fetch("MOW", "SEL", "2026-10-15", max_pages=12, progress_cb=lambda p, n: None)
-    assert s2["cached"] and hits == [1] and len(s2["tickets"]) == 412
+    # Повторная выборка — из озера: cached=True, формат серии тот же.
+    s2 = cc.fetch_series("MOW", "SEL", "2026-10-15", max_pages=12, progress_cb=lambda p, n: None)
+    assert s2["cached"] and len(s2["tickets"]) == 412
     assert cc.health()["status"] == "ok"
     # Сравнение с прямой выборкой: коллектор отдал ровно те же нормализованные билеты.
     from core import graphql_api as g

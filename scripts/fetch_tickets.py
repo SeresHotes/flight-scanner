@@ -5,8 +5,7 @@
     poetry run python scripts/fetch_tickets.py MOW - 2026-10-15 --min 20000 --max 40000   # MOW → ANY
     poetry run python scripts/fetch_tickets.py - SEL 2026-10-15 --pages 2 --json           # ANY → SEL
 
-`-` вместо города — «любой». Серии кэшируются в SQLite (ticket_cache, TTL 24 ч),
-как у планировщика; --no-cache — мимо кэша.
+`-` вместо города — «любой». Запрос идёт в источник напрямую (без кэша серий).
 """
 import argparse
 import json
@@ -16,9 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from api import worker  # noqa: E402
 from core import graphql_api  # noqa: E402
-from storage import hot  # noqa: E402
 
 
 def main() -> None:
@@ -31,8 +28,6 @@ def main() -> None:
     ap.add_argument("--direct", action="store_true", help="только прямые")
     ap.add_argument("--baggage", action="store_true", help="только с багажом")
     ap.add_argument("--pages", type=int, default=graphql_api.MAX_PAGES, help="потолок страниц по 400")
-    ap.add_argument("--db", default=hot.DEFAULT_DB)
-    ap.add_argument("--no-cache", action="store_true")
     ap.add_argument("--json", action="store_true", help="вывести нормализованные билеты JSON")
     ap.add_argument("--limit", type=int, default=30, help="сколько строк печатать")
     args = ap.parse_args()
@@ -45,13 +40,7 @@ def main() -> None:
     def progress(page, n):
         print(f"[fetch] страница {page}: {n} билетов", file=sys.stderr)
 
-    if args.no_cache:
-        series = graphql_api.fetch_series(origin, destination, args.day, progress_cb=progress, **opts)
-    else:
-        conn = hot.connect(args.db)
-        hot.init_db(conn)
-        series = worker.make_cached_ticket_fetch(conn)(origin, destination, args.day,
-                                                       progress_cb=progress, **opts)
+    series = graphql_api.fetch_series(origin, destination, args.day, progress_cb=progress, **opts)
     tickets = series["tickets"]
     if args.json:
         json.dump(tickets, sys.stdout, ensure_ascii=False, indent=1)
