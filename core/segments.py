@@ -5,6 +5,7 @@
 дата-арифметика поверх core/dates."""
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -20,14 +21,22 @@ def flag_emoji(iso2: str) -> str:
 _CITY_NAMES_PATH = Path(__file__).resolve().parent / "city_names.json"
 
 
+@lru_cache(maxsize=1)
 def _city_names_network() -> dict:
     """core/city_names.json ({код: [имя, ISO2]}, scripts/build_city_names.py) в форме
-    сети аэропортов: имя и страна — всё, что нужно выдаче (~230 КБ вместо 20 МБ)."""
+    сети аэропортов: имя и страна — всё, что нужно выдаче (~230 КБ вместо 20 МБ).
+    Справочник статичный — читается один раз на процесс (API грузит его при старте,
+    load_city_names), как сеть аэропортов автокомплита и core/geo.json."""
     try:
         names = json.loads(_CITY_NAMES_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return {code: {"municipality": name, "country": country} for code, (name, country) in names.items()}
+
+
+def load_city_names() -> None:
+    """Загрузить справочник имён городов заранее (старт приложения)."""
+    _city_names_network()
 
 
 def make_city_lookup(network: Optional[dict] = None):

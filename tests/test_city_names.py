@@ -20,3 +20,9 @@ def test_lookup_uses_city_names_file():
     code, (name, country) = next((c, v) for c, v in names.items() if v[1])
     info = make_city_lookup()(code)
     assert info["city"] == name and info["country"] == country and info["flag"]
+
+
+def test_city_names_loaded_once_per_process():
+    from core import segments
+    segments.load_city_names()
+    assert segments._city_names_network() is segments._city_names_network()
