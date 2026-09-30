@@ -81,8 +81,9 @@ def test_window_series_is_split_by_day_into_index_and_one_file(tmp_path):
     assert [r["pages"] for r in rows] == [1, 0, 0]            # страницы — на первом дне окна
     assert all(r["exhausted"] and r["file_key"] == rows[0]["file_key"] for r in rows)
     key = rows[0]["file_key"]
-    assert key.startswith("tickets/date=2026-10-15/origin=MOW/MOW-ANY__to=2026-10-17__")
-    assert lake.parse_file_key(key)["day"] == "2026-10-15"
+    assert key.startswith("tickets/fetched=") and "/origin=MOW/MOW-ANY__2026-10-15..2026-10-17__" in key
+    meta = lake.parse_file_key(key)
+    assert (meta["day"], meta["day_to"]) == ("2026-10-15", "2026-10-17")
     # Каждый день читается своей row group и отдаётся как кэш посуточной серии приложения.
     for d, n in zip(days, (3, 0, 2)):
         hit = env.submit(SeriesRequest("MOW", None, d), client="app")

@@ -1,5 +1,5 @@
-"""Parquet-озеро серий: один файл на серию, путь = ключ серии + момент загрузки:
-`tickets/date=<день вылета>/origin=<город>/<A>-<B>[__<параметры>]__<UTC-время>.parquet`.
+"""Parquet-озеро серий: один файл на выборку (день или окно дат), путь = день загрузки + город:
+`tickets/fetched=<день загрузки>/origin=<город>/<A>-<B>__<дни вылета>[__<параметры>]__<HH-MM-SS>Z.parquet`.
 
 Озеро читаемо без индекса (индекс в SQLite — ускоритель: свежесть, покрытие,
 объём для ретеншна). Билет кладём плоскими колонками (для аналитики) плюс
@@ -107,35 +107,53 @@ def read_series(source, row_group: int) -> List[Dict[str, Any]]:
 
 
 def series_file_key(origin: Optional[str], destination: Optional[str], day: str,
-                    params_key: str, observed: datetime) -> str:
-    """Путь файла серии = её ключ + момент загрузки:
-    tickets/date=<день вылета>/origin=<город|ANY>/<A>-<B>[__<параметры>]__<UTC-время>.parquet
-    Заходишь в дату — видишь города; у города — когда его читали. Повторная выборка
-    той же серии — новый файл рядом (история цен), старые уходят ретеншном."""
+                    params_key: str, observed: datetime, day_to: Optional[str] = None) -> str:
+    """Путь файла = день загрузки + город запроса, в имени — направление, дни вылета
+    (день или окно `A..B`), параметры и время загрузки:
+    tickets/fetched=<UTC-день загрузки>/origin=<город|ANY>/<A>-<B>__<дни>[__<параметры>]__<HH-MM-SS>Z.parquet
+    Файлы только дописываются (повторная выборка — новый файл, история цен), поэтому
+    единственное, что у файла однозначно, — когда и по какому городу его загрузили;
+    день вылета — колонка (row group на день). Старое уходит целыми папками fetched=."""
     o = (origin or "ANY").upper()
     d = (destination or "ANY").upper()
+    days = f"{day}..{day_to}" if day_to and day_to != day else day
     params = f"__{params_key.replace('&', ',')}" if params_key else ""
-    stamp = observed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    return f"{TICKETS_PREFIX}/date={day}/origin={o}/{o}-{d}{params}__{stamp}.parquet"
+    at = observed.astimezone(timezone.utc)
+    return (f"{TICKETS_PREFIX}/fetched={at:%Y-%m-%d}/origin={o}/"
+            f"{o}-{d}__{days}{params}__{at:%H-%M-%S}Z.parquet")
 
 
+_DAY = r"\d{4}-\d{2}-\d{2}"
 _KEY_RE = re.compile(
-    r"^" + TICKETS_PREFIX + r"/date=(?P<day>\d{4}-\d{2}-\d{2})/origin=[A-Z]+/"
-    r"(?P<origin>[A-Z]+)-(?P<dest>[A-Z]+)(?:__(?P<params>[^_]+))?__(?P<stamp>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})Z\.parquet$")
+    r"^" + TICKETS_PREFIX + r"/fetched=(?P<date>" + _DAY + r")/origin=[A-Z]+/"
+    r"(?P<origin>[A-Z]+)-(?P<dest>[A-Z]+)__(?P<day>" + _DAY + r")(?:\.\.(?P<day_to>" + _DAY + r"))?"
+    r"(?:__(?P<params>[^_]+))?__(?P<time>\d{2}-\d{2}-\d{2})Z\.parquet$")
+# Раскладка до 30.09.2026: tickets/date=<день вылета>/origin=X/<A>-<B>[__<параметры>]__<UTC-время>.parquet,
+# окно — параметром `to=<последний день>` (scripts/migrate_lake_layout.py переносит в fetched=).
+_LEGACY_KEY_RE = re.compile(
+    r"^" + TICKETS_PREFIX + r"/date=(?P<day>" + _DAY + r")/origin=[A-Z]+/"
+    r"(?P<origin>[A-Z]+)-(?P<dest>[A-Z]+)(?:__(?P<params>[^_]+))?__(?P<stamp>" + _DAY + r"T\d{2}-\d{2}-\d{2})Z\.parquet$")
 
 
 def parse_file_key(key: str) -> Optional[Dict[str, Any]]:
-    """Обратно к ключу серии: {origin, destination, day, params_key, observed (datetime)}.
-    None — если файл не по схеме (чужой/старый)."""
+    """Обратно к ключу серии: {origin, destination, day, day_to, params_key, observed (datetime)}.
+    Понимает и прежнюю раскладку date=. None — если файл не по схеме (чужой)."""
     m = _KEY_RE.match(key)
-    if not m:
-        return None
-    stamp = m.group("stamp")
+    if m:
+        stamp, day, day_to = f"{m.group('date')}T{m.group('time')}", m.group("day"), m.group("day_to")
+        params = [p for p in (m.group("params") or "").split(",") if p]
+    else:
+        m = _LEGACY_KEY_RE.match(key)
+        if not m:
+            return None
+        stamp, day = m.group("stamp"), m.group("day")
+        params = [p for p in (m.group("params") or "").split(",") if p]
+        day_to = next((p[3:] for p in params if p.startswith("to=")), None)
+        params = [p for p in params if not p.startswith("to=")]
     observed = datetime.strptime(stamp, "%Y-%m-%dT%H-%M-%S").replace(tzinfo=timezone.utc)
     return {"origin": None if m.group("origin") == "ANY" else m.group("origin"),
             "destination": None if m.group("dest") == "ANY" else m.group("dest"),
-            "day": m.group("day"), "params_key": (m.group("params") or "").replace(",", "&"),
-            "observed": observed}
+            "day": day, "day_to": day_to, "params_key": "&".join(params), "observed": observed}
 
 
 class LakeWriter:
@@ -164,11 +182,9 @@ class LakeWriter:
                      destination: Optional[str], day_from: str, day_to: str, params_key: str,
                      observed: datetime) -> str:
         """Окно дат одним файлом: parts — [(series_id, день, билеты)], row group на каждый
-        непустой день. Путь — как у серии первого дня с `to=<последний день>` в параметрах:
-        tickets/date=<первый день>/origin=X/X-ANY__to=<последний день>__<время>.parquet.
+        непустой день; в имени — окно: X-ANY__<первый день>..<последний день>__<время>.parquet.
         Пустые дни ссылаются на тот же файл (row group 0, билетов 0 — не читаются)."""
-        window_key = "&".join(p for p in (params_key, f"to={day_to}") if p)
-        key = series_file_key(origin, destination, day_from, window_key, observed)
+        key = series_file_key(origin, destination, day_from, params_key, observed, day_to=day_to)
         sink = io.BytesIO()
         placements: List[Tuple[int, int]] = []
         stamp = observed.isoformat(timespec="seconds")

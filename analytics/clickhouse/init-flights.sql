@@ -7,7 +7,8 @@
 -- сотням файлов. При смене схемы Parquet править здесь.
 CREATE DATABASE IF NOT EXISTS flights;
 
--- Серии билетов: tickets/date=<день вылета>/origin=<город>/<A>-<B>[__params]__<время>.parquet
+-- Серии билетов: tickets/fetched=<день загрузки>/origin=<город>/<A>-<B>__<дни вылета>[__params]__<время>.parquet
+-- (маска tickets/*/origin=* читает и прежнюю раскладку date=<день вылета>).
 -- (collector/lake.py). Каждый файл — одна выборка серии, история цен = несколько файлов.
 CREATE OR REPLACE VIEW flights.tickets AS
     SELECT * FROM s3(flights_tickets, structure='
