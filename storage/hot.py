@@ -178,25 +178,65 @@ def airport_city_map(conn: sqlite3.Connection) -> Dict[str, str]:
     return out
 
 
-def put_plan_flights(conn: sqlite3.Connection, job_id: str, collected: Dict[int, List[Dict[str, Any]]]) -> None:
-    """Сохраняет собранные рейсы джобы (gzip JSON) для построения маршрутов по требованию."""
-    import gzip
-    # compresslevel=1: на 135 тыс. рейсов (200 МБ JSON) сжатие 5.5 с → 0.85 с при
-    # размере 25 → 35 МБ; уровень 9 по умолчанию держал джобу между загрузкой и стыковкой.
-    blob = gzip.compress(json.dumps({str(k): v for k, v in collected.items()}, ensure_ascii=False).encode(),
-                         compresslevel=1)
-    conn.execute("INSERT OR REPLACE INTO plan_flights (job_id, created_at, data) VALUES (?, ?, ?)",
-                 (job_id, datetime.now().isoformat(), blob))
+# Рейсы джобы — Parquet-файл колонками (core.flightcols) в plan_flights/ рядом с БД:
+# стыковка под новые фильтры читает только числовые колонки, полный рейс — лениво.
+# Джоба живёт сутки (api.main.PLAN_JOB_TTL_SECONDS) — файлы старше двух суток удаляем.
+PLAN_FLIGHTS_KEEP_SECONDS = 2 * 24 * 3600
+
+
+def _plan_flights_dir(conn: sqlite3.Connection) -> Path:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    db_file = row[2] if row is not None else ""
+    base = Path(db_file).parent if db_file else Path(os.getenv("TMPDIR", "/tmp"))
+    return base / "plan_flights"
+
+
+def plan_flights_path(conn: sqlite3.Connection, job_id: str) -> Path:
+    return _plan_flights_dir(conn) / f"{job_id}.parquet"
+
+
+def put_plan_flights(conn: sqlite3.Connection, job_id: str, flights) -> None:
+    """Сохраняет рейсы джобы (core.flightcols.FlightCols или {плечо: [рейсы]}) для
+    видов под другие фильтры и маршрутов наборов; чистит файлы старых джоб."""
+    from core.flightcols import as_cols
+    path = plan_flights_path(conn, job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".parquet.tmp")
+    as_cols(flights).write(str(tmp))
+    os.replace(tmp, path)
+    cutoff = datetime.now().timestamp() - PLAN_FLIGHTS_KEEP_SECONDS
+    for old in path.parent.glob("*.parquet"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except FileNotFoundError:
+            pass
+    # Прежний формат (gzip JSON в SQLite) больше не пишется; старые строки — вон.
+    conn.execute("DELETE FROM plan_flights WHERE created_at < ?",
+                 (datetime.fromtimestamp(cutoff).isoformat(),))
     conn.commit()
 
 
-def get_plan_flights(conn: sqlite3.Connection, job_id: str) -> Optional[Dict[int, List[Dict[str, Any]]]]:
+def get_plan_flights(conn: sqlite3.Connection, job_id: str):
+    """Рейсы джобы колонками (core.flightcols.FlightCols) или None. Джобы прежнего
+    формата (gzip JSON в plan_flights) читаются и перекладываются в колонки."""
+    from core.flightcols import FlightCols
+    path = plan_flights_path(conn, job_id)
+    if path.exists():
+        return FlightCols.read(str(path))
     import gzip
     row = conn.execute("SELECT data FROM plan_flights WHERE job_id=?", (job_id,)).fetchone()
     if row is None:
         return None
     raw = json.loads(gzip.decompress(row["data"]).decode())
-    return {int(k): v for k, v in raw.items()}
+    cols = FlightCols.from_collected({int(k): v for k, v in raw.items()})
+    try:   # переносим в новый формат один раз — дальше читается файл
+        put_plan_flights(conn, job_id, cols)
+        conn.execute("DELETE FROM plan_flights WHERE job_id=?", (job_id,))
+        conn.commit()
+    except OSError as e:
+        print(f"[hot] plan_flights {job_id}: перенос в Parquet не удался: {e}")
+    return cols
 
 
 def count_ticket_series(conn: sqlite3.Connection) -> int:

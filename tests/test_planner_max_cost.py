@@ -4,10 +4,10 @@ max_cost должен резать целые бесперспективные �
 минимального «хвоста» (_completion_lb), а не только фильтровать готовый результат.
 max_results — оставлять N самых дешёвых цепочек. Без обеих границ — прежнее «всё».
 """
+from core.flightcols import FlightCols
 from core.planner import (
     Stop,
     _completion_lb,
-    _index_leg,
     build_itineraries,
     is_valid_max_results,
 )
@@ -68,8 +68,9 @@ def test_max_results_keeps_cheapest_n():
 
 def test_completion_lb_is_min_tail_cost():
     """lb[i][city] — минимальная цена хвоста от city перед плечом i до конца."""
-    legs_by_origin = {i: _index_leg(COLLECTED[i]) for i in range(len(STOPS) - 1)}
-    lb = _completion_lb(STOPS, legs_by_origin)
+    table = FlightCols.from_collected(COLLECTED)
+    legs_by_origin = {i: table.by_origin(table.rows(i)) for i in range(len(STOPS) - 1)}
+    lb = _completion_lb(STOPS, legs_by_origin, table=table)
     assert lb[1]["IST"] == 100   # IST→DST
     assert lb[1]["NYC"] == 900   # NYC→DST
     assert lb[0]["MOW"] == 200   # дешевле всего MOW→IST→DST

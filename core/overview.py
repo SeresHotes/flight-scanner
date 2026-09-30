@@ -29,8 +29,8 @@ import numpy as np
 
 from core.dates import parse_datetime
 from core.network import load_airport_network
-from core.planner import (FINAL_STAY_DAYS, Stop, _allowed, _apply_leg_filters, _index_leg,  # noqa
-                          _leg_dates, _price_of, _side_codes, arrival_of, make_city_lookup)
+from core.flightcols import FlightCols, as_cols
+from core.planner import FINAL_STAY_DAYS, Stop, _leg_dates, _leg_rows, make_city_lookup  # noqa
 from core.nearby import HOP_MIN_GAP_MIN, Hops
 from core.planquery import PlanQuery
 
@@ -61,30 +61,38 @@ def _weekend_deadline(arr_ord: int) -> int:
         d += 1
 
 
-class _Leg:
-    """Рейсы плеча в массивах + индекс по коду вылета и группировка по городу прилёта."""
+def _weekend_deadlines(arr_ord: np.ndarray) -> np.ndarray:
+    """_weekend_deadline векторно: сб → +1 день (вс), вс → +6 (сб), будни → до вс."""
+    wd = (arr_ord + 6) % 7
+    return arr_ord + np.where(wd == 6, 6, np.where(wd == 5, 1, 6 - wd))
 
-    def __init__(self, flights: List[Dict[str, Any]]):
-        self.flights = flights
-        n = len(flights)
-        self.dest = [(f.get("destination") or f.get("search_destination") or "").upper() for f in flights]
-        self.price = np.array([_price_of(f) for f in flights], dtype=float)
-        self.transfers = np.array([int(f.get("transfers") or 0) for f in flights], dtype=np.int32)
-        dep = [f.get("departure_at") for f in flights]
-        arr = [arrival_of(f) for f in flights]
-        self.dep_ts = np.array([_naive_seconds(d) for d in dep], dtype=float)
-        self.arr_ts = np.array([_naive_seconds(a) for a in arr], dtype=float)
-        self.dep_ord = np.array([_ordinal(d) for d in dep], dtype=np.int64)
-        self.arr_ord = np.array([_ordinal(a) for a in arr], dtype=np.int64)
-        self.weekend_ok_from = np.array([_weekend_deadline(int(o)) for o in self.arr_ord], dtype=np.int64)
+
+class _Leg:
+    """Рейсы плеча (строки rows колонок FlightCols) в локальных массивах + индекс по
+    коду вылета. Индексы внутри _Leg — локальные (0..len(rows)-1)."""
+
+    def __init__(self, table: FlightCols, rows: np.ndarray):
+        rows = rows[table.dep_ord[rows] >= 0]          # без даты вылета стыковать нельзя
+        self.rows = rows
+        r = rows.tolist()
+        self.dest = [table.dest[x] for x in r]
+        self.dest_air = [table.dest_airport[x] for x in r]
+        self.origin_codes = [(table.orig_city[x], table.orig_airport[x]) for x in r]
+        self.price = table.price[rows]
+        self.transfers = table.transfers[rows]
+        self.dep_ts = table.dep_ts[rows]
+        self.arr_ts = table.arr_ts[rows]
+        self.dep_ord = table.dep_ord[rows]
+        self.arr_ord = table.arr_ord[rows]
+        self.weekend_ok_from = _weekend_deadlines(self.arr_ord)
         # индекс по коду вылета (город И аэропорт, как planner._index_leg)
         by_origin: Dict[str, List[int]] = {}
-        for i, f in enumerate(flights):
-            for code in _side_codes(f, "origin"):
-                by_origin.setdefault(code, []).append(i)
+        for i, (c, a) in enumerate(self.origin_codes):
+            if c:
+                by_origin.setdefault(c, []).append(i)
+            if a and a != c:
+                by_origin.setdefault(a, []).append(i)
         self.by_origin = {c: np.array(ix, dtype=np.int64) for c, ix in by_origin.items()}
-        self.dest_codes = [_side_codes(f, "dest") for f in flights]
-        self.origin_codes = [_side_codes(f, "origin") for f in flights]
 
 
 def _compat(prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf,
@@ -127,8 +135,8 @@ def _extend(state, prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, 
     return new_cnt, new_minp, new_tr_at, new_mintr
 
 
-def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]],
-                   query: Optional[PlanQuery] = None, city_info=None) -> Dict[str, Any]:
+def build_overview(stops: List[Stop], collected, query: Optional[PlanQuery] = None,
+                   city_info=None) -> Dict[str, Any]:
     """{combos: [{codes, minPrice, transfersAtMin, minTransfers, count}] по цене,
     totalCount, cities: {code: [city, flag]}}."""
     if city_info is None:
@@ -137,10 +145,11 @@ def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
     if last < 1:
         return {"combos": [], "totalCount": 0, "cities": {}}
     budget = query.max_cost if query is not None else None
-    filtered = _apply_leg_filters(collected, query)
+    table = as_cols(collected)
+    rows = _leg_rows(table, last, query)
     if budget is not None:
-        filtered = {i: [f for f in fl if _price_of(f) <= budget] for i, fl in filtered.items()}
-    legs = [_Leg(filtered.get(i, [])) for i in range(last)]
+        rows = {i: r[table.price[r] <= budget] for i, r in rows.items()}
+    legs = [_Leg(table, rows[i]) for i in range(last)]
     city_filters = {i: query.cities[i] for i in range(1, last)
                     if query is not None and i < len(query.cities) and not query.cities[i].is_open()}
     trip = query.trip_length if query is not None else [0, None]
@@ -169,7 +178,7 @@ def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
                 continue
             if allow is None and dest in seq:
                 continue
-            if allow is not None and not (leg.dest_codes[fi] & allow):
+            if allow is not None and leg.dest[fi] not in allow and leg.dest_air[fi] not in allow:
                 continue
             out.setdefault(dest, []).append(fi)
         return out
