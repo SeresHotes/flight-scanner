@@ -11,8 +11,9 @@
 import json
 import threading
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -142,13 +143,16 @@ def _stops_payload(req: "PlanRequest") -> List[Dict[str, Any]]:
 
 
 
-# Разобранные компактные результаты последних джоб — для страниц /routes (JSON на
-# сотни тысяч цепочек разбирать на каждый запрос страницы дорого). Две записи:
-# пользователь обычно смотрит одну джобу, вторая — на переход между запросами.
-PLAN_RESULT_CACHE_SIZE = 2
-PLAN_JOB_TTL_SECONDS = 24 * 3600   # готовая джоба переиспользуется, пока свеж fetch_cache
-_plan_results: Dict[str, Dict[str, Any]] = {}
-_plan_results_lock = threading.Lock()
+# Джоба = собранные рейсы по остановкам (ключ PlanQuery.collect_key). Результат под
+# фильтры («вид»: цепочки + наборы городов) строится из них и живёт в памяти по
+# (джоба, PlanQuery.view_key): первый — воркером сразу после сбора, остальные — по
+# запросу страницы (параметр f), в фоне, с этапом «Стыковка» в статусе джобы.
+PLAN_VIEW_CACHE_SIZE = 4
+PLAN_JOB_TTL_SECONDS = 24 * 3600   # готовая джоба переиспользуется, пока свежи серии
+_views: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
+_view_state: Dict[Tuple[str, str], Dict[str, Any]] = {}   # строящиеся виды: этап, прогресс, ошибка
+_views_lock = threading.Lock()
+_view_executor = ThreadPoolExecutor(max_workers=1)  # стыковка под фильтры — по одной (память)
 
 
 class PlanQueryRequest(BaseModel):
@@ -182,7 +186,7 @@ def _cache_probe():
 
 def _estimate(query: PlanQuery) -> Dict[str, Any]:
     stops = planner.parse_stops(query.stops)
-    return planner.estimate_plan(stops, max_cost=query.max_cost, is_cached=_cache_probe())
+    return planner.estimate_plan(stops, is_cached=_cache_probe())
 
 
 def _query_from_request(req: "PlanQueryRequest") -> PlanQuery:
@@ -203,7 +207,9 @@ def plan_estimate(req: PlanQueryRequest) -> Dict[str, Any]:
 
 
 def _start_plan_job(query: PlanQuery) -> Dict[str, Any]:
-    """Общий запуск сбора: проверки, дедуп по хэшу запроса, постановка в очередь."""
+    """Общий запуск сбора: проверки, дедуп по остановкам (collect_key — фильтры и
+    бюджет на сбор не влияют), постановка в очередь. Фильтры запроса — вид по
+    умолчанию для джобы; другие фильтры страницы результата передают параметром f."""
     stops = planner.parse_stops(query.stops)
     if len(stops) < 2:
         return {"status": "invalid", "message": "Нужно минимум две остановки."}
@@ -224,10 +230,10 @@ def _start_plan_job(query: PlanQuery) -> Dict[str, Any]:
         return {"status": "too_wide",
                 "message": f"Слишком широкие окна: ~{est['cold']} страниц надо загрузить из источника "
                            f"(лимит {planner.MAX_REQUESTS}, в кэше уже {est['cached']}). "
-                           "Сузьте диапазоны дат или задайте бюджет поездки.",
+                           "Сузьте диапазоны дат.",
                 "estimate": est}
 
-    key = query.key()
+    key = query.collect_key()
     existing = hot.find_job_by_key(_conn, key, PLAN_JOB_TTL_SECONDS)
     if existing:
         return {"status": "collecting" if existing["status"] != "done" else "done",
@@ -241,7 +247,8 @@ def _start_plan_job(query: PlanQuery) -> Dict[str, Any]:
                                    "max_cost": query.max_cost},
                    total=est["requests"], stage=worker.initial_stage("plan"), query_key=key)
     _executor.submit(worker.run_plan_collection, hot.DEFAULT_DB, job_id, payload["stops"],
-                     query.max_results, query.max_cost, payload)
+                     query.max_results, query.max_cost, payload,
+                     lambda pq, result: _put_view(job_id, pq, result))
     return {"status": "collecting", "job_id": job_id, "total": est["requests"], "mode": query.mode()}
 
 
@@ -255,9 +262,9 @@ def plan_gather(req: PlanRequest) -> Dict[str, Any]:
 
 @app.post("/api/plan/run")
 def plan_run(req: PlanQueryRequest) -> Dict[str, Any]:
-    """Запуск сбора по единому запросу с фильтрами (PlanQuery). Одинаковый запрос в
-    пределах суток переиспользует готовую/идущую джобу (reused=true). mode —
-    какой экран открывать: combos (наборы городов) или routes."""
+    """Запуск сбора по единому запросу (PlanQuery). Те же остановки в пределах суток —
+    та же джоба (reused=true), фильтры страницы результата передают параметром f.
+    mode — какой экран открывать: combos (наборы городов) или routes."""
     try:
         query = _query_from_request(req)
     except ValueError as e:
@@ -265,20 +272,80 @@ def plan_run(req: PlanQueryRequest) -> Dict[str, Any]:
     return _start_plan_job(query)
 
 
-def _plan_result(job_id: str) -> Optional[Dict[str, Any]]:
-    """Разобранный результат готовой джобы (с ленивым индексом наборов), из кэша."""
-    with _plan_results_lock:
-        entry = _plan_results.get(job_id)
-    if entry is not None:
-        return entry
+def _put_view(job_id: str, pq: PlanQuery, result: Dict[str, Any]) -> None:
+    key = (job_id, pq.view_key())
+    with _views_lock:
+        _views[key] = {"result": result, "index": None, "query": pq}
+        _views.move_to_end(key)
+        while len(_views) > PLAN_VIEW_CACHE_SIZE:
+            _views.popitem(last=False)
+        _view_state.pop(key, None)
+
+
+def _job_query(job: Dict[str, Any], f: Optional[str]) -> PlanQuery:
+    """Запрос вида: остановки джобы + фильтры из f (JSON {cities, legs, tripLength,
+    maxCost}); без f — фильтры, с которыми джобу запустили."""
+    base = PlanQuery.from_dict(json.loads(job["params_json"] or "{}"))
+    if base.max_results is None:
+        base.max_results = planner.DEFAULT_MAX_RESULTS
+    if not f:
+        return base
+    q = base.with_filters(json.loads(f))
+    if not planner.is_valid_max_results(q.max_results):
+        q.max_results = base.max_results
+    return q
+
+
+def _view(job: Dict[str, Any], pq: PlanQuery) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """(готовый вид, None) или (None, состояние стыковки) — тогда стыковка идёт/запущена."""
+    key = (job["id"], pq.view_key())
+    with _views_lock:
+        entry = _views.get(key)
+        if entry is not None:
+            _views.move_to_end(key)
+            return entry, None
+        state = _view_state.get(key)
+        start = state is None
+        if start:
+            state = _view_state[key] = {"stage": "build", "build": None, "error": None}
+    if start:   # вне лока: _build_view кладёт вид под тем же локом
+        _view_executor.submit(_build_view, job["id"], pq, state)
+    with _views_lock:
+        entry = _views.get(key)
+    return (entry, None) if entry is not None else (None, state)
+
+
+def _build_view(job_id: str, pq: PlanQuery, state: Dict[str, Any]) -> None:
+    """Стыковка под фильтры из сохранённых рейсов джобы (фон, _view_executor)."""
+    conn = hot.connect(hot.DEFAULT_DB)
+    try:
+        collected = hot.get_plan_flights(conn, job_id)
+        if collected is None:
+            raise RuntimeError("Рейсы этого поиска не сохранились — запустите поиск заново.")
+
+        def progress(found: int, explored: int) -> None:
+            state["build"] = {"found": found, "limit": pq.max_results, "explored": explored}
+        result = worker.build_view(planner.parse_stops(pq.stops), collected, pq, on_progress=progress,
+                                   on_stage=lambda key: state.__setitem__("stage", key))
+        del collected
+        _put_view(job_id, pq, result)
+    except Exception as e:
+        print(f"[view] {job_id}: {e!r}")
+        state["error"] = str(e) or repr(e)
+    finally:
+        conn.close()
+
+
+def _job_view(job_id: str, f: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Готовый вид для страниц /combos и /routes (None — ещё строится/нет джобы)."""
     job = hot.get_job(_conn, job_id)
-    if not job or job["status"] != "done" or not job["result_json"]:
+    if not job or job["status"] != "done":
         return None
-    entry = {"result": json.loads(job["result_json"]), "index": None}
-    with _plan_results_lock:
-        while len(_plan_results) >= PLAN_RESULT_CACHE_SIZE:
-            _plan_results.pop(next(iter(_plan_results)))
-        _plan_results[job_id] = entry
+    try:
+        pq = _job_query(job, f)
+    except (ValueError, TypeError):
+        return None
+    entry, _ = _view(job, pq)
     return entry
 
 
@@ -289,11 +356,11 @@ COMBO_SORTS = {"price": lambda c: (c["minPrice"], c["codes"]),
 
 @app.get("/api/plan/jobs/{job_id}/combos")
 def plan_job_combos(job_id: str, offset: int = 0, limit: int = 100,
-                    sort: str = "price") -> Dict[str, Any]:
-    """Страница наборов городов готовой джобы (core/overview): {codes, minPrice,
+                    sort: str = "price", f: Optional[str] = None) -> Dict[str, Any]:
+    """Страница наборов городов под фильтры f (core/overview): {codes, minPrice,
     transfersAtMin, minTransfers, count}; sort — price | count | transfers.
     cities — имена/флаги кодов страницы."""
-    entry = _plan_result(job_id)
+    entry = _job_view(job_id, f)
     if entry is None:
         return {"status": "not_ready"}
     overview = entry["result"].get("combos")
@@ -315,11 +382,11 @@ def plan_job_combos(job_id: str, offset: int = 0, limit: int = 100,
 
 @app.get("/api/plan/jobs/{job_id}/routes")
 def plan_job_routes(job_id: str, offset: int = 0, limit: int = 50,
-                    combos: Optional[str] = None) -> Dict[str, Any]:
-    """Страница маршрутов готовой джобы (по возрастанию цены), с полными сегментами
+                    combos: Optional[str] = None, f: Optional[str] = None) -> Dict[str, Any]:
+    """Страница маршрутов под фильтры f (по возрастанию цены), с полными сегментами
     (багаж, пересадки, hidden-city). combos — наборы городов через запятую
     (`MOW-IST-ICN,MOW-DXB-ICN`): только цепочки этих наборов."""
-    entry = _plan_result(job_id)
+    entry = _job_view(job_id, f)
     if entry is None:
         return {"status": "not_ready"}
     limit = max(1, min(limit, 200))
@@ -337,17 +404,15 @@ def plan_job_routes(job_id: str, offset: int = 0, limit: int = 50,
 
 def _combo_routes(job_id: str, entry: Dict[str, Any], wanted: List[str]) -> Optional[List[Dict[str, Any]]]:
     """Маршруты выбранных наборов — по требованию из сохранённых рейсов джобы
-    (planner.build_combo_routes), кэш по набору ключей внутри записи результата."""
+    (planner.build_combo_routes) с фильтрами вида, кэш по набору ключей в записи вида."""
     key = ",".join(sorted(set(wanted)))
     cache = entry.setdefault("combo_routes", {})
     if key in cache:
         return cache[key]
-    job = hot.get_job(_conn, job_id)
     collected = hot.get_plan_flights(_conn, job_id)
-    if not job or collected is None:
+    if collected is None:
         return None
-    params = json.loads(job["params_json"] or "{}")
-    query = PlanQuery.from_dict(params)
+    query = entry["query"]
     stops = planner.parse_stops(query.stops)
     combos = [c.split("-") for c in sorted(set(wanted))]
     items = planner.build_combo_routes(stops, collected, combos, query=query)
@@ -358,9 +423,10 @@ def _combo_routes(job_id: str, entry: Dict[str, Any], wanted: List[str]) -> Opti
 
 
 @app.get("/api/plan/jobs/{job_id}")
-def plan_job_status(job_id: str) -> Dict[str, Any]:
-    """Прогресс джобы; по завершении — сводка (summary: цепочек, наборов, всего
-    вариантов). Сами данные — страницами: …/combos и …/routes."""
+def plan_job_status(job_id: str, f: Optional[str] = None) -> Dict[str, Any]:
+    """Прогресс джобы: сбор рейсов, затем стыковка под фильтры f (без f — фильтры
+    запуска). По готовности — сводка (summary: цепочек, наборов, всего вариантов).
+    Сами данные — страницами: …/combos и …/routes с тем же f."""
     job = hot.get_job(_conn, job_id)
     if not job:
         return {"status": "not_found"}
@@ -371,12 +437,24 @@ def plan_job_status(job_id: str) -> Dict[str, Any]:
         "error": job["error"],
         "stage": _job_stage(job),
     }
-    if job["status"] == "done":
-        entry = _plan_result(job_id)
-        if entry is not None:
-            res = entry["result"]
-            combos = res.get("combos") or {}
-            out["summary"] = {"count": res.get("count", 0),
-                              "combos": len(combos.get("combos") or []),
-                              "totalCount": combos.get("totalCount", 0)}
-    return out
+    if job["status"] != "done":
+        return out
+    try:
+        pq = _job_query(job, f)
+    except (ValueError, TypeError) as e:
+        return {**out, "status": "error", "error": f"Некорректные фильтры: {e}"}
+    entry, state = _view(job, pq)
+    if entry is not None:
+        res = entry["result"]
+        combos = res.get("combos") or {}
+        out["summary"] = {"count": res.get("count", 0),
+                          "combos": len(combos.get("combos") or []),
+                          "totalCount": combos.get("totalCount", 0)}
+        return out
+    if state.get("error"):
+        with _views_lock:   # следующий запрос (перезагрузка страницы) попробует заново
+            _view_state.pop((job_id, pq.view_key()), None)
+        return {**out, "status": "error", "error": state["error"]}
+    stage = dict(out["stage"] or worker.initial_stage("plan"))
+    stage.update(key=state["stage"], step=None, build=state["build"])
+    return {**out, "status": "running", "progress": job["total"], "stage": stage}

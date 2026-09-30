@@ -60,6 +60,13 @@ export function queryMode(q: PlanQuery): 'combos' | 'routes' {
   return q.stops.some((s) => s.kind === 'any' || s.airports.length > 1) ? 'combos' : 'routes'
 }
 
+// Параметр f страниц результата (статус, наборы, маршруты): всё, кроме остановок.
+// Джоба = рейсы по остановкам, фильтры и бюджет применяются при чтении.
+export function filtersParam(q: PlanQuery): string {
+  const { stops: _stops, ...filters } = toApi(q) // eslint-disable-line @typescript-eslint/no-unused-vars
+  return JSON.stringify(filters)
+}
+
 // Тело POST /api/plan/run.
 export function toApi(q: PlanQuery) {
   return {

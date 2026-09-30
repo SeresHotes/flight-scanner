@@ -157,9 +157,10 @@ tripLength[lo,hi], maxCost|null, maxResults
   не отдаётся целиком: `GET …/routes?combos=A-B-C,A-D-C&offset=0&limit=50`
   материализует страницу (`_assemble`) с полными сегментами (багаж, пересадки,
   hidden-city). Фильтр по наборам — по кодам городов цепочки.
-- Джоба дедуплицируется по хэшу `PlanQuery`; готовый результат живёт TTL 24 ч
-  (совпадает с `fetch_cache`). Правка фильтра = новая джоба, но без запросов
-  к источнику (всё в кэше) — секунды на построение.
+- Джоба = рейсы по остановкам: дедуп по `PlanQuery.collect_key` (виды, города,
+  окна, радиус), TTL 24 ч. Фильтры и бюджет на сбор не влияют — страницы результата
+  передают их параметром `f`, вид под фильтры стыкуется из сохранённых рейсов
+  (кэш в памяти по `view_key`). Правка фильтра = та же джоба, только стыковка.
 
 ### 4. Фронт
 
@@ -182,8 +183,8 @@ tripLength[lo,hi], maxCost|null, maxResults
 | Метод | Назначение |
 |---|---|
 | `POST /api/plan/estimate` | оценка запросов/времени по `PlanQuery` |
-| `POST /api/plan/run` | запуск/переиспользование джобы по хэшу запроса → `{job_id, mode: combos|routes}` |
-| `GET /api/plan/jobs/{id}` | статус, прогресс (этапы fetch/build), сводка (`routes`, `combos`) |
+| `POST /api/plan/run` | запуск/переиспользование джобы по остановкам (`collect_key`) → `{job_id, mode: combos|routes}` |
+| `GET /api/plan/jobs/{id}?f=` | статус, прогресс (этапы fetch/build), сводка под фильтры `f` (`routes`, `combos`) |
 | `GET /api/plan/jobs/{id}/combos?sort&offset&limit` | наборы городов |
 | `GET /api/plan/jobs/{id}/routes?combos&offset&limit` | страница маршрутов с полными сегментами; с `combos` — строятся по требованию на каждый набор |
 | удаляются | `/api/search`, `/api/gather`, `/api/routes`, `/api/jobs/{id}` (классика) |

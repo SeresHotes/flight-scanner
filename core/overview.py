@@ -13,7 +13,11 @@
 промежуточной остановки — дни между прилётом и вылетом, обязательное окно, оба
 выходных; повторы городов — только у «любой»), затем свёртка numpy и разрез по
 городу прилёта. Длина поездки — на последнем плече по дню первого вылета.
-Границы max_results/max_cost НЕ действуют: обзор оценивает все варианты.
+Граница max_results не действует: обзор оценивает все варианты. Бюджет max_cost —
+фильтр: рейсы дороже него не участвуют, а ячейки (день × рейс), где даже самая
+дешёвая цепочка дороже бюджета, обнуляются — набор без цепочки в бюджете не
+показывается; count остаётся оценкой сверху (цепочки дороже минимума ячейки не
+отсекаются — для этого нужна не минимальная цена, а распределение цен).
 
 Времена — «наивные» локальные, как в aggregate.parse_datetime (таймзона срезана),
 дни пребывания — floor((вылет − прилёт) / сутки), как planner._stay.
@@ -132,7 +136,11 @@ def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
     last = len(stops) - 1
     if last < 1:
         return {"combos": [], "totalCount": 0, "cities": {}}
-    legs = [_Leg(_apply_leg_filters(collected, query).get(i, [])) for i in range(last)]
+    budget = query.max_cost if query is not None else None
+    filtered = _apply_leg_filters(collected, query)
+    if budget is not None:
+        filtered = {i: [f for f in fl if _price_of(f) <= budget] for i, fl in filtered.items()}
+    legs = [_Leg(filtered.get(i, [])) for i in range(last)]
     city_filters = {i: query.cities[i] for i in range(1, last)
                     if query is not None and i < len(query.cities) and not query.cities[i].is_open()}
     trip = query.trip_length if query is not None else [0, None]
@@ -173,6 +181,11 @@ def build_overview(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]]
             mask = days >= (trip[0] or 0)
             if trip[1] is not None:
                 mask &= days <= trip[1]
+            cnt = np.where(mask, cnt, 0.0)
+            minp = np.where(mask, minp, _INF)
+            mintr = np.where(mask, mintr, 1 << 20)
+        if budget is not None:
+            mask = minp <= budget
             cnt = np.where(mask, cnt, 0.0)
             minp = np.where(mask, minp, _INF)
             mintr = np.where(mask, mintr, 1 << 20)

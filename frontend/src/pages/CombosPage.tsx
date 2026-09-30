@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Navigate, useNavigate, useParams } from 'react-router-dom'
+import { Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { makeMoney, plural } from '../lib/format'
 import { fetchCombos, type CityCombo, type CombosPage as CombosPayload } from '../planner/api'
-import { encodeQuery } from '../planner/query'
+import { encodeQuery, type PlanQuery } from '../planner/query'
 import { usePlanJob } from '../planner/usePlanJob'
 import { useQueryFromUrl } from '../planner/useQueryState'
 import { JobShell } from '../planner/components/JobShell'
@@ -15,18 +15,24 @@ const comboKey = (c: CityCombo) => c.codes.join('-')
 // Режим городов: все наборы под запрос (считает бэк). Отмечаем несколько и
 // переходим к маршрутам выбранных наборов вместе.
 export function CombosPage() {
+  // Новый запрос в URL («Применить» у той же джобы) — заново читаем его и поллим статус.
+  const { search } = useLocation()
+  return <CombosPageInner key={search} />
+}
+
+function CombosPageInner() {
   const { jobId } = useParams()
   const [query] = useQueryFromUrl()
-  const job = usePlanJob(jobId)
+  const job = usePlanJob(jobId, query)
   if (!jobId || !query) return <Navigate to="/" replace />
   return (
     <JobShell jobId={jobId} query={query} job={job} title="🗺 Наборы городов">
-      <CombosList jobId={jobId} queryString={encodeQuery(query).toString()} />
+      <CombosList jobId={jobId} query={query} queryString={encodeQuery(query).toString()} />
     </JobShell>
   )
 }
 
-function CombosList({ jobId, queryString }: { jobId: string; queryString: string }) {
+function CombosList({ jobId, query, queryString }: { jobId: string; query: PlanQuery; queryString: string }) {
   const navigate = useNavigate()
   const [sort, setSort] = useState<SortKey>('price')
   const [pages, setPages] = useState<CombosPayload[]>([])
@@ -36,7 +42,7 @@ function CombosList({ jobId, queryString }: { jobId: string; queryString: string
   const load = async (offset: number, reset: boolean) => {
     setLoading(true)
     try {
-      const page = await fetchCombos(jobId, sort, offset, PAGE)
+      const page = await fetchCombos(jobId, query, sort, offset, PAGE)
       setPages((prev) => (reset ? [page] : [...prev, page]))
     } finally {
       setLoading(false)

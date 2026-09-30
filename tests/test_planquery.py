@@ -135,16 +135,18 @@ def _setup(tmp_path, monkeypatch):
     monkeypatch.setattr(hot, "DEFAULT_DB", db)
     monkeypatch.setattr(graphql_api, "fetch_series", _fake_fetch)
     monkeypatch.setattr(worker, "load_airport_network", lambda *a, **k: {})
-    main._plan_results.clear()
+    main._views.clear()
+    main._view_state.clear()
 
     class Sync:
         def submit(self, fn, *args):
             fn(*args)
     monkeypatch.setattr(main, "_executor", Sync())
+    monkeypatch.setattr(main, "_view_executor", Sync())
     return conn
 
 
-def test_run_dedupes_by_query_key_and_routes_page(tmp_path, monkeypatch):
+def test_run_dedupes_by_stops_and_routes_page(tmp_path, monkeypatch):
     conn = _setup(tmp_path, monkeypatch)
     req = main.PlanQueryRequest(stops=[main.PlanStop(**s) for s in JOB_STOPS], maxResults=10,
                                 legs=[{"baggage": "any"}, {"maxTransfers": 0}])
@@ -156,8 +158,13 @@ def test_run_dedupes_by_query_key_and_routes_page(tmp_path, monkeypatch):
 
     again = main.plan_run(req)
     assert again["job_id"] == first["job_id"] and again["reused"] is True and again["status"] == "done"
-    changed = main.plan_run(main.PlanQueryRequest(stops=req.stops, maxResults=10, legs=[{}, {"maxTransfers": 1}]))
-    assert changed["job_id"] != first["job_id"]
+    # Другие фильтры и бюджет — та же джоба (ключ — только остановки); другие окна — новая.
+    changed = main.plan_run(main.PlanQueryRequest(stops=req.stops, maxResults=10, maxCost=1,
+                                                  legs=[{}, {"maxTransfers": 1}]))
+    assert changed["job_id"] == first["job_id"] and changed["reused"] is True
+    other_stops = [main.PlanStop(**{**s, "window": ["2026-10-02", "2026-10-02"]}) if s["window"][0] else
+                   main.PlanStop(**s) for s in JOB_STOPS]
+    assert main.plan_run(main.PlanQueryRequest(stops=other_stops, maxResults=10))["job_id"] != first["job_id"]
 
     page = main.plan_job_routes(first["job_id"], offset=0, limit=2)
     assert page["status"] == "ok" and page["count"] == page["total"] > 0
@@ -191,8 +198,9 @@ def test_estimate_counts_cached_series_and_guard_uses_cold(tmp_path, monkeypatch
     est = main.plan_estimate(req)
     assert est["requests"] == 2 * planner.PAGES_ANY * 2 and est["cached"] == 0 and est["cold"] == est["requests"]
 
-    # Кладём в кэш серию MOW→ANY на 1.11 с тем же коридором — она перестаёт быть холодной.
-    hot.ticket_cache_put(conn, "MOW", None, "2026-11-01", "max=50000",
+    # Серия MOW→ANY на 1.11 в кэше — она перестаёт быть холодной. Ключ серии —
+    # направление × день без коридора: бюджет (maxCost) на сбор не влияет.
+    hot.ticket_cache_put(conn, "MOW", None, "2026-11-01", "",
                          {"tickets": [], "pages": 3, "exhausted": True})
     est = main.plan_estimate(req)
     assert est["cached"] == planner.PAGES_ANY and est["cold"] == est["requests"] - planner.PAGES_ANY
@@ -245,3 +253,41 @@ def test_run_without_max_results_uses_default(tmp_path, monkeypatch):
     res = main.plan_run(main.PlanQueryRequest(stops=[main.PlanStop(**s) for s in JOB_STOPS]))
     assert res["status"] in ("collecting", "done")
     assert json.loads(hot.get_job(main._conn, res["job_id"])["params_json"])["maxResults"] == planner.DEFAULT_MAX_RESULTS
+
+
+def test_filters_are_applied_on_read_without_new_collection(tmp_path, monkeypatch):
+    """Смена фильтров/бюджета — та же джоба, без повторного сбора: вид под фильтры f
+    стыкуется из сохранённых рейсов; бюджет режет цепочки при стыковке, а не серии."""
+    conn = _setup(tmp_path, monkeypatch)
+    calls = []
+
+    def fetch(origin=None, destination=None, day=None, **kw):
+        calls.append((origin, destination, day, kw.get("value_min"), kw.get("value_max")))
+        series = _fake_fetch(origin, destination, day, **kw)
+        for t in series["tickets"]:            # MOW→IST дорожает по дням — бюджету есть что резать
+            if t["origin"] == "MOW":
+                t["price"] += int(day[-2:])
+        return series
+    monkeypatch.setattr(graphql_api, "fetch_series", fetch)
+    req = main.PlanQueryRequest(stops=[main.PlanStop(**s) for s in JOB_STOPS], maxResults=10)
+    job = main.plan_run(req)["job_id"]
+    assert calls and all(c[3] is None and c[4] is None for c in calls)   # без ценовых коридоров
+    n_calls = len(calls)
+    base = main.plan_job_routes(job)
+    assert base["status"] == "ok" and base["count"] > 0
+
+    cheapest = min(it["total_price"] for it in base["items"])
+    f = json.dumps({"maxCost": cheapest})
+    status = main.plan_job_status(job, f)
+    assert status["status"] == "done" and status["summary"]["count"] >= 1
+    narrowed = main.plan_job_routes(job, f=f)
+    assert all(it["total_price"] <= cheapest for it in narrowed["items"])
+    assert narrowed["count"] < base["count"]
+    combos = main.plan_job_combos(job, f=f)
+    assert combos["items"] and all(c["minPrice"] <= cheapest for c in combos["items"])
+    assert narrowed["count"] <= combos["totalCount"] <= base["count"]   # count наборов — оценка сверху
+    none = json.dumps({"maxCost": 1})
+    assert main.plan_job_routes(job, f=none)["total"] == 0
+    assert main.plan_job_combos(job, f=none)["total"] == 0
+    assert len(calls) == n_calls                                        # источник не трогали
+    assert main.plan_job_status(job, "{not json")["status"] == "error"

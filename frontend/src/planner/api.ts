@@ -3,7 +3,7 @@
 
 import type { JobStatus } from '../data/jobsApi'
 import type { PlanQuery } from './query'
-import { toApi } from './query'
+import { filtersParam, toApi } from './query'
 import type { Itinerary, PlannerEstimate } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
@@ -67,17 +67,24 @@ export function runPlan(q: PlanQuery): Promise<RunResponse> {
   })
 }
 
-export function fetchPlanJob(jobId: string): Promise<JobStatus & { summary?: { count: number; combos: number; totalCount: number } }> {
-  return getJson(`${API_BASE}/plan/jobs/${jobId}`)
+// Джоба = рейсы по остановкам запроса; фильтры и бюджет (f) — при каждом чтении:
+// другой f у той же джобы — стыковка на бэке без повторного сбора.
+const f = (q: PlanQuery) => `f=${encodeURIComponent(filtersParam(q))}`
+
+export function fetchPlanJob(
+  jobId: string,
+  q: PlanQuery,
+): Promise<JobStatus & { summary?: { count: number; combos: number; totalCount: number } }> {
+  return getJson(`${API_BASE}/plan/jobs/${jobId}?${f(q)}`)
 }
 
-export function fetchCombos(jobId: string, sort: 'price' | 'count' | 'transfers', offset: number, limit: number) {
-  return getJson<CombosPage>(`${API_BASE}/plan/jobs/${jobId}/combos?sort=${sort}&offset=${offset}&limit=${limit}`)
+export function fetchCombos(jobId: string, q: PlanQuery, sort: 'price' | 'count' | 'transfers', offset: number, limit: number) {
+  return getJson<CombosPage>(`${API_BASE}/plan/jobs/${jobId}/combos?sort=${sort}&offset=${offset}&limit=${limit}&${f(q)}`)
 }
 
-export function fetchRoutes(jobId: string, offset: number, limit: number, combos: string[] | null) {
+export function fetchRoutes(jobId: string, q: PlanQuery, offset: number, limit: number, combos: string[] | null) {
   const c = combos && combos.length ? `&combos=${encodeURIComponent(combos.join(','))}` : ''
-  return getJson<RoutesPage>(`${API_BASE}/plan/jobs/${jobId}/routes?offset=${offset}&limit=${limit}${c}`)
+  return getJson<RoutesPage>(`${API_BASE}/plan/jobs/${jobId}/routes?offset=${offset}&limit=${limit}${c}&${f(q)}`)
 }
 
 // «Починить»: сбрасывает зависшие на сервере сборы (running без обновлений > минуты).
