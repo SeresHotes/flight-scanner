@@ -8,6 +8,7 @@
 
 `http` — объект с .post/.get как у requests.Session (в тестах — TestClient)."""
 import os
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -31,10 +32,20 @@ class CollectorClient:
     def __init__(self, base_url: str, http=None, timeout: float = DEFAULT_TIMEOUT,
                  poll_wait: float = POLL_WAIT, sleep: Callable[[float], None] = time.sleep):
         self.base = base_url.rstrip("/")
-        self.http = http or requests.Session()
+        self._http = http
+        self._local = threading.local()  # requests.Session не потокобезопасна — своя на поток
         self.timeout = timeout
         self.poll_wait = poll_wait
         self._sleep = sleep
+
+    @property
+    def http(self):
+        if self._http is not None:
+            return self._http
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = self._local.session = requests.Session()
+        return session
 
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
