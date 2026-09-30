@@ -296,13 +296,7 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
     if last < 1 {
         return Overview::default();
     }
-    let budget = query.and_then(|q| q.max_cost);
-    let mut rows = leg_rows(table, last, query);
-    if let Some(b) = budget {
-        for r in rows.iter_mut() {
-            r.retain(|&x| table.price[x] <= b);
-        }
-    }
+    let rows = leg_rows(table, last, query);
     let legs: Vec<Leg> = (0..last).map(|i| Leg::new(table, &rows[i])).collect();
     let city_filters: HashMap<usize, &CityFilter> = (1..last).filter_map(|i| query.and_then(|q| q.city_filter(i)).map(|cf| (i, cf))).collect();
     let trip = query.map(|q| q.trip_length).unwrap_or((0, None));
@@ -338,7 +332,6 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
         city_filters: &'a HashMap<usize, &'a CityFilter>,
         trip: (i64, Option<i64>),
         trip_active: bool,
-        budget: Option<f64>,
         last: usize,
     }
 
@@ -420,15 +413,6 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
                 }
             }
         }
-        if let Some(b) = env.budget {
-            for cell in 0..n_days * n_f {
-                if !(minp[cell] <= b) {
-                    cnt[cell] = 0.0;
-                    minp[cell] = f64::INFINITY;
-                    mintr[cell] = BIG_TR;
-                }
-            }
-        }
         let total: f64 = cnt.iter().sum();
         if total <= 0.0 {
             return;
@@ -472,7 +456,7 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
         }
     }
 
-    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, budget, last };
+    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last };
     let leg0 = &legs[0];
     let mut starts: Vec<u32> = Vec::new();
     for code in &stops[0].codes {
@@ -598,7 +582,6 @@ mod tests {
             (3, json!({"legs": [{"maxTransfers": 1}, {"baggage": "included"}, {}, {"maxTransfers": 0}]})),
             (4, json!({"tripLength": [3, 6]})),
             (5, json!({"cities": [{}, {"mustCover": ["2026-11-02", "2026-11-03"]}, {}, {"maxStay": 2}, {}], "tripLength": [2, null], "legs": [{}, {}, {"maxTransfers": 1}, {}]})),
-            (6, json!({"maxCost": 600})),
         ];
         for (seed, extra) in cases {
             let stops = stops();
@@ -609,7 +592,7 @@ mod tests {
             // эталон: полный A* с теми же фильтрами (проверен против перебора в search)
             let ctx = build_ctx(&stops, &table, Some(&q));
             let mut check = |_: usize| Ok(());
-            let chains = search_cheapest(&ctx, 100000, q.max_cost, Some(&q), &mut check).unwrap();
+            let chains = search_cheapest(&ctx, 100000, Some(&q), &mut check).unwrap();
             let mut expected: HashMap<Vec<String>, (i64, f64, i64, i64)> = HashMap::new();
             for c in &chains {
                 let mut codes = vec![table.orig_city(c[0]).to_string()];

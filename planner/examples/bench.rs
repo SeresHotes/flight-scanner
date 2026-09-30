@@ -39,7 +39,6 @@ fn main() {
     for l in alt_params["legs"].as_array_mut().unwrap() {
         l["maxTransfers"] = json!(1);
     }
-    alt_params["maxCost"] = json!(pq.max_cost.unwrap_or(1e9) * 0.8);
     let mut alt = PlanQuery::from_value(&alt_params).unwrap();
     if alt.max_results.is_none() {
         alt.max_results = Some(DEFAULT_MAX_RESULTS);
@@ -50,7 +49,7 @@ fn main() {
     let table = timed("read_parquet", repeats, &mut out, || FlightCols::read(path).unwrap());
     out.insert("rows".into(), json!(table.len()));
     let view = timed("astar_5000", repeats, &mut out, || {
-        build_itineraries_compact(&stops, &table, pq.max_results.unwrap() as usize, pq.max_cost, Some(&pq), &mut ok).unwrap()
+        build_itineraries_compact(&stops, &table, pq.max_results.unwrap() as usize, Some(&pq), &mut ok).unwrap()
     });
     out.insert("count".into(), json!(view.count));
     let ov = timed("overview", repeats, &mut out, || build_overview(&stops, &table, Some(&pq)));
@@ -64,7 +63,7 @@ fn main() {
     let cr = timed("combo_routes_2", repeats, &mut out, || build_combo_routes(&stops, &table, &combos, Some(&pq)));
     out.insert("combo_routes".into(), json!(cr.len()));
     let alt_view = timed("alt_filter_astar", repeats, &mut out, || {
-        build_itineraries_compact(&stops, &table, alt.max_results.unwrap() as usize, alt.max_cost, Some(&alt), &mut ok).unwrap()
+        build_itineraries_compact(&stops, &table, alt.max_results.unwrap() as usize, Some(&alt), &mut ok).unwrap()
     });
     out.insert("alt_count".into(), json!(alt_view.count));
     let alt_ov = timed("alt_filter_overview", repeats, &mut out, || build_overview(&stops, &table, Some(&alt)));

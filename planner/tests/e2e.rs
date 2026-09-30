@@ -182,8 +182,7 @@ async fn plan_job_end_to_end() {
         ],
         "cities": [{}, {}, {}],
         "legs": [{}, {}],
-        "tripLength": [0, null],
-        "maxCost": null
+        "tripLength": [0, null]
     });
     let est: Value = client.post(format!("{base}/api/plan/estimate")).json(&query).send().await.unwrap().json().await.unwrap();
     assert_eq!(est["requests"], 3 * 13 + 3 * 13);

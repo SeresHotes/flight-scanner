@@ -178,7 +178,7 @@ pub fn build_view(stops: &[Stop], table: &FlightCols, pq: &PlanQuery, on_progres
         explored += 1;
         on_progress(found, explored)
     };
-    let view = build_itineraries_compact(stops, table, max_results, pq.max_cost, Some(pq), &mut check)?;
+    let view = build_itineraries_compact(stops, table, max_results, Some(pq), &mut check)?;
     on_stage("combos");
     let combos = build_overview(stops, table, Some(pq));
     Ok(ViewResult { view, combos })

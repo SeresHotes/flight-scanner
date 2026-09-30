@@ -6,7 +6,7 @@
 //! cities[]:     {minStay, maxStay, mustCover: [a, b] | null, requireWeekend}   # == stops
 //! legs[]:       {maxTransfers, minLayoverMin, travelMin: [lo, hi],
 //!                baggage: any|included|none, hiddenCity}                       # == stops - 1
-//! tripLength:   [lo, hi]      maxCost: number|null      maxResults: number
+//! tripLength:   [lo, hi]      maxResults: number
 //! ```
 //!
 //! Все фильтры необязательны: отсутствующие = «без ограничений». Фильтры плеча
@@ -173,7 +173,6 @@ pub struct PlanQuery {
     pub cities: Vec<CityFilter>,
     pub legs: Vec<LegFilter>,
     pub trip_length: (i64, Option<i64>),
-    pub max_cost: Option<f64>,
     pub max_results: Option<i64>,
 }
 
@@ -207,16 +206,6 @@ fn int_of(v: Option<&Value>) -> Result<Option<i64>, String> {
         Some(Value::Number(n)) => Ok(Some(n.as_i64().or_else(|| n.as_f64().map(|f| f.trunc() as i64)).unwrap_or(0))),
         Some(Value::Bool(b)) => Ok(Some(*b as i64)),
         Some(Value::String(s)) => s.trim().parse::<i64>().map(Some).map_err(|_| format!("не число: {s:?}")),
-        Some(other) => Err(format!("не число: {other}")),
-    }
-}
-
-fn float_of(v: Option<&Value>) -> Result<Option<f64>, String> {
-    match v {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(n)) => Ok(n.as_f64()),
-        Some(Value::Bool(b)) => Ok(Some(if *b { 1.0 } else { 0.0 })),
-        Some(Value::String(s)) => s.trim().parse::<f64>().map(Some).map_err(|_| format!("не число: {s:?}")),
         Some(other) => Err(format!("не число: {other}")),
     }
 }
@@ -257,9 +246,9 @@ impl PlanQuery {
         let trip = d.get("tripLength").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         let trip_lo = trip.first().map(|v| int_of(Some(v))).transpose()?.flatten().unwrap_or(0);
         let trip_hi = trip.get(1).map(|v| int_of(Some(v))).transpose()?.flatten();
-        let max_cost = float_of(d.get("maxCost").or(d.get("max_cost")))?;
+        // maxCost (бюджет поездки) удалён 01.10.2026: в старых запросах/URL поле игнорируется.
         let max_results = int_of(d.get("maxResults").or(d.get("max_results")))?;
-        Ok(PlanQuery { stops, cities, legs, trip_length: (trip_lo, trip_hi), max_cost, max_results })
+        Ok(PlanQuery { stops, cities, legs, trip_length: (trip_lo, trip_hi), max_results })
     }
 
     pub fn stops_value(&self) -> Value {
@@ -286,7 +275,6 @@ impl PlanQuery {
             "cities": self.cities.iter().map(|c| c.as_value()).collect::<Vec<_>>(),
             "legs": self.legs.iter().map(|l| l.as_value()).collect::<Vec<_>>(),
             "tripLength": [self.trip_length.0, self.trip_length.1],
-            "maxCost": self.max_cost,
             "maxResults": self.max_results,
         })
     }
@@ -311,7 +299,7 @@ impl PlanQuery {
         hash_value(&Value::Array(items))
     }
 
-    /// Всё, кроме остановок: фильтры, бюджет, потолок цепочек.
+    /// Всё, кроме остановок: фильтры и потолок цепочек.
     pub fn filters(&self) -> Value {
         let mut v = self.as_value();
         if let Some(m) = v.as_object_mut() {
@@ -371,15 +359,15 @@ mod tests {
             "cities": [{}, {"minStay": 2}],
             "legs": [{"baggage": "included", "travelMin": [0, null]}],
             "tripLength": [3, null],
-            "maxCost": 50000,
+            "maxCost": 50000,   // удалённое поле — игнорируется
             "maxResults": 5000
         }))
         .unwrap();
         assert_eq!(q.stops[0].codes, vec!["MOW"]);
         assert_eq!(q.cities[1].min_stay, 2);
         assert_eq!(q.legs[0].baggage, "included");
-        assert_eq!(q.max_cost, Some(50000.0));
         assert_eq!(q.mode(), "combos");
+        assert!(!q.as_value().as_object().unwrap().contains_key("maxCost"));
         // ключ сбора — те же данные и порядок ключей, что у Python (sha1 канонического JSON)
         let canon = serde_json::to_string(&json!([
             {"codes": ["MOW"], "kind": "cities", "radiusKm": 0, "window": ["", ""]},
@@ -390,7 +378,7 @@ mod tests {
         assert_eq!(q.collect_key(), hash_value(&serde_json::from_str::<Value>(&canon).unwrap()));
         assert_eq!(q.collect_key().len(), 16);
         // фильтры не меняют ключ сбора, но меняют ключ вида
-        let q2 = q.with_filters(&json!({"maxCost": 1000})).unwrap();
+        let q2 = q.with_filters(&json!({"tripLength": [5, 9]})).unwrap();
         assert_eq!(q2.collect_key(), q.collect_key());
         assert_ne!(q2.view_key(), q.view_key());
         assert_eq!(q2.max_results, Some(5000));

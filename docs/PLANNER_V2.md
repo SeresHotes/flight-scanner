@@ -93,7 +93,7 @@ stops[]:        {kind: cities|any, codes[], window[start,end]}         # как 
 cities[]:       {minStay, maxStay, mustCover|null, requireWeekend}      # == stops
 legs[]:         {maxTransfers, minLayoverMin, travelMin[lo,hi],
                  baggage: any|included|none, hiddenCity: bool}          # == stops-1
-tripLength[lo,hi], maxCost|null, maxResults
+tripLength[lo,hi], maxResults            # maxCost (бюджет) удалён 01.10.2026
 ```
 Фильтр `allowedCodes` из старых фильтров исчезает: сужение по городам делается
 выбором наборов на странице `/combos`. Запрос сериализуется в URL целиком

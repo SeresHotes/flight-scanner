@@ -319,7 +319,6 @@ fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery) -> Value {
     let mut payload = query.as_value();
     payload["kind"] = json!("plan");
     payload["max_results"] = json!(query.max_results);
-    payload["max_cost"] = json!(query.max_cost);
     {
         let conn = app.conn.lock().unwrap();
         if let Err(e) = hot::create_job(&conn, &job_id, &payload, est.requests, Some(&worker::initial_stage()), Some(&key)) {
