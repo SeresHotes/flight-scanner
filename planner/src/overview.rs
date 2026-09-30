@@ -8,9 +8,14 @@
 //! следующего плеча — по тем же правилам стыковки, что у перебора A*: подходящие
 //! предшественники рейса f — отрезок в списке, отсортированном по времени прилёта
 //! (число — разность накопленных сумм, минимумы — минимум на отрезке).
+//!
+//! Выдача — COMBOS_TOP самых дешёвых наборов: обход префиксов отсекает ветки, чья нижняя
+//! оценка (минимальная цена префикса + минимальная цена хвоста по городам, как у поиска
+//! маршрутов) выше цены K-го найденного набора; результат тот же, что у полного обхода
+//! с сортировкой по (minPrice, codes).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
@@ -19,7 +24,7 @@ use crate::dates::{date_ordinal, weekend_deadline, DAY_SECONDS};
 use crate::flightcols::{FlightCols, NO_CODE};
 use crate::nearby::{Hops, HOP_MIN_GAP_MIN};
 use crate::planquery::{CityFilter, PlanQuery};
-use crate::search::leg_rows;
+use crate::search::{build_ctx, completion_lb, leg_rows};
 use crate::segments::city_pair;
 use crate::stops::{leg_dates, Stop};
 
@@ -39,9 +44,13 @@ pub struct Combo {
 
 #[derive(Debug, Clone, Default)]
 pub struct Overview {
+    /// COMBOS_TOP самых дешёвых наборов по возрастанию (minPrice, codes).
     pub combos: Vec<Combo>,
+    /// Цепочек во всех выданных наборах.
     pub total_count: i64,
     pub cities: HashMap<String, (String, String)>,
+    /// Наборов больше, чем выдано: часть вытеснена из K лучших или отсечена по оценке.
+    pub truncated: bool,
 }
 
 /// Рейсы плеча в локальных массивах + индекс по коду вылета. Коды — номера словаря
@@ -290,10 +299,65 @@ fn extend(state: &State, prev: &Leg, p_idx: &[usize], nxt: &Leg, f_idx: &[usize]
     out
 }
 
-/// {combos по цене, totalCount, cities}.
+/// Сколько наборов держит выдача: 1000 самых дешёвых по минимальной цене.
+pub const COMBOS_TOP: usize = 1000;
+
+/// Набор в куче лучших: порядок (minPrice, codes) — тот же, что у итоговой сортировки,
+/// поэтому вытеснение из кучи даёт ровно первые K полного списка.
+struct Ranked(Combo);
+
+impl PartialEq for Ranked {
+    fn eq(&self, o: &Self) -> bool {
+        self.cmp(o) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for Ranked {}
+impl PartialOrd for Ranked {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for Ranked {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.0.min_price.partial_cmp(&o.0.min_price).unwrap_or(std::cmp::Ordering::Equal).then_with(|| self.0.codes.cmp(&o.0.codes))
+    }
+}
+
+/// K лучших наборов: max-куча по (цена, коды); `cutoff` — цена K-го (порог отсечения
+/// веток: набор дороже K-го в выдачу уже не попадёт), пока наборов меньше K — ∞.
+struct Best {
+    heap: BinaryHeap<Ranked>,
+    k: usize,
+    /// Что-то не вошло в K: набор вытеснен из кучи или ветка отсечена по оценке.
+    truncated: bool,
+}
+
+impl Best {
+    fn cutoff(&self) -> f64 {
+        if self.heap.len() >= self.k { self.heap.peek().map(|r| r.0.min_price).unwrap_or(f64::INFINITY) } else { f64::INFINITY }
+    }
+
+    fn push(&mut self, c: Combo) {
+        self.heap.push(Ranked(c));
+        if self.heap.len() > self.k {
+            self.heap.pop();
+            self.truncated = true;
+        }
+    }
+}
+
+/// {combos по цене, totalCount, cities}: COMBOS_TOP самых дешёвых наборов.
 pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQuery>) -> Overview {
+    build_overview_top(stops, table, query, COMBOS_TOP)
+}
+
+/// `top` самых дешёвых наборов по минимальной цене — ровно те, что дал бы полный обход с
+/// сортировкой по (minPrice, codes). Ветки, чья нижняя оценка (минимальная цена префикса +
+/// минимальная цена хвоста по городам, `search::completion_lb`) выше цены K-го найденного
+/// набора, не раскрываются; дети обходятся по возрастанию оценки, чтобы порог сжимался раньше.
+pub fn build_overview_top(stops: &[Stop], table: &FlightCols, query: Option<&PlanQuery>, top: usize) -> Overview {
     let last = stops.len().saturating_sub(1);
-    if last < 1 {
+    if last < 1 || top == 0 {
         return Overview::default();
     }
     let rows = leg_rows(table, last, query);
@@ -319,9 +383,11 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
             })
         })
         .collect();
+    // Нижняя оценка хвоста по городу (без дат) — та же, что у поиска маршрутов.
+    let ctx = build_ctx(stops, table, query);
+    let lb = completion_lb(&ctx);
 
-    let mut combos: Vec<Combo> = Vec::new();
-    let mut codes_used: HashSet<u32> = HashSet::new();
+    let mut best = Best { heap: BinaryHeap::new(), k: top, truncated: false };
 
     struct Env<'a> {
         legs: &'a [Leg],
@@ -333,6 +399,15 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
         trip: (i64, Option<i64>),
         trip_active: bool,
         last: usize,
+        lb: &'a [FxHashMap<u32, f64>],
+    }
+
+    impl Env<'_> {
+        /// Минимальная цена хвоста из города `city` на остановке `stop` (0 у финала;
+        /// None — из этого города до финала не добраться вовсе).
+        fn tail(&self, stop: usize, city: u32) -> Option<f64> {
+            if stop == self.last { Some(0.0) } else { self.lb[stop].get(&city).copied() }
+        }
     }
 
     /// Hops::departs по номерам кодов (один раз на (плечо, город)).
@@ -394,7 +469,27 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
         out
     }
 
-    fn finish(env: &Env, seq: &[u32], leg: &Leg, f_idx: &[usize], state: &State, first_days: &[i64], combos: &mut Vec<Combo>, used: &mut HashSet<u32>) {
+    /// Группы плеча k с предварительной оценкой: минимальная цена префикса + самый дешёвый
+    /// рейс группы + хвост из города группы; по возрастанию оценки. Группы без хвоста
+    /// (из города не добраться до финала) отброшены.
+    fn ranked_groups(env: &Env, leg: &Leg, f_idx: &[usize], k: usize, seq: &[u32], prefix_min: f64) -> Vec<(f64, u32, Vec<usize>)> {
+        let mut out: Vec<(f64, u32, Vec<usize>)> = groups(env, leg, f_idx, k, seq)
+            .into_iter()
+            .filter_map(|(dest, fis)| {
+                let tail = env.tail(k + 1, dest)?;
+                let fmin = fis.iter().map(|&fi| leg.price[fi]).fold(f64::INFINITY, f64::min);
+                Some((prefix_min + fmin + tail, dest, fis))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+        out
+    }
+
+    fn state_min(state: &State) -> f64 {
+        state.minp.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+
+    fn finish(env: &Env, seq: &[u32], leg: &Leg, f_idx: &[usize], state: &State, first_days: &[i64], best: &mut Best) {
         let (n_days, n_f) = (state.n_days, state.n_p);
         let mut cnt = state.cnt.clone();
         let mut minp = state.minp.clone();
@@ -423,40 +518,50 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
                 flat = cell;
             }
         }
-        combos.push(Combo {
+        best.push(Combo {
             codes: seq.iter().map(|&c| env.table.codes[c as usize].clone()).collect(),
             min_price: minp[flat],
             transfers_at_min: state.tr_at[flat],
             min_transfers: mintr.iter().copied().min().unwrap_or(BIG_TR),
             count: total.round() as i64,
         });
-        used.extend(seq.iter().copied());
     }
 
-    fn expand(env: &Env, k: usize, seq: &[u32], prev: &Leg, p_idx: &[usize], state: &State, first_days: &[i64], combos: &mut Vec<Combo>, used: &mut HashSet<u32>) {
+    fn expand(env: &Env, k: usize, seq: &[u32], prev: &Leg, p_idx: &[usize], state: &State, first_days: &[i64], best: &mut Best) {
         let leg = &env.legs[k];
         let city = *seq.last().unwrap();
         let f_all = onward(env, k, city);
         if f_all.is_empty() {
             return;
         }
-        for (dest, fis) in groups(env, leg, &f_all, k, seq) {
+        let prefix_min = state_min(state);
+        for (bound, dest, fis) in ranked_groups(env, leg, &f_all, k, seq, prefix_min) {
+            if bound > best.cutoff() {
+                best.truncated = true;
+                break; // группы по возрастанию оценки — дальше только дороже
+            }
             let hop: Vec<bool> = fis.iter().map(|&fi| !leg.origin_has(fi, city)).collect();
             let new_state = extend(state, prev, p_idx, leg, &fis, env.city_filters.get(&k).copied(), Some(&hop));
             if new_state.total() <= 0.0 {
                 continue;
             }
+            // точная оценка после стыковки: минимум нового префикса + хвост
+            let exact = state_min(&new_state) + env.tail(k + 1, dest).unwrap_or(f64::INFINITY);
+            if exact > best.cutoff() {
+                best.truncated = true;
+                continue;
+            }
             let mut new_seq = seq.to_vec();
             new_seq.push(dest);
             if k + 1 == env.last {
-                finish(env, &new_seq, leg, &fis, &new_state, first_days, combos, used);
+                finish(env, &new_seq, leg, &fis, &new_state, first_days, best);
             } else {
-                expand(env, k + 1, &new_seq, leg, &fis, &new_state, first_days, combos, used);
+                expand(env, k + 1, &new_seq, leg, &fis, &new_state, first_days, best);
             }
         }
     }
 
-    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last };
+    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last, lb: &lb };
     let leg0 = &legs[0];
     let mut starts: Vec<u32> = Vec::new();
     for code in &stops[0].codes {
@@ -468,55 +573,75 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
             }
         }
     }
+    // Первые группы всех стартов вместе — по возрастанию оценки (0 + рейс + хвост).
+    let mut first_groups: Vec<(f64, u32, u32, Vec<usize>)> = Vec::new();
     for &start in &starts {
         let Some(f_all) = leg0.by_origin.get(&start) else { continue };
         let seq0 = vec![start];
-        for (dest, fis) in groups(&env, leg0, f_all, 0, &seq0) {
-            let ok: Vec<bool> = fis.iter().map(|&fi| leg0.dep_ord[fi] >= start_ord).collect();
-            let n_f = fis.len();
-            let (first_days, cnt): (Vec<i64>, Vec<f64>) = if trip_active {
-                let mut days: Vec<i64> = fis.iter().map(|&fi| leg0.dep_ord[fi]).collect();
-                days.sort_unstable();
-                days.dedup();
-                let mut cnt = vec![0.0; days.len() * n_f];
-                for (d, &day) in days.iter().enumerate() {
-                    for j in 0..n_f {
-                        if leg0.dep_ord[fis[j]] == day && ok[j] {
-                            cnt[d * n_f + j] = 1.0;
-                        }
-                    }
-                }
-                (days, cnt)
-            } else {
-                (vec![0], ok.iter().map(|&o| if o { 1.0 } else { 0.0 }).collect())
-            };
-            let n_days = first_days.len();
-            let mut state = State { n_days, n_p: n_f, cnt, minp: vec![f64::INFINITY; n_days * n_f], tr_at: vec![0; n_days * n_f], mintr: vec![BIG_TR; n_days * n_f] };
-            for d in 0..n_days {
+        for (bound, dest, fis) in ranked_groups(&env, leg0, f_all, 0, &seq0, 0.0) {
+            first_groups.push((bound, start, dest, fis));
+        }
+    }
+    first_groups.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    for (bound, start, dest, fis) in first_groups {
+        if bound > best.cutoff() {
+            best.truncated = true;
+            break;
+        }
+        let ok: Vec<bool> = fis.iter().map(|&fi| leg0.dep_ord[fi] >= start_ord).collect();
+        let n_f = fis.len();
+        let (first_days, cnt): (Vec<i64>, Vec<f64>) = if trip_active {
+            let mut days: Vec<i64> = fis.iter().map(|&fi| leg0.dep_ord[fi]).collect();
+            days.sort_unstable();
+            days.dedup();
+            let mut cnt = vec![0.0; days.len() * n_f];
+            for (d, &day) in days.iter().enumerate() {
                 for j in 0..n_f {
-                    let cell = d * n_f + j;
-                    state.tr_at[cell] = leg0.transfers[fis[j]];
-                    if state.cnt[cell] > 0.0 {
-                        state.minp[cell] = leg0.price[fis[j]];
-                        state.mintr[cell] = leg0.transfers[fis[j]];
+                    if leg0.dep_ord[fis[j]] == day && ok[j] {
+                        cnt[d * n_f + j] = 1.0;
                     }
                 }
             }
-            let seq = vec![start, dest];
-            if last == 1 {
-                finish(&env, &seq, leg0, &fis, &state, &first_days, &mut combos, &mut codes_used);
-            } else {
-                expand(&env, 1, &seq, leg0, &fis, &state, &first_days, &mut combos, &mut codes_used);
+            (days, cnt)
+        } else {
+            (vec![0], ok.iter().map(|&o| if o { 1.0 } else { 0.0 }).collect())
+        };
+        let n_days = first_days.len();
+        let mut state = State { n_days, n_p: n_f, cnt, minp: vec![f64::INFINITY; n_days * n_f], tr_at: vec![0; n_days * n_f], mintr: vec![BIG_TR; n_days * n_f] };
+        for d in 0..n_days {
+            for j in 0..n_f {
+                let cell = d * n_f + j;
+                state.tr_at[cell] = leg0.transfers[fis[j]];
+                if state.cnt[cell] > 0.0 {
+                    state.minp[cell] = leg0.price[fis[j]];
+                    state.mintr[cell] = leg0.transfers[fis[j]];
+                }
             }
+        }
+        if state.total() <= 0.0 {
+            continue;
+        }
+        let exact = state_min(&state) + env.tail(1, dest).unwrap_or(f64::INFINITY);
+        if exact > best.cutoff() {
+            best.truncated = true;
+            continue;
+        }
+        let seq = vec![start, dest];
+        if last == 1 {
+            finish(&env, &seq, leg0, &fis, &state, &first_days, &mut best);
+        } else {
+            expand(&env, 1, &seq, leg0, &fis, &state, &first_days, &mut best);
         }
     }
 
+    let truncated = best.truncated;
+    let mut combos: Vec<Combo> = best.heap.into_iter().map(|r| r.0).collect();
     combos.sort_by(|a, b| a.min_price.partial_cmp(&b.min_price).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.codes.cmp(&b.codes)));
     let total_count = combos.iter().map(|c| c.count).sum();
-    let mut codes: Vec<String> = codes_used.into_iter().map(|c| table.codes[c as usize].clone()).collect();
+    let mut codes: Vec<String> = combos.iter().flat_map(|c| c.codes.iter().cloned()).collect::<HashSet<_>>().into_iter().collect();
     codes.sort();
     let cities = codes.into_iter().map(|c| { let p = city_pair(&c); (c, p) }).collect();
-    Overview { combos, total_count, cities }
+    Overview { combos, total_count, cities, truncated }
 }
 
 #[cfg(test)]
@@ -620,6 +745,62 @@ mod tests {
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             assert_eq!(prices, sorted);
             assert_eq!(got.cities.keys().cloned().collect::<HashSet<_>>(), got.combos.iter().flat_map(|c| c.codes.clone()).collect::<HashSet<_>>());
+        }
+    }
+
+    /// Плечи с большим числом городов: наборов много больше K.
+    fn wide_collected(seed: u64) -> Vec<Vec<std::sync::Arc<crate::ticket::Ticket>>> {
+        let mut rng = Rng(seed * 7 + 11);
+        let mid: Vec<&str> = vec!["IST", "DXB", "DOH", "AUH", "TAS", "ALA", "EVN", "TBS", "BKK", "SIN", "HKG", "DEL"];
+        let cities: [Vec<&str>; 5] = [vec!["MOW"], mid.clone(), vec!["SEL"], mid.clone(), vec!["MOW"]];
+        let mut collected = Vec::new();
+        for i in 0..4 {
+            let mut flights = Vec::new();
+            for o in &cities[i] {
+                for d in &cities[i + 1] {
+                    if o == d {
+                        continue;
+                    }
+                    for _ in 0..(2 + rng.below(3)) {
+                        let day = 1 + rng.below(20) as u32;
+                        let h = rng.below(23) as u32;
+                        let mut t = (*flight(o, d, day, h, (50 + rng.below(451)) as f64)).clone();
+                        let arr_day = if h < 18 { day } else { (day + 1).min(20) };
+                        t.arrival_at = Some(format!("2026-11-{arr_day:02}T{:02}:30:00+03:00", (h + 5) % 24));
+                        t.transfers = rng.below(3) as i64;
+                        t.duration = Some(300);
+                        t.flight_number = Some(format!("{}", flights.len()));
+                        flights.push(std::sync::Arc::new(t));
+                    }
+                }
+            }
+            collected.push(flights);
+        }
+        collected
+    }
+
+    /// Топ-K с отсечением — ровно первые K полного списка (сортировка по (minPrice, codes)),
+    /// флаг truncated — когда наборов больше K.
+    #[test]
+    fn top_k_matches_full_enumeration() {
+        for seed in 1..=4 {
+            let stops: Vec<Stop> = stops().into_iter().map(|s| Stop { window: if s.window[0].is_empty() { s.window } else { ["2026-11-01".into(), "2026-11-20".into()] }, ..s }).collect();
+            let table = FlightCols::from_collected(&wide_collected(seed));
+            let q = PlanQuery::from_value(&json!({"stops": stops.iter().map(|s| json!({"kind": s.kind, "codes": s.codes, "window": s.window})).collect::<Vec<_>>(), "cities": [{}, {"minStay": 1}, {}, {}, {}], "maxResults": 100000})).unwrap();
+            let full = build_overview_top(&stops, &table, Some(&q), usize::MAX);
+            assert!(full.combos.len() > 20, "мало наборов: {}", full.combos.len());
+            assert!(!full.truncated);
+            for k in [1usize, 3, 10, 17, full.combos.len() - 1, full.combos.len(), full.combos.len() + 5] {
+                let got = build_overview_top(&stops, &table, Some(&q), k);
+                let want: Vec<&Combo> = full.combos.iter().take(k).collect();
+                assert_eq!(got.combos.len(), want.len(), "seed {seed} k {k}");
+                for (g, w) in got.combos.iter().zip(want.iter()) {
+                    assert_eq!(g, *w, "seed {seed} k {k}");
+                }
+                assert_eq!(got.truncated, k < full.combos.len(), "seed {seed} k {k}");
+                assert_eq!(got.total_count, want.iter().map(|c| c.count).sum::<i64>());
+                assert_eq!(got.cities.keys().cloned().collect::<HashSet<_>>(), got.combos.iter().flat_map(|c| c.codes.clone()).collect::<HashSet<_>>());
+            }
         }
     }
 

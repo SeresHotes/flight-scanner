@@ -76,9 +76,17 @@ function CombosList({ jobId, query, queryString }: { jobId: string; query: PlanQ
   return (
     <div className="pl-combos">
       <div className="count">
-        <b>{first.total.toLocaleString('ru-RU')}</b> {plural(first.total, 'набор', 'набора', 'наборов')} городов ·{' '}
+        {first.truncated ? (
+          <>
+            Показаны <b>{first.total.toLocaleString('ru-RU')}</b> самых дешёвых {plural(first.total, 'набор', 'набора', 'наборов')} городов (всего их больше) ·{' '}
+          </>
+        ) : (
+          <>
+            <b>{first.total.toLocaleString('ru-RU')}</b> {plural(first.total, 'набор', 'набора', 'наборов')} городов ·{' '}
+          </>
+        )}
         <b>{first.totalCount.toLocaleString('ru-RU')}</b> {plural(first.totalCount, 'маршрут', 'маршрута', 'маршрутов')} под
-        фильтры (без лимита маршрутов и цены)
+        фильтры {first.truncated ? 'в них' : '(без лимита маршрутов)'}
       </div>
 
       <div className="pl-combo-sort">

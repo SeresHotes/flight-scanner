@@ -399,7 +399,7 @@ async fn plan_job_combos(State(app): State<Arc<AppState>>, Path(job_id): Path<St
         let limit = q.limit.clamp(1, 500) as usize;
         let offset = q.offset.max(0) as usize;
         if overview.combos.is_empty() {
-            return json!({"status": "ok", "total": 0, "totalCount": 0, "offset": offset, "limit": limit, "items": [], "cities": {}});
+            return json!({"status": "ok", "total": 0, "totalCount": 0, "truncated": false, "offset": offset, "limit": limit, "items": [], "cities": {}});
         }
         let mut combos: Vec<&crate::overview::Combo> = overview.combos.iter().collect();
         match q.sort.as_str() {
@@ -418,7 +418,7 @@ async fn plan_job_combos(State(app): State<Arc<AppState>>, Path(job_id): Path<St
                 }
             }
         }
-        json!({"status": "ok", "total": combos.len(), "totalCount": overview.total_count, "offset": offset, "limit": limit, "items": page, "cities": cities})
+        json!({"status": "ok", "total": combos.len(), "totalCount": overview.total_count, "truncated": overview.truncated, "offset": offset, "limit": limit, "items": page, "cities": cities})
     })
     .await
     .unwrap_or(Value::Null);
@@ -512,6 +512,7 @@ async fn plan_job_status(State(app): State<Arc<AppState>>, Path(job_id): Path<St
                 "count": entry.result.view.count,
                 "combos": entry.result.combos.combos.len(),
                 "totalCount": entry.result.combos.total_count,
+                "truncated": entry.result.combos.truncated,
             });
             return out;
         }
