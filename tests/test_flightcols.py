@@ -7,7 +7,7 @@ import json
 
 import numpy as np
 
-from core.flightcols import FlightCols
+from core.flightcols import FlightCols, segment_source
 from core.overview import _weekend_deadline, _weekend_deadlines
 from core.planquery import LegFilter
 from storage import hot
@@ -41,7 +41,7 @@ def test_parquet_round_trip_keeps_columns_and_flights(tmp_path):
     for k in ("pts_min", "layover", "dep_ts", "arr_ts"):
         assert np.array_equal(getattr(back, k), getattr(cols, k), equal_nan=True), k
     flat = [f for leg in sorted(collected) for f in collected[leg]]
-    assert [back.flight(i) for i in range(len(back))] == flat
+    assert [back.flight(i) for i in range(len(back))] == [segment_source(f) for f in flat]
     assert back.dest[5] == "IST" and back.price_list[5] == 5000          # search_destination, value
     assert back.dep_iso[3] is None and back.dep_ord[3] == -1             # без вылета
     assert back.arr_iso[4] == "2026-10-29T18:00:00"                      # прилёт по длительности
@@ -77,3 +77,29 @@ def test_store_writes_file_and_migrates_old_blob(tmp_path):
     assert len(got) == 9 and hot.plan_flights_path(conn, "old").exists()
     assert conn.execute("SELECT COUNT(*) FROM plan_flights WHERE job_id='old'").fetchone()[0] == 0
     assert hot.get_plan_flights(conn, "nope") is None
+
+
+def test_segment_source_gives_same_segment():
+    """В файле рейс урезан до полей сегмента — make_segment даёт тот же сегмент
+    (hidden-city — со ссылкой на реальный билет, рейс без transfer_points — пересадки
+    из токена ссылки)."""
+    from core.segments import Builder
+    b = Builder(None, lambda code: {"city": code, "country": "", "flag": ""})
+    rest_link = {"origin": "MOW", "destination": "IST", "departure_at": "2026-10-30T08:00:00", "price": 1,
+                 "transfers": 1, "link": "/search/MOW3010IST1?t=SU17000SVOLEDIST_x"}
+    flights = [f for fl in _flights().values() for f in fl] + [rest_link]
+    for f in flights:
+        assert b.make_segment(segment_source(f)) == b.make_segment(f), f.get("flight_number")
+    assert "link" not in segment_source(DIRECT_PKX) and "legs" not in segment_source(DIRECT_PKX)
+
+
+def test_reads_old_files_with_raw_column(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    cols = FlightCols.from_collected(_flights())
+    table = cols.to_table()
+    old = table.drop_columns(["seg"]).append_column(
+        "raw", pa.array([json.dumps(cols.flight(i)) for i in range(len(cols))]))
+    pq.write_table(old, str(tmp_path / "old.parquet"))
+    back = FlightCols.read(str(tmp_path / "old.parquet"))
+    assert back.flight(1) == cols.flight(1)          # полный рейс из raw

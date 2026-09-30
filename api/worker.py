@@ -200,7 +200,7 @@ def build_view(stops: List[planner.Stop], collected: Dict[int, List[Dict[str, An
     наборы городов (core/overview). Зовут воркер сразу после сбора (рейсы ещё в
     памяти) и API, когда те же рейсы смотрят с другими фильтрами."""
     from core.overview import build_overview
-    city_info = city_info or make_city_lookup(load_airport_network())
+    city_info = city_info or make_city_lookup()
     # Компактный результат (сегменты один раз + плоские массивы индексов): на
     # 100k+ цепочек словари Itinerary и их JSON съедали гигабайты → OOM api.
     result = planner.build_itineraries_compact(
@@ -231,7 +231,7 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
                                            "maxCost": max_cost})
         stops = planner.parse_stops(pq.stops)
         total = planner.request_count(stops)
-        city_info = make_city_lookup(load_airport_network())
+        city_info = make_city_lookup()
         steps = [{"label": f"{leg['fromLabel']} → {leg['toLabel']}", "requests": leg["requests"]}
                  for leg in planner.estimate_plan(stops, city_info)["legs"]]
         rep = StageReporter(conn, job_id, "plan", steps)

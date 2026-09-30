@@ -3,7 +3,10 @@
 аэропорт), времена, длительность, пересадки с ожиданием, багаж, hidden-city,
 ссылка на покупку. Плюс справочник имён городов (make_city_lookup) и мелкая
 дата-арифметика поверх core/dates."""
+import json
 import re
+from pathlib import Path
+from typing import Optional
 
 from core.dates import calculate_arrival, calculate_stay_duration, parse_datetime
 
@@ -14,7 +17,24 @@ def flag_emoji(iso2: str) -> str:
     return "".join(chr(0x1F1E6 + ord(c.upper()) - ord("A")) for c in iso2)
 
 
-def make_city_lookup(network: dict):
+_CITY_NAMES_PATH = Path(__file__).resolve().parent / "city_names.json"
+
+
+def _city_names_network() -> dict:
+    """core/city_names.json ({код: [имя, ISO2]}, scripts/build_city_names.py) в форме
+    сети аэропортов: имя и страна — всё, что нужно выдаче (~230 КБ вместо 20 МБ)."""
+    try:
+        names = json.loads(_CITY_NAMES_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {code: {"municipality": name, "country": country} for code, (name, country) in names.items()}
+
+
+def make_city_lookup(network: Optional[dict] = None):
+    """Имя/страна/флаг города по коду. network — сеть аэропортов (тесты дают {});
+    без неё — компактный core/city_names.json."""
+    if network is None:
+        network = _city_names_network()
     # Метро-коды агломераций (BJS, LON, TYO…) физических аэропортов в сети не имеют,
     # поэтому их имена берём из курируемого справочника — иначе в выдаче остаётся
     # голый код («BJS» вместо «Beijing»). Импорт ленивый: рвём цикл airports↔trip_builder.

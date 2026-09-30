@@ -238,7 +238,7 @@ def build_overview(stops: List[Stop], collected, query: Optional[PlanQuery] = No
     """{combos: [{codes, minPrice, transfersAtMin, minTransfers, count}] по цене,
     totalCount, cities: {code: [city, flag]}}."""
     if city_info is None:
-        city_info = make_city_lookup(load_airport_network())
+        city_info = make_city_lookup()
     last = len(stops) - 1
     if last < 1:
         return {"combos": [], "totalCount": 0, "cities": {}}

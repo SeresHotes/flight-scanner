@@ -202,7 +202,7 @@ def estimate_plan(stops: List[Stop], city_info=None,
     is_cached(origin, dest, day, params_key, pages) → bool — проба кэша (storage.hot);
     без неё всё считается холодным."""
     if city_info is None:
-        city_info = make_city_lookup(load_airport_network())
+        city_info = make_city_lookup()
     stops = collect_view(stops)
     cached_by_leg: Dict[int, int] = {}
     if is_cached is not None:
@@ -746,7 +746,7 @@ def _stay_ok(cf, arrive_iso: str, depart_iso: str) -> bool:
 
 def _build_ctx(stops: List[Stop], table: FlightCols, query: Optional["PlanQuery"], city_info):
     if city_info is None:
-        city_info = make_city_lookup(load_airport_network())
+        city_info = make_city_lookup()
     builder = Builder(None, city_info)  # make_segment использует только city_info
     rows = _leg_rows(table, len(stops) - 1, query)
     legs_by_origin = {i: table.by_origin(rows[i]) for i in range(len(stops) - 1)}
@@ -1199,7 +1199,7 @@ def build_combo_routes(stops: List[Stop], collected: Dict[int, List[Dict[str, An
     и фильтры запроса — прежние). Результат — Itinerary по возрастанию цены, у каждого
     поле combo (ключ набора)."""
     if city_info is None:
-        city_info = make_city_lookup(load_airport_network())
+        city_info = make_city_lookup()
     max_cost = query.max_cost if query is not None else None
     collected = as_cols(collected)   # один раз на все наборы
     out: List[Dict[str, Any]] = []
