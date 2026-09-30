@@ -298,6 +298,13 @@ impl Ord for HeapItem {
     }
 }
 
+/// Первый день, когда можно вылетать с остановки i, прилетев в неё в день arrive_ord:
+/// со старта (i == 0, прилёт виртуальный — начало окна) — тот же день, дальше — строго
+/// следующий календарный день (вылет в день прилёта не стыкуется, даже позже по времени).
+pub fn min_depart_ord(i: usize, arrive_ord: i64) -> i64 {
+    if i == 0 { arrive_ord } else { arrive_ord + 1 }
+}
+
 /// Хватает ли времени на переезд в соседний город.
 fn gap_ok(arrive_ts: f64, depart_ts: f64) -> bool {
     depart_ts - arrive_ts >= (HOP_MIN_GAP_MIN * 60) as f64
@@ -384,7 +391,7 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, que
                 }
             }
             let fi = list.idxs[k];
-            if t.dep_ord[fi] < node.arrive_ord {
+            if t.dep_ord[fi] < min_depart_ord(i, node.arrive_ord) {
                 continue;
             }
             if list.hop[k] && i > 0 && !gap_ok(node.arrive_ts, t.dep_ts[fi]) {
@@ -855,7 +862,7 @@ pub mod tests {
                     if !seen.insert(fi) {
                         continue;
                     }
-                    if t.dep_ord[fi] < 0 || t.dep_ord[fi] < arr_ord {
+                    if t.dep_ord[fi] < 0 || t.dep_ord[fi] < min_depart_ord(i, arr_ord) {
                         continue;
                     }
                     let (oc, oa) = t.origin_codes(fi);
@@ -889,6 +896,37 @@ pub mod tests {
         }
         out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         out
+    }
+
+    /// Вылет следующего плеча — строго в более поздний календарный день, чем прилёт
+    /// предыдущего: тот же день не стыкуется даже позже по времени (и при открытом
+    /// фильтре города, где раньше проходил вылет в тот же день и даже раньше прилёта).
+    #[test]
+    fn next_leg_departs_strictly_next_day() {
+        let stops = vec![
+            Stop::new("cities", vec!["MOW"], ["", ""]),
+            Stop::new("any", vec![], ["2026-11-01", "2026-11-03"]),
+            Stop::new("cities", vec!["SEL"], ["2026-11-01", "2026-11-03"]),
+        ];
+        // MOW→IST прилетает 01.11 в 14:00 (вылет 10:00 + 4 ч)
+        let first = vec![flight("MOW", "IST", 1, 10, 100.0)];
+        let same_day_later = vec![flight("IST", "SEL", 1, 20, 100.0)];
+        let same_day_earlier = vec![flight("IST", "SEL", 1, 8, 100.0)];
+        let next_day = vec![flight("IST", "SEL", 2, 0, 100.0)];
+        for (onward, want) in [(same_day_later, 0usize), (same_day_earlier, 0), (next_day, 1)] {
+            let table = FlightCols::from_collected(&[first.clone(), onward]);
+            let ctx = build_ctx(&stops, &table, None);
+            let mut check = |_: usize| Ok(());
+            let got = search_cheapest(&ctx, 10, None, None, &mut check).unwrap();
+            assert_eq!(got.len(), want);
+            assert_eq!(brute_force(&stops, &table, None).len(), want);
+        }
+        // старт виртуальный: первое плечо может вылетать в первый день окна
+        let table = FlightCols::from_collected(&[first.clone(), vec![flight("IST", "SEL", 2, 0, 100.0)]]);
+        let ctx = build_ctx(&stops, &table, None);
+        assert_eq!(ctx.chain_start, "2026-11-01");
+        let mut check = |_: usize| Ok(());
+        assert_eq!(search_cheapest(&ctx, 10, None, None, &mut check).unwrap().len(), 1);
     }
 
     #[test]

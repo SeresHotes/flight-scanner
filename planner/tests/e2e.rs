@@ -115,12 +115,16 @@ fn series() -> Series {
     // hidden-city: MOW→IST→DXB дешевле прямого MOW→IST того дня → виртуальный рейс
     put(&mut s, "MOW", "", "2026-11-01", vec![ticket(&["SVO", "IST", "DXB"], "MOW", "DXB", "2026-11-01", 8, 15000.0), ticket(&["SVO", "IST"], "MOW", "IST", "2026-11-01", 8, 20000.0)]);
     put(&mut s, "MOW", "", "2026-11-02", vec![]);
-    // плечо 1: IST → MOW, окно от остановки IST (2026-11-01..02) — вылеты 02 и 03 не попадут в окно 01,
-    // поэтому серии по дням окна: 01 и 02; финал без окна
+    put(&mut s, "MOW", "IST", "2026-11-03", vec![]);
+    put(&mut s, "MOW", "", "2026-11-03", vec![]);
+    // плечо 1: IST → MOW, окно от остановки IST (2026-11-01..03); финал без окна.
+    // Вылет — строго на следующий день после прилёта: прилетевшие 01.11 улетают 02 или 03, прилетевшие 02.11 — только 03.
     put(&mut s, "IST", "MOW", "2026-11-01", vec![]);
     put(&mut s, "IST", "MOW", "2026-11-02", vec![ticket(&["IST", "SVO"], "IST", "MOW", "2026-11-02", 20, 9000.0), ticket(&["IST", "VKO"], "IST", "MOW", "2026-11-02", 22, 7000.0)]);
+    put(&mut s, "IST", "MOW", "2026-11-03", vec![ticket(&["IST", "SVO"], "IST", "MOW", "2026-11-03", 20, 9500.0), ticket(&["IST", "VKO"], "IST", "MOW", "2026-11-03", 22, 7500.0)]);
     put(&mut s, "IST", "", "2026-11-01", vec![]);
     put(&mut s, "IST", "", "2026-11-02", vec![]);
+    put(&mut s, "IST", "", "2026-11-03", vec![]);
     s
 }
 
@@ -173,7 +177,7 @@ async fn plan_job_end_to_end() {
     let query = json!({
         "stops": [
             {"kind": "cities", "codes": ["MOW"], "window": ["", ""], "radiusKm": 0},
-            {"kind": "cities", "codes": ["IST"], "window": ["2026-11-01", "2026-11-02"], "radiusKm": 0},
+            {"kind": "cities", "codes": ["IST"], "window": ["2026-11-01", "2026-11-03"], "radiusKm": 0},
             {"kind": "cities", "codes": ["MOW"], "window": ["", ""], "radiusKm": 0}
         ],
         "cities": [{}, {}, {}],
@@ -182,7 +186,7 @@ async fn plan_job_end_to_end() {
         "maxCost": null
     });
     let est: Value = client.post(format!("{base}/api/plan/estimate")).json(&query).send().await.unwrap().json().await.unwrap();
-    assert_eq!(est["requests"], 2 * 13 + 2 * 13);
+    assert_eq!(est["requests"], 3 * 13 + 3 * 13);
     assert_eq!(est["cached"], est["requests"], "все серии есть у мока: {est}");
     assert_eq!(est["cold"], 0);
 
@@ -194,26 +198,28 @@ async fn plan_job_end_to_end() {
     let st = wait_done(&client, &format!("{base}/api/plan/jobs/{job_id}")).await;
     assert_eq!(st["status"], "done", "{st}");
     assert_eq!(st["progress"], st["total"]);
-    assert_eq!(st["stage"]["cached"], 8, "серий из кэша: {st}");
-    // цепочки: (3 обычных MOW→IST + 1 виртуальный) × 2 IST→MOW; вылет из IST 02.11 после прилёта 01/02.11
-    assert_eq!(st["summary"]["count"], 8, "{st}");
+    assert_eq!(st["stage"]["cached"], 12, "серий из кэша: {st}");
+    // цепочки: прилетевшие в IST 01.11 (прямой + виртуальный) × 4 обратных (02 и 03.11) +
+    // прилетевшие 02.11 (два обычных) × 2 обратных 03.11 = 12; тот же день не стыкуется
+    assert_eq!(st["summary"]["count"], 12, "{st}");
     assert_eq!(st["summary"]["combos"], 1);
-    assert_eq!(st["summary"]["totalCount"], 8);
+    assert_eq!(st["summary"]["totalCount"], 12);
 
     let combos = get_json(&client, &format!("{base}/api/plan/jobs/{job_id}/combos")).await;
     assert_eq!(combos["status"], "ok");
     assert_eq!(combos["items"][0]["codes"], json!(["MOW", "IST", "MOW"]));
-    assert_eq!(combos["items"][0]["minPrice"], 19000.0);
-    assert_eq!(combos["items"][0]["count"], 8);
+    assert_eq!(combos["items"][0]["minPrice"], 19500.0);
+    assert_eq!(combos["items"][0]["count"], 12);
     assert_eq!(combos["cities"]["MOW"][0], "Moscow");
 
     let routes = get_json(&client, &format!("{base}/api/plan/jobs/{job_id}/routes?limit=3")).await;
     assert_eq!(routes["status"], "ok");
-    assert_eq!(routes["count"], 8);
-    assert_eq!(routes["total"], 8);
+    assert_eq!(routes["count"], 12);
+    assert_eq!(routes["total"], 12);
     assert_eq!(routes["items"].as_array().unwrap().len(), 3);
+    // самый дешёвый: VKO→SAW→IST 02.11 (12000) + IST→VKO 03.11 (7500)
     let first = &routes["items"][0];
-    assert_eq!(first["total_price"], 19000.0);
+    assert_eq!(first["total_price"], 19500.0);
     assert_eq!(first["stops"][1]["code"], "IST");
     assert_eq!(first["segments"][0]["origin_airport"], "VKO");
     assert_eq!(first["segments"][0]["transfer_points"][0]["code"], "SAW");
@@ -226,17 +232,17 @@ async fn plan_job_end_to_end() {
     assert!(hidden["segments"][0]["link"].as_str().unwrap().starts_with("https://www.aviasales.ru/search/MOW0111DXB1"));
 
     let by_combo = get_json(&client, &format!("{base}/api/plan/jobs/{job_id}/routes?combos=MOW-IST-MOW&limit=100")).await;
-    assert_eq!(by_combo["total"], 8);
+    assert_eq!(by_combo["total"], 12);
     assert_eq!(by_combo["items"][0]["combo"], "MOW-IST-MOW");
 
     // другие фильтры — стыковка в фоне, потом сводка под них
-    let f = urlencoding(&json!({"cities": [{}, {}, {}], "legs": [{"hiddenCity": false, "maxTransfers": 0}, {}], "tripLength": [0, null], "maxCost": 28000}).to_string());
+    let f = urlencoding(&json!({"cities": [{}, {}, {}], "legs": [{"hiddenCity": false, "maxTransfers": 0}, {}], "tripLength": [0, null]}).to_string());
     let st2 = wait_done(&client, &format!("{base}/api/plan/jobs/{job_id}?f={f}")).await;
     assert_eq!(st2["status"], "done", "{st2}");
-    // без hidden-city и с прямыми на плече 0: MOW→IST 01.11 (20000) и 02.11 (21000) × 2 обратных, ≤ 28000 → 20000+7000, 21000+7000
-    assert_eq!(st2["summary"]["count"], 2, "{st2}");
+    // без hidden-city и с прямыми на плече 0: MOW→IST 01.11 (20000) × 4 обратных 02/03.11 + 02.11 (21000) × 2 обратных 03.11
+    assert_eq!(st2["summary"]["count"], 6, "{st2}");
     let combos2 = get_json(&client, &format!("{base}/api/plan/jobs/{job_id}/combos?f={f}")).await;
-    assert_eq!(combos2["items"][0]["count"], 2);
+    assert_eq!(combos2["items"][0]["count"], 6);
     assert_eq!(combos2["items"][0]["minPrice"], 27000.0);
 
     // повторный запуск тех же остановок — та же джоба
