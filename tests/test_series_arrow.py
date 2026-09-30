@@ -4,7 +4,29 @@ from collector.lake import from_row, series_table
 from core.collector_client import CollectorClient
 from core.series_arrow import ARROW_MEDIA_TYPE, ipc_to_table, table_to_ipc, tickets_from_table
 from tests.test_collector_api import client  # noqa: F401  (фикстура)
-from tests.test_planner_hidden_city import _ticket
+
+
+def _ticket(origin, dest, chain, dep, arr, price, *, legs_times=None, baggage=True, number="1"):
+    """Нормализованный билет GraphQL по цепочке аэропортов: пересадки — все точки между
+    концами; времена сегментов — legs_times [(dep, arr), …] или равномерно."""
+    n = len(chain) - 1
+    times = legs_times or [(dep, arr)] * n
+    legs = [{"origin": chain[j], "destination": chain[j + 1], "departure_at": times[j][0],
+             "arrival_at": times[j][1], "flight_number": f"{number}{j}", "carrier": "CZ"}
+            for j in range(n)]
+    points = [{"code": chain[j], "to": chain[j], "country": "", "minutes": 120,
+               "night": False, "visa": False} for j in range(1, n)]
+    return {
+        "origin": origin, "origin_airport": chain[0],
+        "destination": dest, "destination_airport": chain[-1],
+        "departure_at": dep, "arrival_at": arr, "duration": 1000, "duration_to": 800,
+        "transfers": n - 1, "airline": "CZ", "flight_number": legs[0]["flight_number"],
+        "price": price, "currency": "rub", "link": f"/search/{origin}2910{dest}1?t=x",
+        "chain": list(chain), "legs": legs, "transfer_points": points,
+        "baggage": {"known": True, "included": baggage, "pieces": 1 if baggage else None,
+                    "kg": 23 if baggage else None},
+        "baggage_code": "1PC23" if baggage else "0PC", "source": "graphql",
+    }
 
 
 def _tickets():

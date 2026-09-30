@@ -8,11 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from api import worker
 from core import graphql_api as g
-from core.linkinfo import parse_link
-from core.segments import Builder
-from storage import hot
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "graphql_tickets.json").read_text())
 CITY_INFO = lambda code: {"city": code, "country": "", "flag": ""}
@@ -115,15 +111,13 @@ def test_normalize_three_transfers_real_arrival_and_durations():
     assert f["link"].startswith("/search/MOW1510SEL1?t=")
 
 
-def test_normalize_link_matches_chain_and_parses_like_rest():
+def test_normalize_duration_consistent_with_transfers():
     for raw in FIXTURE["mow_sel"] + FIXTURE["mow_any"]:
         f = g.normalize_ticket(raw, None, None, "2026-10-15")
-        info = parse_link(f["link"])
-        assert info.airports == f["chain"], f["chain"]
-        assert info.price == f["price"]
+        assert f["link"].startswith("/search/")
+        assert f["chain"][0] == f["origin_airport"] and f["chain"][-1] == f["destination_airport"]
         # Длительность по сегментам согласована с длительностью пересадок источника
-        # (в воздухе + ожидание = всего); `t=` в ссылке у одного билета (ALA) на 60
-        # минут больше — на него не опираемся.
+        # (в воздухе + ожидание = всего).
         assert f["duration"] == f["duration_to"] + sum(p["minutes"] for p in f["transfer_points"])
 
 
@@ -153,67 +147,9 @@ def test_parse_baggage_code(code, with_baggage, expected):
     assert (b["known"], b["included"], b["pieces"], b["kg"]) == expected
 
 
-def test_make_segment_understands_normalized_ticket():
-    """Нормализованный билет — валидный «сырой рейс» для trip_builder."""
-    f = g.normalize_ticket(FIXTURE["mow_sel"][1], "MOW", "SEL", "2026-10-15")   # 2 пересадки
-    seg = Builder(None, CITY_INFO).make_segment(f)
-    assert seg["origin_airport"] == f["chain"][0] and seg["destination_airport"] == f["chain"][-1]
-    assert seg["transfers"] == 2 and seg["direct"] is False
-    assert [p["code"] for p in seg["transfer_points"]] == f["chain"][1:-1]
-    assert seg["layover_minutes"] == f["duration"] - f["duration_to"]
-    assert seg["arrival_at"] == f["arrival_at"]
-    assert seg["price"] == f["price"]
-
-
 def test_flight_key_dedupes_same_ticket_from_two_series():
     a = g.normalize_ticket(FIXTURE["mow_any"][0], "MOW", None, "2026-10-15")
     b = g.normalize_ticket(FIXTURE["mow_any"][0], None, "BGW", "2026-10-15")
     assert g.flight_key(a) == g.flight_key(b)
     c = g.normalize_ticket(FIXTURE["mow_any"][1], "MOW", None, "2026-10-15")
     assert g.flight_key(a) != g.flight_key(c)
-
-
-# --------------------------------- кэш --------------------------------------
-
-def _conn():
-    conn = hot.connect(":memory:")
-    hot.init_db(conn)
-    return conn
-
-
-def test_ticket_cache_roundtrip_and_ttl():
-    conn = _conn()
-    series = {"tickets": [{"price": 1}], "pages": 1, "exhausted": True}
-    hot.ticket_cache_put(conn, "MOW", None, "2026-10-15", "max=40000", series)
-    got = hot.ticket_cache_get(conn, "MOW", None, "2026-10-15", "max=40000", ttl_seconds=3600)
-    assert got == {"tickets": [{"price": 1}], "pages": 1, "exhausted": True}
-    assert hot.ticket_cache_get(conn, "MOW", None, "2026-10-15", "", 3600) is None      # другой ключ
-    assert hot.ticket_cache_get(conn, "MOW", None, "2026-10-15", "max=40000", -1) is None  # протухло
-
-
-def test_ticket_cache_truncated_series_reused_only_if_deep_enough():
-    conn = _conn()
-    hot.ticket_cache_put(conn, "MOW", None, "2026-10-15", "",
-                         {"tickets": [], "pages": 3, "exhausted": False})
-    assert hot.ticket_cache_get(conn, "MOW", None, "2026-10-15", "", 3600, min_pages=3) is not None
-    assert hot.ticket_cache_get(conn, "MOW", None, "2026-10-15", "", 3600, min_pages=5) is None
-
-
-def test_cached_ticket_fetch_hits_and_skips_errors():
-    conn = _conn()
-    calls, hits = [], []
-
-    def fake(origin, destination, day, **kw):
-        calls.append((origin, destination, day, kw.get("value_max"), kw.get("max_pages")))
-        return {"tickets": [{"price": len(calls)}], "pages": 1,
-                "exhausted": True, "error": day == "bad"}
-
-    fetch = worker.make_cached_ticket_fetch(conn, on_cache_hit=lambda: hits.append(1), fetch_fn=fake)
-    first = fetch("MOW", None, "2026-10-15", value_max=40000, max_pages=4)
-    second = fetch("MOW", None, "2026-10-15", value_max=40000, max_pages=4)
-    assert first["tickets"] == second["tickets"] == [{"price": 1}]
-    assert second["cached"] is True and len(calls) == 1 and hits == [1]
-    fetch("MOW", None, "2026-10-15", value_max=50000)          # другой коридор — новый запрос
-    assert len(calls) == 2
-    fetch("MOW", "SEL", "bad"); fetch("MOW", "SEL", "bad")     # ошибка не кэшируется
-    assert len(calls) == 4

@@ -20,6 +20,9 @@
 - Образ `deploy/Dockerfile.planner` — multi-stage (`rust:1-slim-bookworm` →
   `debian:bookworm-slim`, 159 МБ вместо ~510 МБ с Python + numpy + pyarrow); compose и
   справочники (`core/geo.json`, `core/city_names.json`) едут в образе как раньше.
+- Python-планировщик удалён: `api/`, `storage/`, `core/planner|overview|flightcols|planquery|
+  nearby|segments|airports|linkinfo|network|dates.py` и их тесты; `scripts/fetch_tickets.py`
+  ходит в источник напрямую (без кэша серий в SQLite).
 - Сравнение скорости на рейсах реальных джоб с прода (`planner/examples/bench.rs`,
   тот же сценарий на Python; ответы совпадают полностью). Джоба 135 тыс. рейсов
   (MOW → любой → SEL → TAS → MOW, фильтры): A* 5000 цепочек 0.109 → 0.032 с,
