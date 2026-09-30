@@ -411,7 +411,6 @@ impl FlightCols {
         let mut c = FlightCols::with_capacity(n);
         for b in &batches {
             let f = |name: &str| -> Result<Vec<Option<f64>>, String> { f64_col(b, name) };
-            let i = |name: &str| -> Result<Vec<Option<i64>>, String> { i64_col(b, name) };
             let bl = |name: &str| -> Result<Vec<bool>, String> { bool_col(b, name) };
             for (name, out) in [("orig_city", 0), ("orig_airport", 1), ("dest", 2), ("dest_airport", 3)] {
                 let ids = code_col(b, name, &mut c.codes, &mut c.code_ix)?;
@@ -422,18 +421,18 @@ impl FlightCols {
                     _ => c.dest_airport_id.extend(ids),
                 }
             }
-            c.leg.extend(i("leg")?.into_iter().map(|v| v.unwrap_or(0) as i16));
-            c.price.extend(f("price")?.into_iter().map(|v| v.unwrap_or(0.0)));
-            c.transfers.extend(i("transfers")?.into_iter().map(|v| v.unwrap_or(0)));
-            c.duration.extend(i("duration")?.into_iter().map(|v| v.unwrap_or(0)));
+            c.leg.extend(i64_vals(b, "leg", 0)?.into_iter().map(|v| v as i16));
+            c.price.extend(f64_vals(b, "price", 0.0)?);
+            c.transfers.extend(i64_vals(b, "transfers", 0)?);
+            c.duration.extend(i64_vals(b, "duration", 0)?);
             c.hidden.extend(bl("hidden")?);
             c.bag_incl.extend(bl("bag_incl")?);
             c.pts_min.extend(f("pts_min")?.into_iter().map(|v| v.filter(|x| !x.is_nan()).map(|x| x as i64)));
             c.layover.extend(f("layover")?.into_iter().map(|v| v.filter(|x| !x.is_nan()).map(|x| x as i64)));
-            c.dep_ts.extend(f("dep_ts")?.into_iter().map(|v| v.unwrap_or(f64::NAN)));
-            c.arr_ts.extend(f("arr_ts")?.into_iter().map(|v| v.unwrap_or(f64::NAN)));
-            c.dep_ord.extend(i("dep_ord")?.into_iter().map(|v| v.unwrap_or(-1)));
-            c.arr_ord.extend(i("arr_ord")?.into_iter().map(|v| v.unwrap_or(-1)));
+            c.dep_ts.extend(f64_vals(b, "dep_ts", f64::NAN)?);
+            c.arr_ts.extend(f64_vals(b, "arr_ts", f64::NAN)?);
+            c.dep_ord.extend(i64_vals(b, "dep_ord", -1)?);
+            c.arr_ord.extend(i64_vals(b, "arr_ord", -1)?);
         }
         c.n = n;
         c.raw = Mutex::new(Raw::Lazy(path.to_string()));
@@ -525,6 +524,27 @@ pub fn f64_col(b: &RecordBatch, name: &str) -> Result<Vec<Option<f64>>, String> 
     let arr = cast(col, &DataType::Float64).map_err(|e| e.to_string())?;
     let arr = arr.as_any().downcast_ref::<Float64Array>().ok_or("не число")?;
     Ok((0..arr.len()).map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }).collect())
+}
+
+/// Колонка чисел без Option: null → default; без null — копия буфера целиком.
+fn f64_vals(b: &RecordBatch, name: &str, default: f64) -> Result<Vec<f64>, String> {
+    let Some(col) = b.column_by_name(name) else { return Ok(vec![default; b.num_rows()]) };
+    let arr = cast(col, &DataType::Float64).map_err(|e| e.to_string())?;
+    let arr = arr.as_any().downcast_ref::<Float64Array>().ok_or("не число")?;
+    if arr.null_count() == 0 {
+        return Ok(arr.values().to_vec());
+    }
+    Ok((0..arr.len()).map(|i| if arr.is_null(i) { default } else { arr.value(i) }).collect())
+}
+
+fn i64_vals(b: &RecordBatch, name: &str, default: i64) -> Result<Vec<i64>, String> {
+    let Some(col) = b.column_by_name(name) else { return Ok(vec![default; b.num_rows()]) };
+    let arr = cast(col, &DataType::Int64).map_err(|e| e.to_string())?;
+    let arr = arr.as_any().downcast_ref::<Int64Array>().ok_or("не целое")?;
+    if arr.null_count() == 0 {
+        return Ok(arr.values().to_vec());
+    }
+    Ok((0..arr.len()).map(|i| if arr.is_null(i) { default } else { arr.value(i) }).collect())
 }
 
 pub fn i64_col(b: &RecordBatch, name: &str) -> Result<Vec<Option<i64>>, String> {

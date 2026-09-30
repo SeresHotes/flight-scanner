@@ -205,46 +205,67 @@ fn extend(state: &State, prev: &Leg, p_idx: &[usize], nxt: &Leg, f_idx: &[usize]
         mintr: vec![BIG_TR; n_days * n_f],
     };
     let live: Vec<usize> = (0..n_f).filter(|&j| f_ok[j]).collect();
+    // буферы на весь вызов (раньше — новые векторы на каждый день первого вылета)
+    let mut csum = vec![0.0; n_p + 1];
+    let mut kv = vec![f64::INFINITY; n_p];
+    let mut ki = vec![usize::MAX; n_p];
+    let mut trs = vec![BIG_TR; n_p];
     for d in 0..n_days {
         let cnt_row = &state.cnt[d * n_p..(d + 1) * n_p];
         let minp_row = &state.minp[d * n_p..(d + 1) * n_p];
         let mintr_row = &state.mintr[d * n_p..(d + 1) * n_p];
         let tr_at_row = &state.tr_at[d * n_p..(d + 1) * n_p];
+        let tr0 = tr_at_row.first().copied().unwrap_or(0);
+        // Пустая строка (ни одной цепочки с этим днём первого вылета): счётчики 0, цены
+        // бесконечны — как и посчитал бы общий путь; минимум пересадок таких ячеек
+        // (≥ BIG_TR) на наборы не влияет — ячейки с цепочками всегда меньше.
+        if cnt_row.iter().all(|&c| c <= 0.0) {
+            for j in 0..n_f {
+                let cell = d * n_f + j;
+                let f = f_idx[j];
+                out.tr_at[cell] = tr0 + nxt.transfers[f];
+                out.mintr[cell] = BIG_TR + nxt.transfers[f];
+            }
+            continue;
+        }
         // ключи в отсортированном порядке: (цена, номер) — при равной цене меньший номер
-        let mut csum = vec![0.0; n_p + 1];
-        let mut keys: Vec<(f64, usize)> = Vec::with_capacity(n_p);
-        let mut trs: Vec<i64> = Vec::with_capacity(n_p);
         for pos in 0..n_p {
             let p = order[pos];
             let ok = p_ok_s[pos];
             csum[pos + 1] = csum[pos] + if ok { cnt_row[p] } else { 0.0 };
-            keys.push(if ok { (minp_row[p], p) } else { (f64::INFINITY, usize::MAX) });
-            trs.push(if ok { mintr_row[p] } else { BIG_TR });
-        }
-        // минимумы: накопленные для префиксов, иначе разреженная таблица
-        let (pref_keys, pref_trs, sp_keys, sp_trs) = if prefix {
-            let mut pk = keys.clone();
-            let mut pt = trs.clone();
-            for pos in 1..n_p {
-                if pk[pos - 1] < pk[pos] {
-                    pk[pos] = pk[pos - 1];
-                }
-                pt[pos] = pt[pos].min(pt[pos - 1]);
+            if ok {
+                kv[pos] = minp_row[p];
+                ki[pos] = p;
+                trs[pos] = mintr_row[p];
+            } else {
+                kv[pos] = f64::INFINITY;
+                ki[pos] = usize::MAX;
+                trs[pos] = BIG_TR;
             }
-            (Some(pk), Some(pt), None, None)
+        }
+        // минимумы: накопленные для префиксов (на месте), иначе разреженная таблица
+        let sparse = if prefix {
+            for pos in 1..n_p {
+                if (kv[pos - 1], ki[pos - 1]) < (kv[pos], ki[pos]) {
+                    kv[pos] = kv[pos - 1];
+                    ki[pos] = ki[pos - 1];
+                }
+                trs[pos] = trs[pos].min(trs[pos - 1]);
+            }
+            None
         } else if n_p > 0 {
-            (None, None, Some(Sparse::new(keys.clone())), Some(Sparse::new(trs.clone())))
+            let keys: Vec<(f64, usize)> = kv.iter().copied().zip(ki.iter().copied()).collect();
+            Some((Sparse::new(keys), Sparse::new(trs.clone())))
         } else {
-            (None, None, None, None)
+            None
         };
         for &j in &live {
             let (l, h) = (lo[j], hi[j]);
             let cell = d * n_f + j;
             out.cnt[cell] = csum[h] - csum[l];
-            let (best, best_tr) = if prefix {
-                (pref_keys.as_ref().unwrap()[h - 1], pref_trs.as_ref().unwrap()[h - 1])
-            } else {
-                (sp_keys.as_ref().unwrap().query(l, h), sp_trs.as_ref().unwrap().query(l, h))
+            let (best, best_tr) = match &sparse {
+                None => ((kv[h - 1], ki[h - 1]), trs[h - 1]),
+                Some((sk, st)) => (sk.query(l, h), st.query(l, h)),
             };
             let f = f_idx[j];
             if best.0.is_finite() {
@@ -252,7 +273,7 @@ fn extend(state: &State, prev: &Leg, p_idx: &[usize], nxt: &Leg, f_idx: &[usize]
                 out.tr_at[cell] = tr_at_row[best.1] + nxt.transfers[f];
             } else {
                 out.minp[cell] = f64::INFINITY;
-                out.tr_at[cell] = tr_at_row.first().copied().unwrap_or(0) + nxt.transfers[f];
+                out.tr_at[cell] = tr0 + nxt.transfers[f];
             }
             out.mintr[cell] = best_tr + nxt.transfers[f];
         }
@@ -260,7 +281,7 @@ fn extend(state: &State, prev: &Leg, p_idx: &[usize], nxt: &Leg, f_idx: &[usize]
             if !f_ok[j] {
                 let cell = d * n_f + j;
                 let f = f_idx[j];
-                out.tr_at[cell] = tr_at_row.first().copied().unwrap_or(0) + nxt.transfers[f];
+                out.tr_at[cell] = tr0 + nxt.transfers[f];
                 out.mintr[cell] = BIG_TR + nxt.transfers[f];
             }
         }
