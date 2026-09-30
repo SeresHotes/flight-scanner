@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### 🦀 Планировщик переписан на Rust (`planner/`)
+
+- Сервис `flights-planner` (axum/tokio, rusqlite, arrow/parquet, reqwest) заменяет
+  Python `api/` + планировочные модули `core/` (planner, overview, flightcols,
+  planquery, nearby, segments, airports, linkinfo, dates) и `storage/hot`. HTTP-контракт
+  `/api/*`, ответы, этапы джобы, SQLite `data/flights.db` и Parquet-файлы
+  `plan_flights/<job>.parquet` — без изменений: фронт и данные на VM те же, файлы
+  рейсов прежних джоб читаются.
+- Алгоритмы перенесены один в один: ленивый A* с admissible-оценкой хвоста,
+  фильтры городов/плеч/длины поездки, переезд к соседу, hidden-city из A→ANY,
+  наборы городов динамикой по префиксам (отрезки предшественников по времени
+  прилёта). Тесты: A* против полного перебора, наборы против A*, сквозной
+  `tests/e2e.rs` с моком коллектора (Arrow IPC).
+- Серии от коллектора читаются Arrow IPC-потоком в схеме озера напрямую в колонки
+  (без JSON), прямой режим GraphQL (без `COLLECTOR_URL`) с кэшем серий сохранён.
+- Образ `deploy/Dockerfile.planner` — multi-stage (`rust:1-slim-bookworm` →
+  `debian:bookworm-slim`, ~30 МБ вместо Python + numpy + pyarrow); compose и
+  справочники (`core/geo.json`, `core/city_names.json`) едут в образе как раньше.
+
 ### 🔌 Клиент GraphQL Data API (`core/graphql_api.py`) — шаг 1 планировщика v2
 
 - `prices_one_way` отдаёт **все** билеты на дату (а не один самый дешёвый на
