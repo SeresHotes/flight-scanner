@@ -118,37 +118,57 @@ def build() -> dict:
     ]
     y += 8
     # Запас свежести по дню вылета: 7 − возраст в сутках. Только что собранный день = 7,
-    # дальше убывает на 1 в сутки; ниже 0 — старше недели. Худший город и число городов —
-    # только в подсказке (скрыты с графика), чтобы 180 столбцов не двоились. Ось — весь
-    # горизонт сборщика (180 дней): дни без данных — пустые (NULL), а не 0.
+    # дальше убывает на 1 в сутки; ниже 0 — старше недели. Три ряда — перцентили возраста
+    # по городам дня: p50 (половина городов свежее), p95 (все, кроме 5 % отстающих) и
+    # p100 (худший город). Город без данных на день считается самым старым (а не
+    # выпадает): иначе день, где собрано 5 % городов, выглядел бы свежим. Сетка —
+    # все города с хоть одной успешной серией × 180 дней; снизу значение прижато к −1
+    # («нет данных или старше 8 суток»). Цвет — ряд (оттенки одного синего от p50 к
+    # p100), пороги целей — пунктиром. Городов с данными — только в подсказке.
     hidden = {"id": "custom.hideFrom", "value": {"viz": True, "legend": True, "tooltip": False}}
+    shades = {"p50": "#9ec5f4", "p95": "#3d7fd9", "p100": "#1a3f7a"}
+    pct = "greatest(round(7 - {agg}(ifNull(cv.age_h, 1e6)) / 24, 2), -1)"
     panels += [
-        panel("Запас свежести по дням вылета на 180 дней (7 − возраст в сутках)",
-              "SELECT formatDateTime(d.day, '%d.%m') AS \"день\", "
-              "c.avg_left AS \"среднее по городам\", c.min_left AS \"худший город\", "
-              "ifNull(c.cities, 0) AS \"городов\" "
-              "FROM (SELECT today() + number AS day FROM numbers(180)) AS d "
-              "LEFT JOIN (SELECT day, round(7 - avg(age_h) / 24, 2) AS avg_left, "
-              "round(7 - max(age_h) / 24, 2) AS min_left, count() AS cities "
-              "FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day) AS c ON c.day = d.day "
-              "ORDER BY d.day SETTINGS join_use_nulls = 1",
+        panel("Запас свежести по дням вылета на 180 дней: p50 / p95 / p100 городов (7 − возраст в сутках)",
+              "SELECT formatDateTime(g.day, '%d.%m') AS \"день\", "
+              f"{pct.format(agg='quantile(0.5)')} AS \"p50\", "
+              f"{pct.format(agg='quantile(0.95)')} AS \"p95\", "
+              f"{pct.format(agg='max')} AS \"p100\", "
+              "countIf(cv.age_h IS NOT NULL) AS \"городов с данными\", count() AS \"всего городов\" "
+              "FROM (SELECT o.origin AS origin, today() + n.number AS day "
+              "FROM (SELECT DISTINCT origin FROM flights.coverage WHERE NOT error) AS o "
+              "CROSS JOIN numbers(180) AS n) AS g "
+              "LEFT JOIN (SELECT origin, day, age_h FROM flights.coverage WHERE day >= today() AND NOT error) AS cv "
+              "ON cv.origin = g.origin AND cv.day = g.day "
+              "GROUP BY g.day ORDER BY g.day SETTINGS join_use_nulls = 1",
               0, y, w=24, ptype="barchart", kind="table",
-              description="Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за "
-                          "каждые сутки. ≥ 4 — в пределах 72 ч (цель до 60 дней вперёд), 0…4 — до недели "
-                          "(цель для дальних дат), < 0 — старше недели. Пустой день — данных ещё нет; "
-                          "пары с ошибкой источника не учитываются.",
-              extra={"fieldConfig": {"defaults": {"custom": {"fillOpacity": 80, "lineWidth": 0},
-                                                  "color": {"mode": "thresholds"}, "softMax": 7, "decimals": 1,
+              description="Перцентили возраста данных по городам дня вылета: p50 — половина городов "
+                          "свежее, p95 — все, кроме 5 % самых отстающих, p100 — худший город. Город без "
+                          "данных на этот день считается самым старым: если не собрано больше 5 % городов, "
+                          "p95 на дне (−1), больше половины — и p50. "
+                          "Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за "
+                          "каждые сутки, −1 — нет данных или старше 8 суток. Пунктир: 4 — 72 ч (цель до "
+                          "60 дней вперёд), 0 — неделя (цель для дальних дат). Города, у которых только "
+                          "ошибки источника, не учитываются.",
+              extra={"fieldConfig": {"defaults": {"custom": {"fillOpacity": 90, "lineWidth": 0,
+                                                             "thresholdsStyle": {"mode": "dashed"}},
+                                                  "min": -1, "max": 7, "decimals": 1,
                                                   "thresholds": {"mode": "absolute", "steps": [
-                                                      {"color": "red", "value": None},
+                                                      {"color": "transparent", "value": None},
                                                       {"color": "orange", "value": 0},
                                                       {"color": "green", "value": 4}]}},
                                      "overrides": [{"matcher": {"id": "byName", "options": name},
-                                                    "properties": [hidden]}
-                                                   for name in ("худший город", "городов")]},
+                                                    "properties": [{"id": "color", "value": {
+                                                        "mode": "fixed", "fixedColor": color}}]}
+                                                   for name, color in shades.items()]
+                                                  + [{"matcher": {"id": "byName", "options": name},
+                                                      "properties": [hidden, {"id": "decimals", "value": 0}]}
+                                                     for name in ("городов с данными", "всего городов")]},
                      "options": {"orientation": "vertical", "xField": "день", "showValue": "never",
-                                 "xTickLabelSpacing": 100, "barWidth": 0.9,
-                                 "tooltip": {"mode": "multi"}, "legend": {"showLegend": False}}}),
+                                 "xTickLabelSpacing": 100, "barWidth": 0.9, "groupWidth": 0.8,
+                                 "tooltip": {"mode": "multi"},
+                                 "legend": {"showLegend": True, "displayMode": "list",
+                                            "placement": "bottom"}}}),
     ]
     y += 8
     panels.append(row("Ручка GraphQL и очередь", y))

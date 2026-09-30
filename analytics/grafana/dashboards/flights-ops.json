@@ -578,7 +578,7 @@
   },
   {
    "id": 12,
-   "title": "Запас свежести по дням вылета на 180 дней (7 − возраст в сутках)",
+   "title": "Запас свежести по дням вылета на 180 дней: p50 / p95 / p100 городов (7 − возраст в сутках)",
    "type": "barchart",
    "gridPos": {
     "x": 0,
@@ -597,7 +597,7 @@
       "uid": "flights-clickhouse"
      },
      "editorType": "sql",
-     "rawSql": "SELECT formatDateTime(d.day, '%d.%m') AS \"день\", c.avg_left AS \"среднее по городам\", c.min_left AS \"худший город\", ifNull(c.cities, 0) AS \"городов\" FROM (SELECT today() + number AS day FROM numbers(180)) AS d LEFT JOIN (SELECT day, round(7 - avg(age_h) / 24, 2) AS avg_left, round(7 - max(age_h) / 24, 2) AS min_left, count() AS cities FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day) AS c ON c.day = d.day ORDER BY d.day SETTINGS join_use_nulls = 1",
+     "rawSql": "SELECT formatDateTime(g.day, '%d.%m') AS \"день\", greatest(round(7 - quantile(0.5)(ifNull(cv.age_h, 1e6)) / 24, 2), -1) AS \"p50\", greatest(round(7 - quantile(0.95)(ifNull(cv.age_h, 1e6)) / 24, 2), -1) AS \"p95\", greatest(round(7 - max(ifNull(cv.age_h, 1e6)) / 24, 2), -1) AS \"p100\", countIf(cv.age_h IS NOT NULL) AS \"городов с данными\", count() AS \"всего городов\" FROM (SELECT o.origin AS origin, today() + n.number AS day FROM (SELECT DISTINCT origin FROM flights.coverage WHERE NOT error) AS o CROSS JOIN numbers(180) AS n) AS g LEFT JOIN (SELECT origin, day, age_h FROM flights.coverage WHERE day >= today() AND NOT error) AS cv ON cv.origin = g.origin AND cv.day = g.day GROUP BY g.day ORDER BY g.day SETTINGS join_use_nulls = 1",
      "queryType": "table",
      "refId": "A"
     }
@@ -605,19 +605,20 @@
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 80,
-      "lineWidth": 0
+      "fillOpacity": 90,
+      "lineWidth": 0,
+      "thresholdsStyle": {
+       "mode": "dashed"
+      }
      },
-     "color": {
-      "mode": "thresholds"
-     },
-     "softMax": 7,
+     "min": -1,
+     "max": 7,
      "decimals": 1,
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
-        "color": "red",
+        "color": "transparent",
         "value": null
        },
        {
@@ -635,15 +636,14 @@
      {
       "matcher": {
        "id": "byName",
-       "options": "худший город"
+       "options": "p50"
       },
       "properties": [
        {
-        "id": "custom.hideFrom",
+        "id": "color",
         "value": {
-         "viz": true,
-         "legend": true,
-         "tooltip": false
+         "mode": "fixed",
+         "fixedColor": "#9ec5f4"
         }
        }
       ]
@@ -651,7 +651,37 @@
      {
       "matcher": {
        "id": "byName",
-       "options": "городов"
+       "options": "p95"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3d7fd9"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "p100"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#1a3f7a"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "городов с данными"
       },
       "properties": [
        {
@@ -661,6 +691,30 @@
          "legend": true,
          "tooltip": false
         }
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "всего городов"
+      },
+      "properties": [
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": true,
+         "legend": true,
+         "tooltip": false
+        }
+       },
+       {
+        "id": "decimals",
+        "value": 0
        }
       ]
      }
@@ -672,14 +726,17 @@
     "showValue": "never",
     "xTickLabelSpacing": 100,
     "barWidth": 0.9,
+    "groupWidth": 0.8,
     "tooltip": {
      "mode": "multi"
     },
     "legend": {
-     "showLegend": false
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
     }
    },
-   "description": "Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за каждые сутки. ≥ 4 — в пределах 72 ч (цель до 60 дней вперёд), 0…4 — до недели (цель для дальних дат), < 0 — старше недели. Пустой день — данных ещё нет; пары с ошибкой источника не учитываются."
+   "description": "Перцентили возраста данных по городам дня вылета: p50 — половина городов свежее, p95 — все, кроме 5 % самых отстающих, p100 — худший город. Город без данных на этот день считается самым старым: если не собрано больше 5 % городов, p95 на дне (−1), больше половины — и p50. Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за каждые сутки, −1 — нет данных или старше 8 суток. Пунктир: 4 — 72 ч (цель до 60 дней вперёд), 0 — неделя (цель для дальних дат). Города, у которых только ошибки источника, не учитываются."
   },
   {
    "id": 13,
