@@ -7,6 +7,7 @@
 читается long-poll'ом, результат забирается один раз.
 
 `http` — объект с .post/.get как у requests.Session (в тестах — TestClient)."""
+import json
 import os
 import threading
 import time
@@ -15,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 import requests
 
 from core import graphql_api
+from core.series_arrow import ARROW_MEDIA_TYPE, ipc_to_table, tickets_from_table
 
 DEFAULT_TIMEOUT = 30
 POLL_WAIT = 20  # long-poll статуса задания, с
@@ -56,14 +58,28 @@ class CollectorClient:
             raise CollectorError(f"коллектор {path}: HTTP {r.status_code} {r.text[:200]}")
         return r.json()
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None,
-             timeout: Optional[float] = None) -> Dict[str, Any]:
+    def _get_response(self, path: str, params: Optional[Dict[str, Any]] = None,
+                      timeout: Optional[float] = None):
         try:
             r = self.http.get(self.base + path, params=params or {}, timeout=timeout or self.timeout)
         except requests.RequestException as e:
             raise CollectorError(f"коллектор недоступен: {e}") from e
         if r.status_code >= 400:
             raise CollectorError(f"коллектор {path}: HTTP {r.status_code} {r.text[:200]}")
+        return r
+
+    def _get(self, path: str, params: Optional[Dict[str, Any]] = None,
+             timeout: Optional[float] = None) -> Dict[str, Any]:
+        return self._get_response(path, params, timeout).json()
+
+    def _result(self, job_id: str) -> Dict[str, Any]:
+        """Результат задания: Arrow IPC-поток (разбор по колонкам, core.series_arrow),
+        а если коллектор ответил JSON (старая версия) — JSON."""
+        r = self._get_response(f"/v1/requests/{job_id}/result", {"format": "arrow"},
+                               timeout=max(self.timeout, 120))
+        if r.headers.get("content-type", "").startswith(ARROW_MEDIA_TYPE):
+            meta = json.loads(r.headers.get("x-series-meta") or "{}")
+            return {**meta, "tickets": tickets_from_table(ipc_to_table(r.content))}
         return r.json()
 
     def health(self) -> Dict[str, Any]:
@@ -109,7 +125,7 @@ class CollectorClient:
             tick(int(job.get("pages") or 0), int(job.get("tickets") or 0))
             job = self._get(f"/v1/requests/{job['id']}", {"wait": self.poll_wait},
                             timeout=self.poll_wait + self.timeout)
-        result = self._get(f"/v1/requests/{job['id']}/result", timeout=max(self.timeout, 120))
+        result = self._result(job["id"])
         tick(int(result.get("pages") or 0), len(result.get("tickets") or []))
         return {"tickets": result.get("tickets") or [], "pages": int(result.get("pages") or 0),
                 "exhausted": bool(result.get("exhausted")), "error": bool(result.get("error")),

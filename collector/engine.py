@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from collector.index import Index, series_key, utcnow
-from collector.lake import LakeWriter, TICKETS_PREFIX
+from collector.lake import LakeWriter, TICKETS_PREFIX, series_table
 from collector.ratelimit import RateLimiter
 from core import graphql_api
 
@@ -274,27 +274,30 @@ class Engine:
     def wait(self, job: Job, timeout: Optional[float] = None) -> bool:
         return job.event.wait(timeout)
 
-    def result(self, job: Job) -> Dict[str, Any]:
+    def result(self, job: Job, as_table: bool = False) -> Dict[str, Any]:
         """Серия в формате graphql_api.fetch_series (+ cached). Билеты отдаются
-        один раз: после чтения задание держит только метаданные."""
+        один раз: после чтения задание держит только метаданные. as_table — вместо
+        "tickets" (словари) ключ "table": Arrow-таблица в схеме озера (без разбора
+        в словари — её коллектор отдаёт планировщику IPC-потоком)."""
         if not job.done:
             raise NotReady(job.id)
         if job.cached:
-            tickets = self._load(job.series_row)
-            return {"tickets": tickets, "pages": job.pages, "exhausted": job.exhausted,
-                    "error": False, "cached": True}
-        if job.consumed and job.series_id is not None and not job.error:
+            data = self._load(job.series_row, as_table)
+        elif job.consumed and job.series_id is not None and not job.error:
             row = self.index.get(job.req.origin, job.req.destination, job.req.day, job.req.params_key)
-            tickets = self._load(row) if row and row["id"] == job.series_id else []
+            data = self._load(row if row and row["id"] == job.series_id else None, as_table)
         else:
             tickets, job.tickets, job.consumed = job.tickets, [], True
-        return {"tickets": tickets, "pages": job.pages, "exhausted": job.exhausted,
-                "error": bool(job.error), "cached": False}
+            data = series_table(tickets, job.series_id or 0, "") if as_table else tickets
+        return {"table" if as_table else "tickets": data, "pages": job.pages,
+                "exhausted": job.exhausted, "error": bool(job.error) and not job.cached,
+                "cached": job.cached}
 
-    def _load(self, row: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _load(self, row: Optional[Dict[str, Any]], as_table: bool = False):
         if not row or int(row.get("tickets") or 0) == 0 or not row.get("file_key"):
-            return []
-        return self.writer.read(row["file_key"], int(row["row_group"] or 0))
+            return series_table([], 0, "") if as_table else []
+        file_key, row_group = row["file_key"], int(row["row_group"] or 0)
+        return self.writer.read_table(file_key, row_group) if as_table else self.writer.read(file_key, row_group)
 
     # ------------------------------ worker ---------------------------------
 
