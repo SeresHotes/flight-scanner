@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from core import graphql_api
 from core.dates import get_date_range, parse_datetime
+from core.flightcols import FlightCols, as_cols
 from core.network import load_airport_network
 from core.segments import Builder, arrival_of, date_only, make_city_lookup, stay_between
 
@@ -553,9 +554,8 @@ def _allowed(stop: Stop) -> Optional[set]:
     return set(stop.codes) if stop.kind == "cities" else None
 
 
-def _completion_lb(stops: List[Stop],
-                   legs_by_origin: Dict[int, Dict[str, List[Dict[str, Any]]]],
-                   hops=None) -> List[Dict[str, float]]:
+def _completion_lb(stops: List[Stop], legs_by_origin: Dict[int, Dict[str, Any]],
+                   hops=None, table: Optional[FlightCols] = None) -> List[Dict[str, float]]:
     """Нижняя оценка стоимости «хвоста» цепочки для отсечения по бюджету.
 
     lb[i][city] — минимально возможная суммарная цена, чтобы, ПРИЛЕТЕВ в `city` на
@@ -567,7 +567,9 @@ def _completion_lb(stops: List[Stop],
 
     Считается обратной динамикой по плечам (от последнего перехода к первому) — это
     и есть тот самый граф минимальных цен перелётов: город, из которого дешевле
-    бюджета не собрать ни одной цепочки, отсекается целиком, не разворачивая поддерево."""
+    бюджета не собрать ни одной цепочки, отсекается целиком, не разворачивая поддерево.
+
+    legs_by_origin[i] — {код вылета: строки table} (FlightCols.by_origin)."""
     from core.nearby import Hops, neighbors
     hops = hops or Hops(stops)
     last = len(stops) - 1
@@ -577,18 +579,19 @@ def _completion_lb(stops: List[Stop],
         nxt = lb[i + 1]
         terminal_next = (i + 1 == last)
         dep: Dict[str, float] = {}      # вылетев из города на плече i
-        for city, flights in legs_by_origin[i].items():
+        dests, price = table.dest, table.price_list
+        for city, rows in legs_by_origin[i].items():
             best = _INF
-            for f in flights:
-                dest = (f.get("destination") or f.get("search_destination") or "").upper()
+            for r in rows.tolist():
+                dest = dests[r]
                 if not dest or dest == city:
                     continue
-                if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
+                if allow_next is not None and not table.dest_in(r, allow_next):
                     continue
                 tail = 0.0 if terminal_next else nxt.get(dest)
                 if tail is None:  # из dest конца не достичь — этот рейс не ведёт к цели
                     continue
-                cand = _price_of(f) + tail
+                cand = price[r] + tail
                 if cand < best:
                     best = cand
             if best < _INF:
@@ -680,15 +683,15 @@ def build_itineraries(stops: List[Stop], collected: Dict[int, List[Dict[str, Any
     воркер останавливает зависшую стыковку — поток Python снаружи не убить).
     on_progress(found, explored) — тоже на каждом шаге: сколько цепочек уже готово
     и сколько вариантов перебрано (для прогресса в UI; частоту записи режет вызывающий)."""
-    ctx = _build_ctx(stops, _apply_leg_filters(collected, query), city_info)
+    table = as_cols(collected)
+    ctx = _build_ctx(stops, table, query, city_info)
     check = _step_check(should_stop, on_progress)
 
     if max_results is None:
-        return _enumerate_all(ctx, max_cost, check)
-    table = _FlightTable(ctx[1])
+        return _enumerate_all(ctx, table, max_cost, check)
     stops, _, builder, city_info, chain_start, _ = ctx
     chains = _search_cheapest(ctx, table, max_results, max_cost, check, query)
-    return [_assemble(stops, [table.flights[fi] for fi in chain], builder, city_info, chain_start, n + 1)
+    return [_assemble(stops, [table.flight(fi) for fi in chain], builder, city_info, chain_start, n + 1)
             for n, chain in enumerate(chains)]
 
 
@@ -706,24 +709,25 @@ def build_itineraries_compact(stops: List[Stop], collected: Dict[int, List[Dict[
 
     query (core/planquery.PlanQuery) — фильтры: плеча — к рейсам до перебора,
     городов (дни, окно, выходные) — внутри перебора, длины поездки — при выдаче."""
-    ctx = _build_ctx(stops, _apply_leg_filters(collected, query), city_info)
+    table = as_cols(collected)
+    ctx = _build_ctx(stops, table, query, city_info)
     check = _step_check(should_stop, on_progress)
-    table = _FlightTable(ctx[1])
     chains = array("i")
     for chain in _search_cheapest(ctx, table, max_results, max_cost, check, query):
         chains.extend(chain)
     return _pack_compact(ctx, table, chains, len(stops) - 1)
 
 
-def _apply_leg_filters(collected: Dict[int, List[Dict[str, Any]]],
-                       query: Optional["PlanQuery"]) -> Dict[int, List[Dict[str, Any]]]:
-    """Фильтры плеча (пересадки, ожидание, длительность, багаж, hidden-city) — к рейсам
-    до построения: таблица рейсов сразу меньше, перебор не видит лишнего."""
-    if query is None:
-        return collected
-    from core.planquery import filter_leg_flights
-    return {i: filter_leg_flights(flights, query.legs[i] if i < len(query.legs) else None)
-            for i, flights in collected.items()}
+def _leg_rows(table: FlightCols, legs: int, query: Optional["PlanQuery"]) -> Dict[int, Any]:
+    """Строки рейсов каждого плеча, прошедшие фильтр плеча (пересадки, ожидание,
+    длительность, багаж, hidden-city) — маской по колонкам, до построения: перебор
+    не видит лишнего."""
+    out = {}
+    for i in range(legs):
+        rows = table.rows(i)
+        leg = query.legs[i] if query is not None and i < len(query.legs) else None
+        out[i] = rows[leg.mask(table, rows)] if leg is not None else rows
+    return out
 
 
 def _stay_ok(cf, arrive_iso: str, depart_iso: str) -> bool:
@@ -740,11 +744,12 @@ def _stay_ok(cf, arrive_iso: str, depart_iso: str) -> bool:
     return True
 
 
-def _build_ctx(stops: List[Stop], collected: Dict[int, List[Dict[str, Any]]], city_info):
+def _build_ctx(stops: List[Stop], table: FlightCols, query: Optional["PlanQuery"], city_info):
     if city_info is None:
         city_info = make_city_lookup(load_airport_network())
     builder = Builder(None, city_info)  # make_segment использует только city_info
-    legs_by_origin = {i: _index_leg(collected.get(i, [])) for i in range(len(stops) - 1)}
+    rows = _leg_rows(table, len(stops) - 1, query)
+    legs_by_origin = {i: table.by_origin(rows[i]) for i in range(len(stops) - 1)}
     chain_start = _leg_dates(stops, 0)[0]  # первая дата окна нулевого плеча
     last = len(stops) - 1
     return (stops, legs_by_origin, builder, city_info, chain_start, last)
@@ -766,7 +771,7 @@ def _step_check(should_stop: Optional[Callable[[], bool]],
     return check
 
 
-def _enumerate_all(ctx, max_cost: Optional[float],
+def _enumerate_all(ctx, table: FlightCols, max_cost: Optional[float],
                    check: Callable[[int], None]) -> List[Dict[str, Any]]:
     """Полный перебор всех цепочек (без потолка числа), сортировка по цене.
 
@@ -776,7 +781,9 @@ def _enumerate_all(ctx, max_cost: Optional[float],
     stops, legs_by_origin, builder, city_info, chain_start, last = ctx
     from core.nearby import Hops
     hops = Hops(stops)
-    lb = _completion_lb(stops, legs_by_origin, hops) if max_cost is not None else None
+    lb = _completion_lb(stops, legs_by_origin, hops, table) if max_cost is not None else None
+    legs_by_origin = {i: {code: [table.flight(r) for r in rows.tolist()] for code, rows in by.items()}
+                      for i, by in legs_by_origin.items()}
     results: List[Dict[str, Any]] = []
     seq = {"id": 1}
 
@@ -806,29 +813,7 @@ def _enumerate_all(ctx, max_cost: Optional[float],
     return results
 
 
-class _FlightTable:
-    """Уникальные рейсы всех плеч с предрасчитанными полями стыковки. Перебор
-    оперирует int-индексами в этой таблице, а не словарями рейсов."""
-
-    def __init__(self, legs_by_origin: Dict[int, Dict[str, List[Dict[str, Any]]]]):
-        self.flights: List[Dict[str, Any]] = []
-        self.index: Dict[int, int] = {}  # id(рейс) → индекс (рейс лежит под кодом города И аэропорта)
-        for by_origin in legs_by_origin.values():
-            for flights in by_origin.values():
-                for f in flights:
-                    if id(f) not in self.index:
-                        self.index[id(f)] = len(self.flights)
-                        self.flights.append(f)
-        self.dest = [(f.get("destination") or f.get("search_destination") or "").upper()
-                     for f in self.flights]
-        self.price = [_price_of(f) for f in self.flights]
-        self.dep_iso = [f.get("departure_at") for f in self.flights]
-        self.arr_iso = [arrival_of(f) if f.get("departure_at") else None for f in self.flights]
-        self.dep_day = [date_only(d) if d else None for d in self.dep_iso]
-        self.arr_day = [date_only(a) if a else None for a in self.arr_iso]
-
-
-def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optional[float],
+def _search_cheapest(ctx, table: FlightCols, max_results: int, max_cost: Optional[float],
                      check: Callable[[int], None], query: Optional["PlanQuery"] = None):
     """best-first (A*): выдаёт цепочки (кортежи индексов рейсов в table) по
     возрастанию цены и останавливается на N.
@@ -847,7 +832,7 @@ def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optio
     stops, legs_by_origin, _, _, chain_start, last = ctx
     from core.nearby import Hops
     hops = Hops(stops)
-    lb = _completion_lb(stops, legs_by_origin, hops)
+    lb = _completion_lb(stops, legs_by_origin, hops, table)
     cands = _Candidates(stops, legs_by_origin, table, lb, hops)
     heap: List[Any] = []
     seq = 0  # tie-breaker: не даём heapq сравнивать узлы
@@ -909,7 +894,7 @@ def _search_cheapest(ctx, table: _FlightTable, max_results: int, max_cost: Optio
             yield chain
             continue
         dest = table.dest[fi]
-        push_next((i + 1, dest, table.arr_day[fi], visited + (dest,), g + table.price[fi], (path, fi),
+        push_next((i + 1, dest, table.arr_day[fi], visited + (dest,), g + table.price_list[fi], (path, fi),
                    table.arr_iso[fi]), 0)
 
 
@@ -921,7 +906,7 @@ class _Candidates:
     делят все узлы. Тупики (хвоста нет), петли и прилёт вне разрешённых городов
     выкинуты сразу; дату и повторы проверяет push_next."""
 
-    def __init__(self, stops, legs_by_origin, table: _FlightTable, lb, hops):
+    def __init__(self, stops, legs_by_origin, table: FlightCols, lb, hops):
         self.stops, self.legs_by_origin, self.table, self.lb = stops, legs_by_origin, table, lb
         self.hops = hops
         self.last = len(stops) - 1
@@ -938,21 +923,24 @@ class _Candidates:
         terminal = i + 1 == self.last
         pairs = []
         seen = set()
+        t = self.table
         for d in self.hops.departs(i, city):
-            for f in self.legs_by_origin[i].get(d, []):
-                fi = self.table.index[id(f)]
+            rows = self.legs_by_origin[i].get(d)
+            if rows is None:
+                continue
+            for fi in rows.tolist():
                 if fi in seen:
                     continue
                 seen.add(fi)
-                dest = self.table.dest[fi]
-                if not dest or dest == city or dest == d or self.table.dep_day[fi] is None:
+                dest = t.dest[fi]
+                if not dest or dest == city or dest == d or t.dep_day[fi] is None:
                     continue
-                if allow_next is not None and not (_side_codes(f, "dest") & allow_next):
+                if allow_next is not None and not t.dest_in(fi, allow_next):
                     continue
                 tail = 0.0 if terminal else self.lb[i + 1].get(dest)
                 if tail is None:
                     continue
-                pairs.append((self.table.price[fi] + tail, fi, city not in _side_codes(f, "origin")))
+                pairs.append((t.price_list[fi] + tail, fi, city not in t.origin_codes(fi)))
         pairs.sort()
         return (array("d", (p[0] for p in pairs)), array("i", (p[1] for p in pairs)),
                 bytes(p[2] for p in pairs))
@@ -973,7 +961,7 @@ def _stay(arrive_iso: str, depart_iso: str):
     return stay_between(arrive_iso, depart_iso), _has_both_weekend_days(arrive_iso, depart_iso)
 
 
-def _pack_compact(ctx, table: _FlightTable, chains: array, legs: int) -> Dict[str, Any]:
+def _pack_compact(ctx, table: FlightCols, chains: array, legs: int) -> Dict[str, Any]:
     """Компактный результат (контракт — frontend/src/planner/compact.ts).
 
     segments — уникальные сегменты (make_segment), каждый один раз; chains — плоский
@@ -988,7 +976,7 @@ def _pack_compact(ctx, table: _FlightTable, chains: array, legs: int) -> Dict[st
         si = seg_of.get(fi)
         if si is None:
             si = seg_of[fi] = len(segments)
-            segments.append(builder.make_segment(table.flights[fi]))
+            segments.append(builder.make_segment(table.flight(fi)))
         out_chains.append(si)
 
     start_iso = f"{chain_start}T00:00:00"
@@ -1213,6 +1201,7 @@ def build_combo_routes(stops: List[Stop], collected: Dict[int, List[Dict[str, An
     if city_info is None:
         city_info = make_city_lookup(load_airport_network())
     max_cost = query.max_cost if query is not None else None
+    collected = as_cols(collected)   # один раз на все наборы
     out: List[Dict[str, Any]] = []
     for codes in combos:
         if len(codes) != len(stops):

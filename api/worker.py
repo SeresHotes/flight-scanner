@@ -242,10 +242,13 @@ def run_plan_collection(db_path: str, job_id: str, raw_stops: List[Dict[str, Any
                                          leg_cb=rep.step, airport_city=hot.airport_city_map(conn),
                                          workers=workers)
         rep.flights(sum(len(v) for v in collected.values()))
-        # Рейсы — в БД: из них строятся виды под другие фильтры и маршруты наборов.
-        hot.put_plan_flights(conn, job_id, collected)
+        # Рейсы — колонками в файл джобы: из них строятся виды под другие фильтры и
+        # маршруты наборов. Те же колонки — и для первой стыковки.
+        from core.flightcols import FlightCols
+        table = FlightCols.from_collected(collected)
+        hot.put_plan_flights(conn, job_id, table)
         rep.stage("build")
-        result = build_view(stops, collected, pq, city_info=city_info,
+        result = build_view(stops, table, pq, city_info=city_info,
                             on_progress=rep.build_progress(pq.max_results),
                             should_stop=lambda: is_cancel_requested(job_id), on_stage=rep.stage)
 
