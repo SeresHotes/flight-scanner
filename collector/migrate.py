@@ -7,10 +7,14 @@
 работает: новые файлы он уже пишет в fetched=, ретеншн может удалить файл посреди
 переноса — такой просто пропускается. Повторный запуск доделывает оставшееся.
 
-Запуск на VM: docker exec flights-collector-1 python -m collector.migrate [--dry-run]
+Запуск на VM отдельным контейнером (деплой перезапускает compose-контейнеры и оборвал
+бы перенос; прерванный перенос повторный запуск доделывает):
+  docker run -d --name flights-migrate --network host -v /opt/flights/data:/app/data \
+    --env-file /opt/flights/.env <образ flights-collector> python -m collector.migrate
 """
 import argparse
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
@@ -31,7 +35,8 @@ def new_key(old: str) -> Optional[str]:
 
 
 def migrate(store, index: Index, *, workers: int = 16, delete_grace: float = 60.0,
-            dry_run: bool = False, sleep=time.sleep, log=print) -> Dict[str, Any]:
+            dry_run: bool = False, sleep=time.sleep, clock=time.monotonic,
+            log=print) -> Dict[str, Any]:
     old_keys = [f["key"] for f in index.files_oldest_first() if f["key"].startswith(LEGACY_PREFIX)]
     plan = [(k, new_key(k)) for k in old_keys]
     skipped = [k for k, n in plan if n is None]
@@ -42,7 +47,6 @@ def migrate(store, index: Index, *, workers: int = 16, delete_grace: float = 60.
         for k, n in plan[:5]:
             log(f"  {k}\n→ {n}")
         return stats
-    moved: List[str] = []
 
     def one(pair):
         old, new = pair
@@ -53,22 +57,36 @@ def migrate(store, index: Index, *, workers: int = 16, delete_grace: float = 60.
         index.rename_file(old, new)
         return old, new, None
 
-    started = time.monotonic()
+    # Старые файлы удаляются по ходу, пачками, спустя delete_grace после переноса:
+    # прерванный перенос оставляет мало дублей, а чтение по старому ключу успевает кончиться.
+    pending: deque = deque()    # (момент переноса, старый ключ) по времени
+    due: List[str] = []
+
+    def flush(force: bool = False) -> None:
+        now = clock()
+        while pending and (force or now - pending[0][0] >= delete_grace):
+            due.append(pending.popleft()[1])
+        if due and (force or len(due) >= 1000):
+            store.delete(due)
+            stats["deleted"] += len(due)
+            due.clear()
+
+    started = clock()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for i, (old, new, err) in enumerate(pool.map(one, plan), 1):
             if err is None:
-                moved.append(old)
+                stats["moved"] += 1
+                pending.append((clock(), old))
             else:
                 stats["missing"] += 1
+            flush()
             if i % 5000 == 0:
-                log(f"[migrate] {i}/{len(plan)} за {time.monotonic() - started:.0f} с")
-    stats["moved"] = len(moved)
-    log(f"[migrate] скопировано {len(moved)}, пропущено {stats['missing']}; "
-        f"удаление старых через {delete_grace:.0f} с")
-    sleep(delete_grace)
-    for i in range(0, len(moved), 1000):
-        store.delete(moved[i:i + 1000])
-    stats["deleted"] = len(moved)
+                log(f"[migrate] {i}/{len(plan)} за {clock() - started:.0f} с, удалено {stats['deleted']}")
+    if pending or due:
+        log(f"[migrate] скопировано {stats['moved']}, пропущено {stats['missing']}; "
+            f"остаток старых — через {delete_grace:.0f} с")
+        sleep(delete_grace)
+        flush(force=True)
     log(f"[migrate] готово: {stats}")
     return stats
 

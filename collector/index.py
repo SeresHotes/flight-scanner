@@ -210,9 +210,14 @@ class Index:
 
     def rename_file(self, old: str, new: str) -> int:
         """Файл перенесён под новый ключ (копия уже в озере): файл и его серии —
-        одной транзакцией. Возвращает число перенаправленных серий."""
+        одной транзакцией. Возвращает число перенаправленных серий. Новый ключ уже в
+        учёте (прерванный перенос: сверка при старте импортировала копию) — старая
+        запись просто убирается."""
         with self._lock:
-            self._conn.execute("UPDATE files SET key=? WHERE key=?", (new, old))
+            if self._conn.execute("SELECT 1 FROM files WHERE key=?", (new,)).fetchone():
+                self._conn.execute("DELETE FROM files WHERE key=?", (old,))
+            else:
+                self._conn.execute("UPDATE files SET key=? WHERE key=?", (new, old))
             n = self._conn.execute("UPDATE series SET file_key=? WHERE file_key=?", (new, old)).rowcount
             self._conn.commit()
         return n

@@ -61,3 +61,43 @@ def test_migrate_moves_files_and_index(tmp_path):
     assert new_one in keys and new_win in keys and one not in keys
     # Повторный запуск — переносить нечего (кроме чужого файла).
     assert migrate(store, index, delete_grace=0, log=logs.append)["moved"] == 0
+
+
+def test_interrupted_migration_is_resumed(tmp_path):
+    """Прод 30.09: перенос оборвал деплой — копия есть, индекс переписан, а старый файл
+    не удалён и сверкой при старте снова попал в учёт. Повторный запуск доделывает."""
+    store, index = LocalStore(str(tmp_path)), Index(":memory:")
+    tickets = [t for t in (g.normalize_ticket(r, "MOW", None, "2026-10-15") for r in FIXTURE["mow_any"]) if t]
+    old = "tickets/date=2026-10-15/origin=MOW/MOW-ANY__2026-09-30T07-48-26Z.parquet"
+    new = "tickets/fetched=2026-09-30/origin=MOW/MOW-ANY__2026-10-15__07-48-26Z.parquet"
+    _legacy(store, index, old, "2026-10-15", [("2026-10-15", tickets)])
+    store.copy(old, new)
+    index.rename_file(old, new)
+    assert index.import_files([(old, 123)]) == 1                 # сверка вернула старый в учёт
+    stats = migrate(store, index, delete_grace=0, log=lambda *_: None)
+    assert stats["moved"] == 1 and stats["deleted"] == 1
+    assert not (tmp_path / old).exists() and (tmp_path / new).exists()
+    assert [f["key"] for f in index.files_oldest_first()] == [new]
+    assert index.get("MOW", None, "2026-10-15", "")["file_key"] == new
+
+
+def test_old_files_are_deleted_in_batches_after_grace(tmp_path):
+    store, index = LocalStore(str(tmp_path)), Index(":memory:")
+    codes = [chr(65 + i // 676) + chr(65 + i // 26 % 26) + chr(65 + i % 26) for i in range(1500)]
+    keys = [f"tickets/date=2026-10-15/origin={c}/{c}-ANY__2026-09-30T07-48-26Z.parquet" for c in codes]
+    for k in keys:
+        store.put_bytes(k, b"x")
+        index.attach_file(k, "2026-10-15", 1, [], observed=OBS)
+    t = [0.0]
+
+    def clock():
+        t[0] += 0.01                                             # 15 с на 1 500 файлов
+        return t[0]
+    deletes = []
+    real_delete = store.delete
+    store.delete = lambda ks: (deletes.append(len(list(ks))), real_delete(ks))
+    stats = migrate(store, index, workers=1, delete_grace=5, clock=clock, sleep=lambda s: None,
+                    log=lambda *_: None)
+    assert stats["moved"] == stats["deleted"] == 1500
+    assert deletes[0] == 1000 and sum(deletes) == 1500           # первая пачка — ещё по ходу
+    assert not any((tmp_path / k).exists() for k in keys)

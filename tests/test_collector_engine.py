@@ -272,3 +272,9 @@ def test_parse_legacy_date_layout_keys():
     new = lake.series_file_key(None, "SEL", "2026-10-15", "min=1&max=2", corr["observed"])
     assert new == "tickets/fetched=2026-09-28/origin=ANY/ANY-SEL__2026-10-15__min=1,max=2__16-32-01Z.parquet"
     assert lake.parse_file_key(new) == corr
+    # Внутренние коды источника кириллицей (АУР, БИХ) — тоже по схеме.
+    cyr = lake.parse_file_key("tickets/date=2026-09-28/origin=АУР/АУР-ANY__2026-09-28T18-33-46Z.parquet")
+    assert (cyr["origin"], cyr["destination"], cyr["day"]) == ("АУР", None, "2026-09-28")
+    moved = lake.series_file_key("АУР", None, cyr["day"], "", cyr["observed"])
+    assert moved == "tickets/fetched=2026-09-28/origin=АУР/АУР-ANY__2026-09-28__18-33-46Z.parquet"
+    assert lake.parse_file_key(moved)["origin"] == "АУР"
