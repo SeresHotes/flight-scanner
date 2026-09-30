@@ -115,6 +115,33 @@ class LegFilter:
                 return False
         return True
 
+    def mask(self, cols, rows):
+        """accepts() векторно по строкам rows колонок рейсов (core.flightcols)."""
+        import numpy as np
+        ok = np.ones(len(rows), dtype=bool)
+        if not self.hidden_city:
+            ok &= ~cols.hidden[rows]
+        transfers = cols.transfers[rows]
+        if self.max_transfers >= 0:
+            ok &= transfers <= self.max_transfers
+        duration = cols.duration[rows]
+        lo, hi = self.travel_min
+        ok &= duration >= (lo or 0)
+        if hi is not None:
+            ok &= duration <= hi
+        if self.min_layover_min > 0:
+            pts, lay = cols.pts_min[rows], cols.layover[rows]
+            known = ~np.isnan(pts)
+            with np.errstate(invalid="ignore"):
+                short = np.where(known, pts < self.min_layover_min,
+                                 ~np.isnan(lay) & (transfers == 1) & (lay < self.min_layover_min))
+            ok &= ~((transfers > 0) & short)
+        if self.baggage == "included":
+            ok &= cols.bag_incl[rows]
+        elif self.baggage == "none":
+            ok &= ~cols.bag_incl[rows]
+        return ok
+
 
 @dataclass
 class PlanQuery:
