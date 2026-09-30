@@ -27,8 +27,9 @@ export interface CityCombo {
 
 export interface CombosPage {
   status: 'ok' | 'not_ready'
-  total: number // наборов
-  totalCount: number // цепочек во всех наборах
+  total: number // наборов (не больше 1000 самых дешёвых)
+  totalCount: number // цепочек в выданных наборах
+  truncated?: boolean // наборов больше — показаны 1000 самых дешёвых
   offset: number
   limit: number
   items: CityCombo[]
