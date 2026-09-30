@@ -138,7 +138,7 @@ def _leg_dates(stops: List[Stop], i: int) -> List[str]:
 
 def _shift(date_str: str, days: int) -> str:
     from datetime import datetime, timedelta
-    return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=days)).strftime("%Y-%m-%d")
+    return (datetime.fromisoformat(date_str) + timedelta(days=days)).strftime("%Y-%m-%d")
 
 
 def _stop_label(stop: Stop, city_info) -> str:
