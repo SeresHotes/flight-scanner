@@ -119,9 +119,107 @@ def _compat(prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf,
     return ok
 
 
+_BIG_TR = 1 << 20
+
+
+def _range_min(values: np.ndarray, lo: np.ndarray, hi: np.ndarray, prefix: bool) -> np.ndarray:
+    """min(values[:, lo_f:hi_f]) для каждого f (D × F); отрезки непустые. prefix — все
+    lo = 0: накопленный минимум; иначе разреженная таблица (минимум на отрезке за O(1))."""
+    if prefix:
+        return np.minimum.accumulate(values, axis=1)[:, hi - 1]
+    levels = [values]
+    width = 1
+    while width * 2 <= values.shape[1]:
+        prev = levels[-1]
+        levels.append(np.minimum(prev[:, :-width], prev[:, width:]))
+        width *= 2
+    length = hi - lo
+    lv = np.floor(np.log2(length)).astype(np.int64)
+    out = np.empty((values.shape[0], len(lo)), dtype=values.dtype)
+    for level in np.unique(lv).tolist():   # уровней ≤ log2(P) — цикл короткий
+        cols = np.flatnonzero(lv == level)
+        tab = levels[level]
+        out[:, cols] = np.minimum(tab[:, lo[cols]], tab[:, hi[cols] - (1 << level)])
+    return out
+
+
 def _extend(state, prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf,
             hop: Optional[np.ndarray] = None):
-    """Состояние префикса (по рейсам p) → состояние по рейсам f (D × |f|)."""
+    """Состояние префикса (по рейсам p) → состояние по рейсам f (D × |f|).
+
+    Те же правила, что у _compat, но без матрицы D × P × F: все условия стыковки —
+    пороги на время прилёта предшественника. Вылет не раньше дня прилёта и «оба
+    выходных» — порог по дню, он не убывает со временем прилёта; запас на переезд и
+    минимум дней — «прилёт не позже dep − c»; максимум дней — «прилёт позже dep −
+    (M+1) суток». Поэтому подходящие предшественники рейса f — отрезок [lo, hi) в
+    списке, отсортированном по времени прилёта: число цепочек — разность накопленных
+    сумм, минимумы — минимум на отрезке. «Покрыть даты» — маски p и f. D × (P + F)
+    вместо D × P × F. При равной цене выбирается предшественник с меньшим номером,
+    как у argmin в _extend_dense (минимум по ключу ранг цены × P + номер)."""
+    cnt, minp, tr_at, mintr = state
+    n_days, n_p = cnt.shape
+    arr_ts = prev.arr_ts[p_idx]
+    day_thr = prev.arr_ord[p_idx]
+    if cf is not None and cf.require_weekend:
+        day_thr = np.maximum(day_thr, prev.weekend_ok_from[p_idx])
+    order = np.argsort(arr_ts, kind="stable")
+    ts_s, thr_s = arr_ts[order], day_thr[order]
+
+    dep_ord, dep_ts = nxt.dep_ord[f_idx], nxt.dep_ts[f_idx]
+    hi = np.searchsorted(thr_s, dep_ord, side="right")
+    gap = np.full(len(f_idx), -np.inf)
+    if hop is not None and hop.any():
+        gap = np.where(hop, HOP_MIN_GAP_MIN * 60.0, gap)
+    if cf is not None:
+        gap = np.maximum(gap, cf.min_stay * _DAY)
+    hi = np.minimum(hi, np.searchsorted(ts_s, dep_ts - gap, side="right"))
+    prefix = cf is None or cf.max_stay is None
+    lo = (np.zeros(len(f_idx), dtype=np.int64) if prefix else
+          np.searchsorted(ts_s, dep_ts - (cf.max_stay + 1) * _DAY, side="right"))
+    p_ok = np.ones(n_p, dtype=bool)
+    f_ok = hi > lo
+    if cf is not None and cf.must_cover:
+        f_ord = datetime.fromisoformat(cf.must_cover[0]).date().toordinal()
+        t_ord = datetime.fromisoformat(cf.must_cover[1]).date().toordinal()
+        p_ok = prev.arr_ord[p_idx] <= f_ord
+        f_ok &= dep_ord >= t_ord
+    p_ok_s = p_ok[order]
+
+    n_f = len(f_idx)
+    new_cnt = np.zeros((n_days, n_f))
+    new_minp = np.full((n_days, n_f), _INF)
+    arg = np.zeros((n_days, n_f), dtype=np.int64)          # как argmin по пустой строке
+    new_mintr = np.full((n_days, n_f), _BIG_TR, dtype=np.int64)
+    live = np.flatnonzero(f_ok)
+    if len(live):
+        lo_l, hi_l = lo[live], hi[live]
+        # число цепочек: разность накопленных сумм по отсортированным предшественникам
+        csum = np.zeros((n_days, n_p + 1))
+        np.cumsum(np.where(p_ok_s[None, :], cnt[:, order], 0.0), axis=1, out=csum[:, 1:])
+        new_cnt[:, live] = csum[:, hi_l] - csum[:, lo_l]
+        # минимальная цена и её предшественник: ключ «ранг цены × P + номер»
+        uniq, rank = np.unique(minp, return_inverse=True)
+        rank = rank.reshape(minp.shape)
+        inf_rank = len(uniq) - 1 if np.isinf(uniq[-1]) else len(uniq)
+        rank_s = np.where(p_ok_s[None, :], rank[:, order], inf_rank)
+        key = rank_s.astype(np.int64) * n_p + order[None, :]
+        best = _range_min(key, lo_l, hi_l, prefix)
+        found = best // n_p < inf_rank
+        best_p = np.where(found, best % n_p, 0)
+        arg[:, live] = best_p
+        new_minp[:, live] = np.where(found, np.take_along_axis(minp, best_p, axis=1), _INF)
+        # минимум пересадок среди всех подходящих
+        tr_s = np.where(p_ok_s[None, :], mintr[:, order], _BIG_TR).astype(np.int64)
+        new_mintr[:, live] = _range_min(tr_s, lo_l, hi_l, prefix)
+    new_minp = new_minp + nxt.price[f_idx][None, :]
+    new_tr_at = np.take_along_axis(tr_at, arg, axis=1) + nxt.transfers[f_idx][None, :]
+    new_mintr = new_mintr + nxt.transfers[f_idx][None, :]
+    return new_cnt, new_minp, new_tr_at, new_mintr
+
+
+def _extend_dense(state, prev: _Leg, p_idx: np.ndarray, nxt: _Leg, f_idx: np.ndarray, cf,
+            hop: Optional[np.ndarray] = None):
+    """Эталон _extend: полная матрица D × P × F (для тестов; O(D·P·F))."""
     cnt, minp, tr_at, mintr = state
     ok = _compat(prev, p_idx, nxt, f_idx, cf, hop)                     # P × F
     okf = ok.astype(float)
