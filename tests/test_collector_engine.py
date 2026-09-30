@@ -115,7 +115,8 @@ def test_series_file_per_key_and_cache_hit_from_file(env):
     # Файл записан сразу по готовности, путь = ключ серии + момент загрузки.
     row = env.index.get("MOW", "SEL", "2026-10-15", "")
     key = row["file_key"]
-    assert key.startswith("tickets/date=2026-10-15/origin=MOW/MOW-SEL__") and key.endswith("Z.parquet")
+    assert key.startswith("tickets/fetched=") and "/origin=MOW/MOW-SEL__2026-10-15__" in key
+    assert key.endswith("Z.parquet")
     assert row["row_group"] == 0 and (Path(env.settings.lake_local_root) / key).exists()
     meta = lake.parse_file_key(key)
     assert (meta["origin"], meta["destination"], meta["day"], meta["params_key"]) == ("MOW", "SEL", "2026-10-15", "")
@@ -131,7 +132,7 @@ def test_series_file_per_key_and_cache_hit_from_file(env):
     env.submit(SeriesRequest(None, "SEL", "2026-10-15", value_min=20000, value_max=40000), client="app")
     _run(env)
     key_any = env.index.get(None, "SEL", "2026-10-15", "min=20000&max=40000")["file_key"]
-    assert "/origin=ANY/ANY-SEL__min=20000,max=40000__" in key_any
+    assert "/origin=ANY/ANY-SEL__2026-10-15__min=20000,max=40000__" in key_any
     assert lake.parse_file_key(key_any)["params_key"] == "min=20000&max=40000"
     # Просят глубже, чем есть в неисчерпанной серии → не кэш.
     env.source.sizes[("MOW", "")] = [400, 400, 400]
@@ -161,7 +162,8 @@ def test_refetch_keeps_history_as_new_file(env):
     env.submit(SeriesRequest("SEL", None, "2026-10-15"), client="crawl")
     _run(env)
     second_key = env.index.get("SEL", None, "2026-10-15", "")["file_key"]
-    assert second_key != first_key and second_key.endswith(later.strftime("%Y-%m-%dT%H-%M-%SZ.parquet"))
+    assert second_key != first_key and second_key.endswith(later.strftime("__%H-%M-%SZ.parquet"))
+    assert f"/fetched={later:%Y-%m-%d}/" in second_key
     files = [f["key"] for f in env.index.files_oldest_first()]
     assert files == [first_key, second_key]   # старая копия осталась (история цен)
 
@@ -254,6 +256,19 @@ def test_ticket_round_trip_through_parquet(tmp_path):
     sid = index.put("MOW", None, "2026-10-15", "", pages=1, exhausted=True, tickets=len(tickets))
     observed = datetime(2026, 9, 28, 16, 31, 35, tzinfo=timezone.utc)
     key = writer.write(sid, "MOW", None, "2026-10-15", "", tickets, observed)
-    assert key == "tickets/date=2026-10-15/origin=MOW/MOW-ANY__2026-09-28T16-31-35Z.parquet"
+    assert key == "tickets/fetched=2026-09-28/origin=MOW/MOW-ANY__2026-10-15__16-31-35Z.parquet"
     assert writer.read(key) == tickets
     assert lake.parse_file_key("tickets/observed=2026-09-28/part-x.parquet") is None
+    assert lake.parse_file_key(key) == {"origin": "MOW", "destination": None, "day": "2026-10-15",
+                                        "day_to": None, "params_key": "", "observed": observed}
+
+
+def test_parse_legacy_date_layout_keys():
+    old = lake.parse_file_key("tickets/date=2026-11-08/origin=XCR/XCR-ANY__to=2026-11-29__2026-09-30T07-48-26Z.parquet")
+    assert (old["origin"], old["day"], old["day_to"], old["params_key"]) == ("XCR", "2026-11-08", "2026-11-29", "")
+    assert old["observed"] == datetime(2026, 9, 30, 7, 48, 26, tzinfo=timezone.utc)
+    corr = lake.parse_file_key("tickets/date=2026-10-15/origin=ANY/ANY-SEL__min=1,max=2__2026-09-28T16-32-01Z.parquet")
+    assert (corr["origin"], corr["destination"], corr["day_to"], corr["params_key"]) == (None, "SEL", None, "min=1&max=2")
+    new = lake.series_file_key(None, "SEL", "2026-10-15", "min=1&max=2", corr["observed"])
+    assert new == "tickets/fetched=2026-09-28/origin=ANY/ANY-SEL__2026-10-15__min=1,max=2__16-32-01Z.parquet"
+    assert lake.parse_file_key(new) == corr

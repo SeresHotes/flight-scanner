@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_series_fetched ON series (fetched_at);
 
 CREATE TABLE IF NOT EXISTS files (
     key         TEXT PRIMARY KEY,
-    observed    TEXT NOT NULL,   -- день вылета серии (date= в пути); момент загрузки — created_at
+    observed    TEXT NOT NULL,   -- (первый) день вылета серии; момент загрузки — created_at
     bytes       INTEGER NOT NULL,
     series      INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
@@ -207,6 +207,15 @@ class Index:
     def files_bytes(self) -> int:
         with self._lock:
             return int(self._conn.execute("SELECT COALESCE(SUM(bytes), 0) FROM files").fetchone()[0])
+
+    def rename_file(self, old: str, new: str) -> int:
+        """Файл перенесён под новый ключ (копия уже в озере): файл и его серии —
+        одной транзакцией. Возвращает число перенаправленных серий."""
+        with self._lock:
+            self._conn.execute("UPDATE files SET key=? WHERE key=?", (new, old))
+            n = self._conn.execute("UPDATE series SET file_key=? WHERE file_key=?", (new, old)).rowcount
+            self._conn.commit()
+        return n
 
     def delete_files(self, keys: Iterable[str]) -> int:
         """Файлы удалены из озера — их серии больше не читаются, убираем из индекса."""
