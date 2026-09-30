@@ -16,7 +16,6 @@ from typing import Any, Callable, Dict, List, Optional
 import requests
 
 from core import graphql_api
-from core.series_arrow import ARROW_MEDIA_TYPE, ipc_to_table, tickets_from_table
 
 DEFAULT_TIMEOUT = 30
 POLL_WAIT = 20  # long-poll статуса задания, с
@@ -74,7 +73,9 @@ class CollectorClient:
 
     def _result(self, job_id: str) -> Dict[str, Any]:
         """Результат задания: Arrow IPC-поток (разбор по колонкам, core.series_arrow),
-        а если коллектор ответил JSON (старая версия) — JSON."""
+        а если коллектор ответил JSON (старая версия) — JSON. pyarrow импортируем
+        здесь: клиент грузит и краулер, а в его образе pyarrow нет (результаты ему не нужны)."""
+        from core.series_arrow import ARROW_MEDIA_TYPE, ipc_to_table, tickets_from_table
         r = self._get_response(f"/v1/requests/{job_id}/result", {"format": "arrow"},
                                timeout=max(self.timeout, 120))
         if r.headers.get("content-type", "").startswith(ARROW_MEDIA_TYPE):

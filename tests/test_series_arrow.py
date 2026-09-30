@@ -73,3 +73,11 @@ def test_client_falls_back_to_json_from_old_collector():
 
     series = CollectorClient("http://old", http=OldCollector()).fetch_series("MOW", None, "2026-10-15")
     assert series["tickets"] == [{"origin": "MOW"}] and series["cached"]
+
+
+def test_collector_client_imports_without_pyarrow():
+    """Краулер грузит core.collector_client, а pyarrow в его образе нет."""
+    import subprocess
+    import sys
+    code = "import sys; sys.modules['pyarrow'] = None; import core.collector_client, crawler.main"
+    subprocess.run([sys.executable, "-c", code], check=True)
