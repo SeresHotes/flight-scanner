@@ -24,6 +24,7 @@ from core import airports as airports_mod
 from core import planner
 from core.collector_client import CollectorClient, CollectorError, collector_url
 from core.planquery import PlanQuery
+from core.segments import load_city_names
 from storage import hot
 from api import worker
 
@@ -48,6 +49,7 @@ def _startup() -> None:
     global _conn
     _conn = hot.connect()
     hot.init_db(_conn)
+    load_city_names()   # статичный справочник — один раз на процесс, не на каждый запрос
     # Джобы, не пережившие прошлый рестарт, висят в running — помечаем error.
     stale = hot.fail_stale_jobs(_conn)
     # С коллектором серии живут в озере: локальный кэш серий больше не нужен и не
