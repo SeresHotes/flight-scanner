@@ -24,6 +24,29 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 QUARANTINE_ERRORS = 3
+PAGE_TICKETS = 400
+
+
+def p90(tickets: Optional[List[int]]) -> Optional[int]:
+    """Плотность города: p90 билетов в день по его покрытию (None — данных нет)."""
+    if not tickets:
+        return None
+    ranked = sorted(tickets)
+    return ranked[int(0.9 * (len(ranked) - 1))]
+
+
+def densities(coverage: Iterable[Sequence[Any]]) -> Dict[str, int]:
+    """Город → плотность (p90 билетов в день) по строкам /v1/coverage без ошибок."""
+    by_city: Dict[str, List[int]] = {}
+    for row in coverage:
+        if not row[6]:
+            by_city.setdefault(row[0], []).append(int(row[4] or 0))
+    return {c: p90(t) for c, t in by_city.items()}
+
+
+def estimate_pages(density: Optional[int], days: int) -> int:
+    """Оценка страниц серии: билетов в окне / 400, не меньше одной."""
+    return max(1, -(-int(density or 0) * days // PAGE_TICKETS))
 
 
 @dataclass
@@ -52,6 +75,7 @@ class Item:
     reason: str  # missing | stale | error | truncated
     day_to: Optional[str] = None  # окно дат: последний день включительно
     days: int = 1
+    est_pages: int = 1            # оценка страниц (плотность × дни / 400) — для глубины очереди
 
     def request(self, max_pages: int) -> Dict[str, Any]:
         out = {"origin": self.origin, "destination": None, "day": self.day, "max_pages": max_pages}
@@ -141,11 +165,14 @@ def plan(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: dat
                 summary["queued_excluded"] += 1
                 continue
             due.append(Item(city, day, score, offset, reason))
+        density = p90(tickets_by_city.get(city))
         if window_tickets is None or quarantined:
+            for it in due:
+                it.est_pages = estimate_pages(density, 1)
             items.extend(due)
         else:
             items.extend(_windows(due, targets, _window_days(
-                tickets_by_city.get(city), window_tickets, unknown_window_days, horizon_days)))
+                density, window_tickets, unknown_window_days, horizon_days), density))
     rank = {c: i for i, c in enumerate(cities)}
     items.sort(key=lambda it: (-it.score, it.offset, rank[it.origin]))
     summary["oldest_h"] = round(summary["oldest_h"], 1)
@@ -155,16 +182,15 @@ def plan(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: dat
     return (items[:limit] if limit is not None else items), summary
 
 
-def _window_days(tickets: Optional[List[int]], budget: int, unknown_days: int, horizon_days: int) -> int:
+def _window_days(density: Optional[int], budget: int, unknown_days: int, horizon_days: int) -> int:
     """Длина окна: бюджет билетов / плотность (p90 билетов в день по покрытию города)."""
-    if not tickets:
+    if density is None:
         return max(1, unknown_days)
-    ranked = sorted(tickets)
-    p90 = ranked[int(0.9 * (len(ranked) - 1))]
-    return max(1, min(horizon_days + 1, budget // max(p90, 1)))
+    return max(1, min(horizon_days + 1, budget // max(density, 1)))
 
 
-def _windows(due: List[Item], targets: Targets, max_days: int) -> List[Item]:
+def _windows(due: List[Item], targets: Targets, max_days: int,
+             density: Optional[int] = None) -> List[Item]:
     """Подряд идущие дни (по возрастанию дальности) → окна до max_days дней; окно не
     пересекает пропуск и смену целевой свежести. Срочность окна — самого срочного дня."""
     out: List[Item] = []
@@ -174,7 +200,8 @@ def _windows(due: List[Item], targets: Targets, max_days: int) -> List[Item]:
         if cur:
             top = max(cur, key=lambda it: it.score)
             out.append(Item(cur[0].origin, cur[0].day, top.score, cur[0].offset, top.reason,
-                            day_to=cur[-1].day, days=len(cur)))
+                            day_to=cur[-1].day, days=len(cur),
+                            est_pages=estimate_pages(density, len(cur))))
             cur.clear()
 
     for it in sorted(due, key=lambda it: it.offset):

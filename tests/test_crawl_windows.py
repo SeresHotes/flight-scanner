@@ -184,3 +184,31 @@ def test_tick_submits_windows_and_collector_splits_them(tmp_path):
         rows = {(r[0], r[1]): r[4] for r in c.get("/v1/coverage").json()["rows"]}
         assert rows == {("MOW", d): 3 for d in days}
         assert len(source.calls) == 1
+
+
+def test_estimate_pages_follows_density_and_window_length():
+    from crawler.schedule import densities, estimate_pages
+    assert estimate_pages(None, 30) == 1 and estimate_pages(3, 60) == 1
+    assert estimate_pages(5000, 2) == 25 and estimate_pages(401, 1) == 2
+    cov = [_row("MOW", o, 200, 5000) for o in range(10)] + [_row("X", 0, 1, 0, error=True)]
+    assert densities(cov) == {"MOW": 5000}
+    items, _ = plan(["MOW"], cov, today=TODAY, horizon_days=9, targets=T, now=NOW, window_tickets=10_000)
+    assert all(i.est_pages == 25 for i in items)
+
+
+def test_tick_fills_queue_by_estimated_pages(tmp_path):
+    csettings = CollectorSettings(db_path=":memory:", lake_local_root=str(tmp_path / "lake"),
+                                  s3_bucket=None, rate_per_minute=100_000)
+    engine = Engine(csettings, LocalStore(csettings.lake_local_root), Index(":memory:"),
+                    page_fn=RangeSource([]))
+    engine.start = lambda: None                                # воркер не выбирает очередь
+    seeds = [f"Q{chr(65 + i // 26)}{chr(65 + i % 26)}" for i in range(20)]
+    settings = Settings(collector_url="http://testserver", seeds=seeds, horizon_days=2,
+                        queue_pages=5, queue_target=100, max_pages=100, window_tickets=10_000)
+    with TestClient(create_app(engine)) as c:
+        client = CollectorClient("http://testserver", http=c, poll_wait=1)
+        s = crawler_main.tick(client, settings, today=TODAY, now=NOW)
+        # 20 городов без данных — окна по одной оценочной странице: подаём ровно 5.
+        assert s["submitted"] == 5 and s["submitted_pages_est"] == 5 and s["queued_pages_est"] == 0
+        s2 = crawler_main.tick(client, settings, today=TODAY, now=NOW)
+        assert s2["queued_pages_est"] == 5 and s2["submitted"] == 0
