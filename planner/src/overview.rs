@@ -590,8 +590,8 @@ mod tests {
             let chains = search_cheapest(&ctx, 100000, q.max_cost, Some(&q), &mut check).unwrap();
             let mut expected: HashMap<Vec<String>, (i64, f64, i64, i64)> = HashMap::new();
             for c in &chains {
-                let mut codes = vec![table.orig_city[c[0]].clone()];
-                codes.extend(c.iter().map(|&fi| table.dest[fi].clone()));
+                let mut codes = vec![table.orig_city(c[0]).to_string()];
+                codes.extend(c.iter().map(|&fi| table.dest(fi).to_string()));
                 let price: f64 = c.iter().map(|&fi| table.price[fi]).sum();
                 let tr: i64 = c.iter().map(|&fi| table.transfers[fi]).sum();
                 let e = expected.entry(codes).or_insert((0, f64::INFINITY, 0, 99));

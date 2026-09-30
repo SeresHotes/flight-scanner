@@ -862,7 +862,7 @@ pub mod tests {
                     if i > 0 && city != oc && city != oa && !gap_ok(arr_ts, t.dep_ts[fi]) {
                         continue;
                     }
-                    let dest = t.dest[fi].clone();
+                    let dest = t.dest(fi).to_string();
                     if dest.is_empty() || dest == city || dest == d {
                         continue;
                     }
