@@ -1,0 +1,805 @@
+//! Стыковка цепочек A → B → C → … (зеркало `core.planner`: _completion_lb,
+//! _search_cheapest, _pack_compact, materialize, build_combo_routes).
+//!
+//! best-first (A*) выдаёт цепочки по возрастанию цены и останавливается на N.
+//! Эвристика h = минимальная цена «хвоста» (`completion_lb`) — admissible и consistent,
+//! поэтому первые N извлечённых = N самых дешёвых. Раскрытие ленивое: онворды города
+//! на плече i заранее отсортированы по price + h (список общий для всех узлов —
+//! `Candidates`), и в куче лежит только лучший ещё не выданный ребёнок узла.
+
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
+
+use serde_json::{json, Value};
+
+use crate::dates::{date_ordinal, date_only, naive_seconds, parse_naive, shift_date, stay_between, stay_days_secs, weekend_covered, ordinal};
+use crate::flightcols::FlightCols;
+use crate::nearby::{distance_km, Hops, HOP_MIN_GAP_MIN};
+use crate::planquery::{trip_length_ok, CityFilter, PlanQuery};
+use crate::segments::{city_pair, make_segment, Segment};
+use crate::stops::{leg_dates, Stop, COMBO_MAX_RESULTS, FINAL_STAY_DAYS};
+
+#[derive(Debug)]
+pub struct Aborted;
+
+/// Хук шага перебора: считает шаги, сообщает прогресс, прерывает перебор.
+pub type StepCheck<'a> = dyn FnMut(usize) -> Result<(), Aborted> + 'a;
+
+pub struct Ctx<'a> {
+    pub stops: &'a [Stop],
+    pub table: &'a FlightCols,
+    pub legs_by_origin: Vec<HashMap<String, Vec<usize>>>,
+    pub chain_start: String,
+    pub last: usize,
+    pub hops: Hops<'a>,
+}
+
+/// Строки рейсов каждого плеча, прошедшие фильтр плеча (до перебора).
+pub fn leg_rows(table: &FlightCols, legs: usize, query: Option<&PlanQuery>) -> Vec<Vec<usize>> {
+    (0..legs)
+        .map(|i| {
+            let rows = table.rows(i);
+            match query.and_then(|q| q.legs.get(i)) {
+                Some(lf) if !lf.is_open() => rows
+                    .into_iter()
+                    .filter(|&r| lf.accepts(table.hidden[r], table.transfers[r], table.duration[r], table.pts_min[r], table.layover[r], table.bag_incl[r]))
+                    .collect(),
+                _ => rows,
+            }
+        })
+        .collect()
+}
+
+pub fn build_ctx<'a>(stops: &'a [Stop], table: &'a FlightCols, query: Option<&PlanQuery>) -> Ctx<'a> {
+    let legs = stops.len().saturating_sub(1);
+    let rows = leg_rows(table, legs, query);
+    let legs_by_origin = rows.iter().map(|r| table.by_origin(r)).collect();
+    let chain_start = leg_dates(stops, 0).into_iter().next().unwrap_or_else(|| crate::stops::DEFAULT_START.to_string());
+    Ctx { stops, table, legs_by_origin, chain_start, last: legs, hops: Hops::new(stops) }
+}
+
+/// Нижняя оценка стоимости «хвоста»: lb[i][city] — минимально возможная суммарная
+/// цена, чтобы, прилетев в city на остановку i, добраться до финала (только цены,
+/// разрешённые города и переезды — без времени и повторов; admissible).
+pub fn completion_lb(ctx: &Ctx) -> Vec<HashMap<String, f64>> {
+    let t = ctx.table;
+    let last = ctx.last;
+    let mut lb: Vec<HashMap<String, f64>> = vec![HashMap::new(); ctx.stops.len()];
+    for i in (0..last).rev() {
+        let allow_next = ctx.hops.arrive_allowed(i + 1);
+        let terminal_next = i + 1 == last;
+        let mut dep: HashMap<String, f64> = HashMap::new();
+        for (city, rows) in &ctx.legs_by_origin[i] {
+            let mut best = f64::INFINITY;
+            for &r in rows {
+                let dest = &t.dest[r];
+                if dest.is_empty() || dest == city {
+                    continue;
+                }
+                if !t.dest_in(r, allow_next.as_ref()) {
+                    continue;
+                }
+                let tail = if terminal_next {
+                    0.0
+                } else {
+                    match lb[i + 1].get(dest) {
+                        Some(v) => *v,
+                        None => continue,
+                    }
+                };
+                let cand = t.price[r] + tail;
+                if cand < best {
+                    best = cand;
+                }
+            }
+            if best < f64::INFINITY {
+                dep.insert(city.clone(), best);
+            }
+        }
+        if ctx.hops.radius[i] <= 0.0 {
+            lb[i] = dep;
+            continue;
+        }
+        let mut arrivals: HashSet<String> = dep.keys().cloned().collect();
+        for d in dep.keys() {
+            for n in crate::nearby::neighbors(d, ctx.hops.radius[i]) {
+                arrivals.insert(n);
+            }
+        }
+        let mut cur = HashMap::new();
+        for a in arrivals {
+            let best = ctx.hops.departs(i, &a).iter().filter_map(|d| dep.get(d)).cloned().fold(f64::INFINITY, f64::min);
+            if best < f64::INFINITY {
+                cur.insert(a, best);
+            }
+        }
+        lb[i] = cur;
+    }
+    lb
+}
+
+/// Онворд-рейсы (плечо i, город прилёта), отсортированные по price + lb хвоста.
+struct CandList {
+    keys: Vec<f64>,
+    idxs: Vec<usize>,
+    hop: Vec<bool>,
+}
+
+struct Candidates<'c, 'a> {
+    ctx: &'c Ctx<'a>,
+    lb: &'c [HashMap<String, f64>],
+    cache: HashMap<(usize, String), Arc<CandList>>,
+}
+
+impl<'c, 'a> Candidates<'c, 'a> {
+    fn get(&mut self, i: usize, city: &str) -> Arc<CandList> {
+        let key = (i, city.to_string());
+        if let Some(got) = self.cache.get(&key) {
+            return got.clone();
+        }
+        let built = Arc::new(self.build(i, city));
+        self.cache.insert(key, built.clone());
+        built
+    }
+
+    fn build(&self, i: usize, city: &str) -> CandList {
+        let ctx = self.ctx;
+        let t = ctx.table;
+        let allow_next = ctx.hops.arrive_allowed(i + 1);
+        let terminal = i + 1 == ctx.last;
+        let mut pairs: Vec<(f64, usize, bool)> = Vec::new();
+        let mut seen: HashSet<usize> = HashSet::new();
+        for d in ctx.hops.departs(i, city) {
+            let Some(rows) = ctx.legs_by_origin[i].get(&d) else { continue };
+            for &fi in rows {
+                if !seen.insert(fi) {
+                    continue;
+                }
+                let dest = &t.dest[fi];
+                if dest.is_empty() || dest == city || *dest == d || t.dep_ord[fi] < 0 {
+                    continue;
+                }
+                if !t.dest_in(fi, allow_next.as_ref()) {
+                    continue;
+                }
+                let tail = if terminal {
+                    0.0
+                } else {
+                    match self.lb[i + 1].get(dest) {
+                        Some(v) => *v,
+                        None => continue,
+                    }
+                };
+                let (oc, oa) = t.origin_codes(fi);
+                pairs.push((t.price[fi] + tail, fi, city != oc && city != oa));
+            }
+        }
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal).then(a.1.cmp(&b.1)));
+        CandList { keys: pairs.iter().map(|p| p.0).collect(), idxs: pairs.iter().map(|p| p.1).collect(), hop: pairs.iter().map(|p| p.2).collect() }
+    }
+}
+
+struct Node {
+    i: usize,
+    city: String,
+    arrive_ord: i64,
+    arrive_ts: f64,
+    g: f64,
+    parent: Option<(usize, usize)>, // (узел, рейс)
+}
+
+struct HeapItem {
+    f: f64,
+    seq: u64,
+    node: usize,
+    k: usize,
+}
+
+impl PartialEq for HeapItem {
+    fn eq(&self, o: &Self) -> bool {
+        self.seq == o.seq
+    }
+}
+impl Eq for HeapItem {}
+impl PartialOrd for HeapItem {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for HeapItem {
+    fn cmp(&self, o: &Self) -> Ordering {
+        // BinaryHeap — max-heap: меньший f (и seq) должен быть «больше»
+        o.f.partial_cmp(&self.f).unwrap_or(Ordering::Equal).then(o.seq.cmp(&self.seq))
+    }
+}
+
+/// Хватает ли времени на переезд в соседний город.
+fn gap_ok(arrive_ts: f64, depart_ts: f64) -> bool {
+    depart_ts - arrive_ts >= (HOP_MIN_GAP_MIN * 60) as f64
+}
+
+/// Фильтр пребывания в промежуточном городе: дни между прилётом и вылетом,
+/// обязательное окно, выходные.
+fn stay_ok(cf: &CityFilter, arrive_ts: f64, arrive_ord: i64, depart_ts: f64, depart_ord: i64) -> bool {
+    let days = stay_days_secs(arrive_ts, depart_ts);
+    if days < cf.min_stay {
+        return false;
+    }
+    if let Some(m) = cf.max_stay {
+        if days > m {
+            return false;
+        }
+    }
+    if let Some(cover) = &cf.must_cover {
+        let (Some(a), Some(b)) = (date_ordinal(&cover[0]), date_ordinal(&cover[1])) else { return false };
+        if !(arrive_ord <= a && depart_ord >= b) {
+            return false;
+        }
+    }
+    if cf.require_weekend && !weekend_covered(arrive_ts, arrive_ord, depart_ts, depart_ord) {
+        return false;
+    }
+    true
+}
+
+/// Цепочки (индексы рейсов в table) по возрастанию цены, не больше max_results.
+pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, query: Option<&PlanQuery>, check: &mut StepCheck) -> Result<Vec<Vec<usize>>, Aborted> {
+    let t = ctx.table;
+    let last = ctx.last;
+    let lb = completion_lb(ctx);
+    let mut cands = Candidates { ctx, lb: &lb, cache: HashMap::new() };
+    let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut seq: u64 = 0;
+    let city_filters: HashMap<usize, &CityFilter> = (1..last).filter_map(|i| query.and_then(|q| q.city_filter(i)).map(|cf| (i, cf))).collect();
+    let trip = query.map(|q| q.trip_length).filter(|tl| tl.0 != 0 || tl.1.is_some());
+
+    let start_dt = parse_naive(&format!("{}T00:00:00", ctx.chain_start)).expect("chain_start");
+    let start_ord = ordinal(start_dt.date());
+    let start_ts = naive_seconds(start_dt);
+
+    fn visited(nodes: &[Node], mut idx: usize, dest: &str) -> bool {
+        loop {
+            if nodes[idx].city == dest {
+                return true;
+            }
+            match nodes[idx].parent {
+                Some((p, _)) => idx = p,
+                None => return false,
+            }
+        }
+    }
+
+    // Кладёт в кучу первого валидного ребёнка узла, начиная с позиции start.
+    let push_next = |node_idx: usize, start: usize, nodes: &Vec<Node>, cands: &mut Candidates, heap: &mut BinaryHeap<HeapItem>, seq: &mut u64| {
+        let node = &nodes[node_idx];
+        let i = node.i;
+        let list = cands.get(i, &node.city);
+        let any_next = ctx.stops[i + 1].kind == "any";
+        let cf = city_filters.get(&i).copied();
+        for k in start..list.idxs.len() {
+            let f = node.g + list.keys[k];
+            if let Some(mc) = max_cost {
+                if f > mc {
+                    return;
+                }
+            }
+            let fi = list.idxs[k];
+            if t.dep_ord[fi] < node.arrive_ord {
+                continue;
+            }
+            if list.hop[k] && i > 0 && !gap_ok(node.arrive_ts, t.dep_ts[fi]) {
+                continue;
+            }
+            if any_next && visited(nodes, node_idx, &t.dest[fi]) {
+                continue;
+            }
+            if let Some(cf) = cf {
+                if !stay_ok(cf, node.arrive_ts, node.arrive_ord, t.dep_ts[fi], t.dep_ord[fi]) {
+                    continue;
+                }
+            }
+            heap.push(HeapItem { f, seq: *seq, node: node_idx, k });
+            *seq += 1;
+            return;
+        }
+    };
+
+    for start in &ctx.stops[0].codes {
+        let Some(tail) = lb[0].get(start) else { continue };
+        if let Some(mc) = max_cost {
+            if *tail > mc {
+                continue;
+            }
+        }
+        nodes.push(Node { i: 0, city: start.clone(), arrive_ord: start_ord, arrive_ts: start_ts, g: 0.0, parent: None });
+        let idx = nodes.len() - 1;
+        push_next(idx, 0, &nodes, &mut cands, &mut heap, &mut seq);
+    }
+
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    loop {
+        if out.len() >= max_results {
+            break;
+        }
+        let Some(item) = heap.pop() else { break };
+        check(out.len())?;
+        push_next(item.node, item.k + 1, &nodes, &mut cands, &mut heap, &mut seq);
+        let (i, city) = (nodes[item.node].i, nodes[item.node].city.clone());
+        let fi = cands.get(i, &city).idxs[item.k];
+        if i + 1 == last {
+            let mut chain = vec![fi];
+            let mut cur = item.node;
+            while let Some((p, pf)) = nodes[cur].parent {
+                chain.push(pf);
+                cur = p;
+            }
+            chain.reverse();
+            if let Some(tl) = trip {
+                let days = (t.arr_ord[*chain.last().unwrap()] - t.dep_ord[chain[0]]).max(1);
+                if !trip_length_ok(days, tl) {
+                    continue;
+                }
+            }
+            out.push(chain);
+            continue;
+        }
+        let dest = t.dest[fi].clone();
+        nodes.push(Node { i: i + 1, city: dest, arrive_ord: t.arr_ord[fi], arrive_ts: t.arr_ts[fi], g: nodes[item.node].g + t.price[fi], parent: Some((item.node, fi)) });
+        let idx = nodes.len() - 1;
+        push_next(idx, 0, &nodes, &mut cands, &mut heap, &mut seq);
+    }
+    Ok(out)
+}
+
+// ---------------------------- компактный результат ---------------------------
+
+/// Компактный результат стыковки (контракт compact-v1): уникальные сегменты один раз,
+/// цепочки — индексы сегментов, дни в городах, маска выходных, длина поездки.
+pub struct View {
+    pub count: usize,
+    pub legs: usize,
+    pub chain_start: String,
+    pub final_stay_days: i64,
+    pub any_stops: Vec<bool>,
+    pub cities: HashMap<String, (String, String)>,
+    pub segments: Vec<Segment>,
+    pub chains: Vec<u32>,
+    pub days: Vec<i16>,
+    pub weekend: Vec<u32>,
+    pub total_days: Vec<i16>,
+}
+
+fn stay_of(arrive: &str, depart: &str) -> (i64, bool) {
+    (stay_between(arrive, depart), crate::dates::has_both_weekend_days(arrive, depart))
+}
+
+/// Дни в городах и маска выходных по остановкам.
+fn chain_stays(segs: &[&Segment], start_iso: &str) -> (Vec<i16>, u32) {
+    let mut days = Vec::with_capacity(segs.len() + 1);
+    let mut mask = 0u32;
+    let mut arrive = start_iso.to_string();
+    for k in 0..=segs.len() {
+        let (d, wk) = if k < segs.len() {
+            stay_of(&arrive, segs[k].departure_at.as_deref().unwrap_or(""))
+        } else {
+            let depart = format!("{}T00:00:00", shift_date(&date_only(&arrive), FINAL_STAY_DAYS));
+            let (d, wk) = stay_of(&arrive, &depart);
+            (d.max(1), wk)
+        };
+        days.push(d.max(0) as i16);
+        mask |= (wk as u32) << k;
+        if k < segs.len() {
+            arrive = segs[k].arrival_at.clone().unwrap_or_default();
+        }
+    }
+    (days, mask)
+}
+
+/// Длина поездки — от даты первого вылета до даты последнего прилёта.
+fn trip_days(segs: &[&Segment]) -> i64 {
+    if segs.is_empty() {
+        return 1;
+    }
+    let first = date_only(segs[0].departure_at.as_deref().unwrap_or(""));
+    let last = date_only(segs[segs.len() - 1].arrival_at.as_deref().unwrap_or(""));
+    stay_between(&first, &last).max(1)
+}
+
+pub fn pack_compact(ctx: &Ctx, chains: &[Vec<usize>]) -> View {
+    let legs = ctx.last;
+    let mut seg_of: HashMap<usize, u32> = HashMap::new();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut out_chains: Vec<u32> = Vec::with_capacity(chains.len() * legs);
+    for chain in chains {
+        for &fi in chain {
+            let si = match seg_of.get(&fi) {
+                Some(s) => *s,
+                None => {
+                    let s = segments.len() as u32;
+                    segments.push(make_segment(&ctx.table.flight(fi)));
+                    seg_of.insert(fi, s);
+                    s
+                }
+            };
+            out_chains.push(si);
+        }
+    }
+    let start_iso = format!("{}T00:00:00", ctx.chain_start);
+    let count = if legs > 0 { out_chains.len() / legs } else { 0 };
+    let (mut days, mut weekend, mut total_days) = (Vec::with_capacity(count * (legs + 1)), Vec::with_capacity(count), Vec::with_capacity(count));
+    for n in 0..count {
+        let segs: Vec<&Segment> = (0..legs).map(|k| &segments[out_chains[n * legs + k] as usize]).collect();
+        let (d, mask) = chain_stays(&segs, &start_iso);
+        days.extend(d);
+        weekend.push(mask);
+        total_days.push(trip_days(&segs) as i16);
+    }
+    let mut cities = HashMap::new();
+    for s in &segments {
+        for code in [&s.origin, &s.destination] {
+            if let Some(c) = code.as_deref().filter(|c| !c.is_empty()) {
+                cities.entry(c.to_string()).or_insert_with(|| city_pair(c));
+            }
+        }
+    }
+    View {
+        count,
+        legs,
+        chain_start: start_iso,
+        final_stay_days: FINAL_STAY_DAYS,
+        any_stops: ctx.stops.iter().map(|s| s.kind == "any").collect(),
+        cities,
+        segments,
+        chains: out_chains,
+        days,
+        weekend,
+        total_days,
+    }
+}
+
+/// Стыковка под фильтры query: компактный результат N самых дешёвых цепочек.
+pub fn build_itineraries_compact(stops: &[Stop], table: &FlightCols, max_results: usize, max_cost: Option<f64>, query: Option<&PlanQuery>, check: &mut StepCheck) -> Result<View, Aborted> {
+    let ctx = build_ctx(stops, table, query);
+    let chains = search_cheapest(&ctx, max_results, max_cost, query, check)?;
+    Ok(pack_compact(&ctx, &chains))
+}
+
+fn depart_from(code: &str, seg: Option<&Segment>, names: &dyn Fn(&str) -> (String, String)) -> Option<Value> {
+    let seg = seg?;
+    let origin = seg.origin.as_deref().unwrap_or("").to_uppercase();
+    if origin.is_empty() || origin == code.to_uppercase() {
+        return None;
+    }
+    let km = distance_km(code, &origin);
+    let (city, flag) = names(&origin);
+    Some(json!({"code": origin, "city": city, "flag": flag, "km": km.map(|k| k.round() as i64)}))
+}
+
+impl View {
+    /// Коды городов цепочки n: старт + прилёты всех плеч.
+    pub fn chain_codes(&self, n: usize) -> Vec<String> {
+        let base = n * self.legs;
+        let mut out = vec![self.segments[self.chains[base] as usize].origin.clone().unwrap_or_default()];
+        for k in 0..self.legs {
+            out.push(self.segments[self.chains[base + k] as usize].destination.clone().unwrap_or_default());
+        }
+        out
+    }
+
+    /// Itinerary цепочки n: остановки с прилётом/вылетом/днями/выходными, сегменты, суммы.
+    pub fn materialize(&self, n: usize) -> Value {
+        let legs = self.legs;
+        let stop_count = legs + 1;
+        let segments: Vec<&Segment> = (0..legs).map(|k| &self.segments[self.chains[n * legs + k] as usize]).collect();
+        let names = |c: &str| self.cities.get(c).cloned().unwrap_or_else(|| (c.to_string(), String::new()));
+        let mut stops = Vec::with_capacity(stop_count);
+        for k in 0..stop_count {
+            let code = if k == 0 { segments[0].origin.clone() } else { segments[k - 1].destination.clone() }.unwrap_or_default();
+            let arrive = if k == 0 { self.chain_start.clone() } else { segments[k - 1].arrival_at.clone().unwrap_or_default() };
+            let depart = if k < legs {
+                segments[k].departure_at.clone().unwrap_or_default()
+            } else {
+                format!("{}T00:00:00", shift_date(&date_only(&arrive), self.final_stay_days))
+            };
+            let (city, flag) = names(&code);
+            let mut stop = json!({
+                "code": code,
+                "city": city,
+                "flag": flag,
+                "arrive": arrive,
+                "depart": depart,
+                "days": self.days[n * stop_count + k],
+                "weekendCovered": (self.weekend[n] >> k) & 1 == 1,
+                "resolvedFromAny": self.any_stops.get(k).copied().unwrap_or(false),
+            });
+            if k > 0 && k < legs {
+                if let Some(df) = depart_from(&code, Some(segments[k]), &names) {
+                    stop["departFrom"] = df;
+                }
+            }
+            stops.push(stop);
+        }
+        json!({
+            "id": n + 1,
+            "stops": stops,
+            "segments": segments,
+            "total_price": segments.iter().map(|s| s.price).sum::<f64>(),
+            "total_days": self.total_days[n],
+            "total_transfers": segments.iter().map(|s| s.transfers).sum::<i64>(),
+            "travel_minutes": segments.iter().map(|s| s.duration.unwrap_or(0)).sum::<i64>(),
+        })
+    }
+
+    /// Страница маршрутов по возрастанию цены.
+    pub fn routes_page(&self, offset: usize, limit: usize) -> Value {
+        let total = self.count;
+        let end = total.min(offset + limit);
+        let items: Vec<Value> = (offset.min(end)..end).map(|n| self.materialize(n)).collect();
+        json!({"total": total, "offset": offset, "limit": limit, "items": items})
+    }
+}
+
+pub fn combo_key(codes: &[String]) -> String {
+    codes.join("-")
+}
+
+/// Маршруты выбранных наборов городов: на каждый набор — тот же A* по сохранённым
+/// рейсам, но остановки зафиксированы кодами набора. Itinerary по возрастанию цены,
+/// у каждого поле combo.
+pub fn build_combo_routes(stops: &[Stop], table: &FlightCols, combos: &[Vec<String>], query: Option<&PlanQuery>) -> Vec<Value> {
+    let max_cost = query.and_then(|q| q.max_cost);
+    let mut out: Vec<Value> = Vec::new();
+    for codes in combos {
+        if codes.len() != stops.len() {
+            continue;
+        }
+        let fixed: Vec<Stop> = codes
+            .iter()
+            .zip(stops)
+            .map(|(code, stop)| Stop { kind: "cities".into(), codes: vec![code.clone()], window: stop.window.clone(), radius_km: stop.radius_km, exact: true })
+            .collect();
+        let mut check = |_: usize| Ok(());
+        let Ok(view) = build_itineraries_compact(&fixed, table, COMBO_MAX_RESULTS as usize, max_cost, query, &mut check) else { continue };
+        let key = combo_key(codes);
+        for n in 0..view.count {
+            let mut it = view.materialize(n);
+            it["combo"] = Value::String(key.clone());
+            out.push(it);
+        }
+    }
+    out.sort_by(|a, b| a["total_price"].as_f64().unwrap_or(0.0).partial_cmp(&b["total_price"].as_f64().unwrap_or(0.0)).unwrap_or(Ordering::Equal));
+    for (n, it) in out.iter_mut().enumerate() {
+        it["id"] = json!(n + 1);
+    }
+    out
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use crate::ticket::Ticket;
+
+    pub fn flight(origin: &str, dest: &str, day: u32, hour: u32, price: f64) -> Arc<Ticket> {
+        Arc::new(Ticket {
+            origin: Some(origin.into()),
+            origin_airport: Some(origin.into()),
+            destination: Some(dest.into()),
+            destination_airport: Some(dest.into()),
+            departure_at: Some(format!("2026-11-{day:02}T{hour:02}:00:00+03:00")),
+            duration: Some(240),
+            price: Some(price),
+            transfers: (price as i64) % 2,
+            transfer_points: Some(vec![]),
+            ..Default::default()
+        })
+    }
+
+    /// Простой ГПСЧ (детерминированные случаи без внешних крейтов).
+    pub struct Rng(pub u64);
+    impl Rng {
+        pub fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        pub fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    const CITIES: [&str; 6] = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"];
+
+    pub fn random_case(seed: u64) -> (Vec<Stop>, Vec<Vec<Arc<Ticket>>>) {
+        let mut rng = Rng(seed * 7919 + 17);
+        let stops = vec![
+            Stop::new("cities", vec!["MOW"], ["", ""]),
+            Stop::new("any", vec![], ["2026-11-01", "2026-11-06"]),
+            Stop::new("cities", vec!["SEL", "TYO"], ["2026-11-03", "2026-11-12"]),
+            Stop::new("any", vec![], ["2026-11-08", "2026-11-16"]),
+            Stop::new("cities", vec!["MOW"], ["", ""]),
+        ];
+        let mut leg = |origins: &[&str], dests: &[&str], days: std::ops::Range<u32>| -> Vec<Arc<Ticket>> {
+            (0..20)
+                .map(|_| {
+                    let o = origins[rng.below(origins.len() as u64) as usize];
+                    let d = dests[rng.below(dests.len() as u64) as usize];
+                    let day = days.start + rng.below((days.end - days.start) as u64) as u32;
+                    flight(o, d, day, rng.below(24) as u32, (rng.below(60) + 1) as f64 * 100.0)
+                })
+                .collect()
+        };
+        let all_mow: Vec<&str> = CITIES.iter().copied().chain(["MOW"]).collect();
+        let all_sel: Vec<&str> = CITIES.iter().copied().chain(["SEL"]).collect();
+        let collected = vec![
+            leg(&["MOW"], &CITIES, 1..7),
+            leg(&CITIES, &["SEL", "TYO"], 3..13),
+            leg(&["SEL", "TYO"], &all_mow, 8..17),
+            leg(&all_sel, &["MOW"], 8..20),
+        ];
+        (stops, collected)
+    }
+
+    /// Полный перебор-эталон: все цепочки по правилам онвордов (без фильтров).
+    pub fn brute_force(stops: &[Stop], table: &FlightCols, max_cost: Option<f64>) -> Vec<(f64, Vec<usize>)> {
+        let ctx = build_ctx(stops, table, None);
+        let t = table;
+        let mut out = Vec::new();
+        fn dfs(ctx: &Ctx, t: &FlightCols, i: usize, city: &str, arr_ord: i64, arr_ts: f64, chosen: &mut Vec<usize>, visited: &mut Vec<String>, g: f64, out: &mut Vec<(f64, Vec<usize>)>) {
+            if i == ctx.last {
+                out.push((g, chosen.clone()));
+                return;
+            }
+            let allow_next = ctx.hops.arrive_allowed(i + 1);
+            let mut seen = HashSet::new();
+            for d in ctx.hops.departs(i, city) {
+                for &fi in ctx.legs_by_origin[i].get(&d).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    if !seen.insert(fi) {
+                        continue;
+                    }
+                    if t.dep_ord[fi] < 0 || t.dep_ord[fi] < arr_ord {
+                        continue;
+                    }
+                    let (oc, oa) = t.origin_codes(fi);
+                    if i > 0 && city != oc && city != oa && !gap_ok(arr_ts, t.dep_ts[fi]) {
+                        continue;
+                    }
+                    let dest = t.dest[fi].clone();
+                    if dest.is_empty() || dest == city || dest == d {
+                        continue;
+                    }
+                    if allow_next.is_none() && visited.contains(&dest) {
+                        continue;
+                    }
+                    if !t.dest_in(fi, allow_next.as_ref()) {
+                        continue;
+                    }
+                    chosen.push(fi);
+                    visited.push(dest.clone());
+                    dfs(ctx, t, i + 1, &dest, t.arr_ord[fi], t.arr_ts[fi], chosen, visited, g + t.price[fi], out);
+                    visited.pop();
+                    chosen.pop();
+                }
+            }
+        }
+        let start_dt = parse_naive(&format!("{}T00:00:00", ctx.chain_start)).unwrap();
+        for start in &stops[0].codes {
+            dfs(&ctx, t, 0, start, ordinal(start_dt.date()), naive_seconds(start_dt), &mut Vec::new(), &mut vec![start.clone()], 0.0, &mut out);
+        }
+        if let Some(mc) = max_cost {
+            out.retain(|(g, _)| *g <= mc);
+        }
+        out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        out
+    }
+
+    #[test]
+    fn lazy_search_matches_full_enumeration() {
+        for seed in 1..=8 {
+            let (stops, collected) = random_case(seed);
+            let table = FlightCols::from_collected(&collected);
+            let full = brute_force(&stops, &table, None);
+            let ctx = build_ctx(&stops, &table, None);
+            for n in [1usize, 7, 50, full.len(), full.len() + 10] {
+                let mut check = |_: usize| Ok(());
+                let got = search_cheapest(&ctx, n, None, None, &mut check).unwrap();
+                let prices: Vec<f64> = got.iter().map(|c| c.iter().map(|&fi| table.price[fi]).sum()).collect();
+                let want: Vec<f64> = full.iter().take(n).map(|p| p.0).collect();
+                assert_eq!(prices, want, "seed {seed}, n {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn respects_max_cost_and_abort() {
+        let (stops, collected) = random_case(3);
+        let table = FlightCols::from_collected(&collected);
+        let full = brute_force(&stops, &table, None);
+        assert!(!full.is_empty());
+        let budget = full[full.len() / 2].0;
+        let ctx = build_ctx(&stops, &table, None);
+        let mut check = |_: usize| Ok(());
+        let got = search_cheapest(&ctx, 10_000, Some(budget), None, &mut check).unwrap();
+        let prices: Vec<f64> = got.iter().map(|c| c.iter().map(|&fi| table.price[fi]).sum()).collect();
+        let want: Vec<f64> = full.iter().filter(|p| p.0 <= budget).map(|p| p.0).collect();
+        assert_eq!(prices, want);
+        let mut steps = 0;
+        let mut abort = |_: usize| {
+            steps += 1;
+            if steps > 3 { Err(Aborted) } else { Ok(()) }
+        };
+        assert!(search_cheapest(&ctx, 10_000, None, None, &mut abort).is_err());
+    }
+
+    #[test]
+    fn compact_view_materializes() {
+        let (stops, collected) = random_case(5);
+        let table = FlightCols::from_collected(&collected);
+        let mut check = |_: usize| Ok(());
+        let view = build_itineraries_compact(&stops, &table, 40, None, None, &mut check).unwrap();
+        assert!(view.count > 0 && view.count <= 40);
+        assert_eq!(view.chains.len(), view.count * 4);
+        assert_eq!(view.days.len(), view.count * 5);
+        let it = view.materialize(0);
+        assert_eq!(it["id"], 1);
+        assert_eq!(it["stops"].as_array().unwrap().len(), 5);
+        assert_eq!(it["stops"][0]["code"], "MOW");
+        assert_eq!(it["stops"][4]["code"], "MOW");
+        assert!(it["stops"][1]["resolvedFromAny"].as_bool().unwrap());
+        assert_eq!(it["stops"][0]["arrive"], "2026-11-01T00:00:00");
+        assert!(it["total_days"].as_i64().unwrap() >= 1);
+        let page = view.routes_page(0, 10);
+        assert_eq!(page["items"].as_array().unwrap().len(), 10.min(view.count));
+        // цены по возрастанию
+        let prices: Vec<f64> = (0..view.count).map(|n| view.materialize(n)["total_price"].as_f64().unwrap()).collect();
+        let mut sorted = prices.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(prices, sorted);
+        // маршруты набора: тот же A* с зафиксированными городами
+        let codes = view.chain_codes(0);
+        let routes = build_combo_routes(&stops, &table, &[codes.clone()], None);
+        assert!(!routes.is_empty());
+        assert_eq!(routes[0]["combo"], combo_key(&codes));
+        assert_eq!(routes[0]["total_price"], it["total_price"]);
+    }
+
+    #[test]
+    fn city_filters_and_trip_length() {
+        let (stops, collected) = random_case(2);
+        let table = FlightCols::from_collected(&collected);
+        let q = PlanQuery::from_value(&json!({
+            "stops": stops.iter().map(|s| json!({"kind": s.kind, "codes": s.codes, "window": s.window})).collect::<Vec<_>>(),
+            "cities": [{}, {"minStay": 1, "maxStay": 3}, {"requireWeekend": true}, {}, {}],
+            "tripLength": [3, 12],
+            "maxResults": 100000
+        }))
+        .unwrap();
+        let ctx = build_ctx(&stops, &table, Some(&q));
+        let mut check = |_: usize| Ok(());
+        let got = search_cheapest(&ctx, 100000, None, Some(&q), &mut check).unwrap();
+        // все выданные цепочки удовлетворяют фильтрам
+        for chain in &got {
+            let s1 = stay_days_secs(table.arr_ts[chain[0]], table.dep_ts[chain[1]]);
+            assert!((1..=3).contains(&s1));
+            assert!(weekend_covered(table.arr_ts[chain[1]], table.arr_ord[chain[1]], table.dep_ts[chain[2]], table.dep_ord[chain[2]]));
+            let days = (table.arr_ord[chain[3]] - table.dep_ord[chain[0]]).max(1);
+            assert!((3..=12).contains(&days));
+        }
+        // и это ровно те цепочки полного перебора, что проходят фильтры
+        let full = brute_force(&stops, &table, None);
+        let want: Vec<f64> = full
+            .iter()
+            .filter(|(_, c)| {
+                let s1 = stay_days_secs(table.arr_ts[c[0]], table.dep_ts[c[1]]);
+                let wk = weekend_covered(table.arr_ts[c[1]], table.arr_ord[c[1]], table.dep_ts[c[2]], table.dep_ord[c[2]]);
+                let days = (table.arr_ord[c[3]] - table.dep_ord[c[0]]).max(1);
+                (1..=3).contains(&s1) && wk && (3..=12).contains(&days)
+            })
+            .map(|p| p.0)
+            .collect();
+        let prices: Vec<f64> = got.iter().map(|c| c.iter().map(|&fi| table.price[fi]).sum()).collect();
+        assert_eq!(prices, want);
+    }
+}

@@ -26,9 +26,10 @@
 - Архитектура и фазы — `docs/PLAN.md`; локальный запуск — `docs/RUN.md`.
 - Коллектор и Parquet-озеро (очередь к GraphQL с приоритетами app > crawl, лимит
   ручки, серии в S3, индекс, ретеншн, фазы 1–5) — `docs/COLLECTOR.md`. На VM три
-  Python-контейнера из трёх Dockerfile: `planner` (бывший `api`, FastAPI `/api/*`),
-  `collector` (порт 8001, единственный с токеном и S3), `crawler` (фоновый обход
-  «город × день» на 180 дней, только HTTP к коллектору) + `web`.
+  контейнера из трёх Dockerfile: `planner` (**Rust**, крейт `planner/`, axum `/api/*`;
+  прежний Python `api/` + планировочные модули `core/` — устаревшая копия, в образ не
+  попадает), `collector` (Python, порт 8001, единственный с токеном и S3), `crawler`
+  (Python, фоновый обход «город × день» на 180 дней, только HTTP к коллектору) + `web`.
   Прод-compose `deploy/compose.prod.yml` едет в образе planner; на уже созданной
   VM один раз запускается `deploy/vm-migrate.sh`.
 - Дашборд «Flights · Коллектор» — в общей Grafana аналитической VM Market Data
@@ -79,16 +80,31 @@
 поэтому `value_min/value_max` обязательны для разумного объёма. `trip_duration`
 приходит 0 — длительность считаем по сегментам. На проде серии получает коллектор
 (`COLLECTOR_URL`, свежесть сутки, озеро в S3); без него планировщик ходит в GraphQL
-сам и кэширует серии в `ticket_cache` (`api.worker.make_cached_ticket_fetch`). Проверить руками:
+сам и кэширует серии в `ticket_cache` (`planner/src/graphql.rs`). Проверить руками:
 
 ```sh
 poetry run python scripts/fetch_tickets.py MOW SEL 2026-10-15
 poetry run python scripts/fetch_tickets.py MOW - 2026-10-15 --min 20000 --max 40000   # MOW → ANY
 ```
 
-Тесты: `PYTHONPATH=. poetry run pytest -q` (venv worktree может быть пустым —
-тогда python из venv основного checkout). План перехода планировщика на GraphQL —
-`docs/PLANNER_V2.md`.
+Тесты: планировщик — `cd planner && cargo test` (юнит-тесты модулей + сквозной
+`tests/e2e.rs` с моком коллектора); коллектор/краулер — `PYTHONPATH=. poetry run pytest -q`
+(venv worktree может быть пустым — тогда python из venv основного checkout). План
+перехода планировщика на GraphQL — `docs/PLANNER_V2.md`.
+
+## Планировщик на Rust (`planner/`, 2026-09-30)
+
+Сервис `flights-planner` (axum + tokio, rusqlite, arrow/parquet, reqwest) повторяет
+контракт и семантику Python-планировщика один в один: те же `/api/*`, та же SQLite
+`data/flights.db` (jobs, quotes, ticket_cache), те же Parquet-файлы `plan_flights/<job>.parquet`
+(файлы прежних джоб читаются). Модули: `stops` (остановки, окна, оценка), `collect`
+(сбор серий, hidden-city), `search` (ленивый A*, компактный результат, маршруты
+наборов), `overview` (наборы городов, динамика по префиксам), `planquery` (фильтры,
+хэши `collect_key`/`view_key` — те же sha1, что у Python), `collector` (клиент коллектора,
+Arrow IPC), `graphql` (прямой режим), `worker` (джоба, этапы), `api` (HTTP, кэш видов).
+Переменные: `FLIGHT_DB`, `COLLECTOR_URL`, `PORT`, `GEO_PATH`, `CITY_NAMES_PATH`,
+`AIRPORT_NETWORK_PATH`, `TRAVELPAYOUTS_TOKEN` (без коллектора). Образ —
+`deploy/Dockerfile.planner` (multi-stage, `rust:1-slim-bookworm` → `debian:bookworm-slim`).
 
 ## Что удалено 2026-09-27 (шаг 6 планировщика v2)
 

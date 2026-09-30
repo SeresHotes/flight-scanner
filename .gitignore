@@ -52,6 +52,9 @@ web/data.js
 !frontend/tsconfig.app.json
 !frontend/tsconfig.node.json
 
+# Rust (planner/): артефакты cargo
+/planner/target/
+
 # IDE
 .vscode/
 .idea/

@@ -1,6 +1,6 @@
 name: Deploy
 
-# Собирает образы flights-planner, flights-collector, flights-crawler и flights-web, пушит в Yandex
+# Собирает образы flights-planner (Rust, planner/), flights-collector, flights-crawler и flights-web, пушит в Yandex
 # Container Registry и (опционально) мгновенно выкатывает на VM по SSH. Если
 # SSH-секреты не заданы — VM подхватит свежие образы сама (systemd-таймер
 # flights-update каждые 2 мин).
@@ -18,7 +18,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "api/**"
+      - "planner/**"
       - "collector/**"
       - "crawler/**"
       - "core/**"

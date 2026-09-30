@@ -1,0 +1,20 @@
+[package]
+name = "flights-planner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arrow = { version = "60.0.0", default-features = false, features = ["ipc"] }
+axum = { version = "0.8", features = ["json", "query"] }
+chrono = "0.4.45"
+hex = "0.4.3"
+indexmap = { version = "2.14.2", features = ["serde"] }
+parquet = { version = "60.0.0", default-features = false, features = ["arrow", "zstd", "lz4", "snap"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha1 = "0.11.0"
+tokio = { version = "1.53.1", features = ["full"] }
+tower-http = { version = "0.7.1", features = ["cors", "compression-gzip"] }
+uuid = { version = "1.26.1", features = ["v4"] }

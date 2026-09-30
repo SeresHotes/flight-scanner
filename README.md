@@ -10,7 +10,7 @@ Travelpayouts), все вычисления на бэке. Прод: <https://fl
 - Инфраструктура (Yandex Cloud, Terraform, деплой) — `infra/terraform/`, `deploy/`.
 
 ```sh
-poetry install && cp .env.example .env    # TRAVELPAYOUTS_TOKEN
-poetry run uvicorn api.main:app --port 8000 --reload
+cp .env.example .env                         # TRAVELPAYOUTS_TOKEN
+(cd planner && cargo run --release)          # планировщик (Rust), http://localhost:8000
 cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
