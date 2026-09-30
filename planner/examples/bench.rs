@@ -72,6 +72,7 @@ fn main() {
     // Этап после сбора: рейсы → колонки → Parquet (как put_plan_flights). Один раз: flight(i) кэшируется.
     let fresh = FlightCols::read(path).unwrap();
     let t = Instant::now();
+    fresh.prefetch(&(0..fresh.len()).collect::<Vec<_>>());
     let tickets: Vec<std::sync::Arc<flights_planner::ticket::Ticket>> = (0..fresh.len()).map(|i| fresh.flight(i)).collect();
     out.insert("load_all_flights".into(), json!((t.elapsed().as_secs_f64() * 1000.0).round() / 1000.0));
     let t = Instant::now();

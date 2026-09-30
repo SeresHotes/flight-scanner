@@ -565,6 +565,9 @@ pub fn pack_compact(ctx: &Ctx, chains: &[Vec<usize>]) -> View {
     let mut seg_of: HashMap<usize, u32> = HashMap::new();
     let mut segments: Vec<Segment> = Vec::new();
     let mut out_chains: Vec<u32> = Vec::with_capacity(chains.len() * legs);
+    // рейсы цепочек — одним проходом по файлу, а не всей колонкой
+    let used: Vec<usize> = chains.iter().flatten().copied().collect();
+    ctx.table.prefetch(&used);
     for chain in chains {
         for &fi in chain {
             let si = match seg_of.get(&fi) {

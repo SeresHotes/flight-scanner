@@ -16,7 +16,8 @@ use arrow::array::{Array, ArrayRef, BooleanArray, Float64Array, Int16Array, Int3
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
+use parquet::file::metadata::PageIndexPolicy;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
@@ -66,10 +67,8 @@ pub struct FlightCols {
 
 enum Raw {
     Tickets(Vec<Arc<Ticket>>),
-    /// Колонка seg как есть (Arrow): строка разбирается только для запрошенного рейса,
-    /// без 135 тыс. отдельных String на всю джобу.
-    Json(StringArray),
-    Lazy(String), // путь Parquet: колонка seg дочитывается при первом flight(i)
+    /// Путь Parquet: нужные строки колонки seg дочитываются выборкой (prefetch / flight).
+    Lazy(String),
 }
 
 fn upper(v: &Option<String>) -> String {
@@ -192,7 +191,8 @@ impl FlightCols {
         self.arr_ord.push(arr_dt.map(|d| ordinal(d.date())).unwrap_or(-1));
     }
 
-    /// Полный рейс строки i — для сегментов результата.
+    /// Полный рейс строки i — для сегментов результата. Из файла — разобранный
+    /// заранее prefetch, иначе дочитывается одна строка.
     pub fn flight(&self, i: usize) -> Arc<Ticket> {
         {
             let raw = self.raw.lock().unwrap();
@@ -203,25 +203,35 @@ impl FlightCols {
         if let Some(got) = self.parsed.lock().unwrap().get(&i) {
             return got.clone();
         }
-        let json = self.seg_json(i);
-        let ticket: Ticket = json.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
-        let ticket = Arc::new(ticket);
-        self.parsed.lock().unwrap().insert(i, ticket.clone());
-        ticket
+        self.prefetch(&[i]);
+        self.parsed.lock().unwrap().get(&i).cloned().unwrap_or_default()
     }
 
-    fn seg_json(&self, i: usize) -> Option<String> {
-        let mut raw = self.raw.lock().unwrap();
-        if let Raw::Lazy(path) = &*raw {
-            let col = read_seg_column(path).unwrap_or_else(|e| {
-                eprintln!("[flightcols] {path}: колонка seg не прочитана: {e}");
-                StringArray::from(Vec::<Option<&str>>::new())
-            });
-            *raw = Raw::Json(col);
+    /// Разобрать рейсы строк rows одним проходом по файлу: выборка строк Parquet
+    /// (RowSelection) — читается и копируется только нужное, а при индексе страниц
+    /// ненужные страницы колонки seg не распаковываются вовсе.
+    pub fn prefetch(&self, rows: &[usize]) {
+        let path = match &*self.raw.lock().unwrap() {
+            Raw::Lazy(p) => p.clone(),
+            Raw::Tickets(_) => return,
+        };
+        let mut need: Vec<usize> = {
+            let parsed = self.parsed.lock().unwrap();
+            rows.iter().copied().filter(|r| *r < self.n && !parsed.contains_key(r)).collect()
+        };
+        need.sort_unstable();
+        need.dedup();
+        if need.is_empty() {
+            return;
         }
-        match &*raw {
-            Raw::Json(a) if i < a.len() && !a.is_null(i) => Some(a.value(i).to_string()),
-            _ => None,
+        let jsons = read_seg_rows(&path, &need).unwrap_or_else(|e| {
+            eprintln!("[flightcols] {path}: колонка seg не прочитана: {e}");
+            vec![None; need.len()]
+        });
+        let mut parsed = self.parsed.lock().unwrap();
+        for (r, json) in need.into_iter().zip(jsons) {
+            let ticket: Ticket = json.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+            parsed.insert(r, Arc::new(ticket));
         }
     }
 
@@ -294,6 +304,7 @@ impl FlightCols {
     }
 
     fn to_batch(&self) -> Result<RecordBatch, String> {
+        self.prefetch(&(0..self.n).collect::<Vec<_>>());
         let seg: Vec<Option<String>> = (0..self.n)
             .map(|i| serde_json::to_string(&self.flight(i).segment_source()).ok())
             .collect();
@@ -386,25 +397,39 @@ impl FlightCols {
     }
 }
 
-fn read_seg_column(path: &str) -> Result<StringArray, String> {
+/// JSON колонки seg (или raw у файлов прежнего формата) для строк rows (по возрастанию).
+fn read_seg_rows(path: &str, rows: &[usize]) -> Result<Vec<Option<String>>, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| e.to_string())?;
+    let options = ArrowReaderOptions::new().with_offset_index_policy(PageIndexPolicy::Optional);
+    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options).map_err(|e| e.to_string())?;
     let schema = builder.schema().clone();
     let name = if schema.fields().iter().any(|f| f.name() == "seg") { "seg" } else { "raw" };
     let idx = schema.fields().iter().position(|f| f.name() == name).ok_or("нет колонки seg/raw")?;
     let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [idx]);
-    let reader = builder.with_projection(mask).with_batch_size(1 << 16).build().map_err(|e| e.to_string())?;
-    let mut parts: Vec<ArrayRef> = Vec::new();
+    let mut selectors: Vec<RowSelector> = Vec::new();
+    let mut pos = 0usize;
+    for &r in rows {
+        if r > pos {
+            selectors.push(RowSelector::skip(r - pos));
+        }
+        selectors.push(RowSelector::select(1));
+        pos = r + 1;
+    }
+    let reader = builder
+        .with_projection(mask)
+        .with_row_selection(RowSelection::from(selectors))
+        .with_batch_size(1 << 16)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<Option<String>> = Vec::with_capacity(rows.len());
     for b in reader {
         let b = b.map_err(|e| e.to_string())?;
-        parts.push(cast(column(&b, name)?, &DataType::Utf8).map_err(|e| e.to_string())?);
+        out.extend(str_col(&b, name)?);
     }
-    if parts.is_empty() {
-        return Ok(StringArray::from(Vec::<Option<&str>>::new()));
+    if out.len() != rows.len() {
+        return Err(format!("выборка seg: {} строк вместо {}", out.len(), rows.len()));
     }
-    let refs: Vec<&dyn Array> = parts.iter().map(|a| a.as_ref()).collect();
-    let all = arrow::compute::concat(&refs).map_err(|e| e.to_string())?;
-    all.as_any().downcast_ref::<StringArray>().cloned().ok_or_else(|| "seg не строка".to_string())
+    Ok(out)
 }
 
 fn column<'a>(b: &'a RecordBatch, name: &str) -> Result<&'a ArrayRef, String> {
@@ -475,6 +500,8 @@ mod tests {
         assert_eq!(back.dep_ord, cols.dep_ord);
         assert_eq!(back.dest[1], "SEL");
         assert_eq!(back.pts_min[0], Some(80));
+        back.prefetch(&[1, 0, 1]); // выборка строк: дубли и обратный порядок
+        assert_eq!(back.flight(0).price(), 100.0);
         assert_eq!(back.flight(1).price(), 200.0);
         assert_eq!(back.flight(1).transfer_points.as_ref().unwrap()[0].minutes, Some(80));
         std::fs::remove_file(&path).ok();
