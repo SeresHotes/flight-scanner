@@ -256,6 +256,21 @@ impl FlightCols {
         out
     }
 
+    /// Строки плеча по номеру кода вылета — и городу, и аэропорту.
+    pub fn by_origin_ids(&self, rows: &[usize]) -> FxHashMap<u32, Vec<usize>> {
+        let mut out: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+        for &r in rows {
+            let (c, a) = (self.orig_city_id[r], self.orig_airport_id[r]);
+            if c != NO_CODE {
+                out.entry(c).or_default().push(r);
+            }
+            if a != NO_CODE && a != c {
+                out.entry(a).or_default().push(r);
+            }
+        }
+        out
+    }
+
     // ------------------------------ хранение ---------------------------------
 
     fn schema() -> Arc<Schema> {

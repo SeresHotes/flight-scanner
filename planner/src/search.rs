@@ -7,14 +7,21 @@
 //! на плече i заранее отсортированы по price + h (список общий для всех узлов —
 //! `Candidates`), и в куче лежит только лучший ещё не выданный ребёнок узла.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
+#[cfg(test)]
+use std::collections::HashSet;
+use std::rc::Rc;
+#[cfg(test)]
 use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use serde_json::{json, Value};
 
 use crate::dates::{date_ordinal, date_only, naive_seconds, parse_naive, shift_date, stay_days_secs, weekend_covered, ordinal};
-use crate::flightcols::FlightCols;
+use crate::flightcols::{FlightCols, NO_CODE};
 use crate::nearby::{distance_km, Hops, HOP_MIN_GAP_MIN};
 use crate::planquery::{trip_length_ok, CityFilter, PlanQuery};
 use crate::segments::{city_pair, make_segment, Segment};
@@ -29,10 +36,63 @@ pub type StepCheck<'a> = dyn FnMut(usize) -> Result<(), Aborted> + 'a;
 pub struct Ctx<'a> {
     pub stops: &'a [Stop],
     pub table: &'a FlightCols,
-    pub legs_by_origin: Vec<HashMap<String, Vec<usize>>>,
+    /// Строки плеча по номеру кода вылета (город и аэропорт).
+    pub legs_by_origin: Vec<FxHashMap<u32, Vec<usize>>>,
     pub chain_start: String,
     pub last: usize,
     pub hops: Hops<'a>,
+    /// Разрешённые города прилёта остановки — маска по номерам кодов таблицы (None — любой).
+    pub allow: Vec<Option<Vec<bool>>>,
+    /// Коды вне рейсов (старты, соседи в радиусе) — номера после кодов таблицы.
+    extra: RefCell<(Vec<String>, FxHashMap<String, u32>)>,
+    departs: RefCell<FxHashMap<(usize, u32), Rc<Vec<u32>>>>,
+}
+
+impl<'a> Ctx<'a> {
+    /// Номер кода: из словаря таблицы или (для кодов вне рейсов) дополнительный.
+    pub fn code_id(&self, code: &str) -> u32 {
+        if let Some(id) = self.table.code_id(code) {
+            return id;
+        }
+        let mut extra = self.extra.borrow_mut();
+        if let Some(&id) = extra.1.get(code) {
+            return id;
+        }
+        let id = (self.table.codes.len() + extra.0.len()) as u32;
+        extra.0.push(code.to_string());
+        extra.1.insert(code.to_string(), id);
+        id
+    }
+
+    pub fn code_name(&self, id: u32) -> String {
+        let n = self.table.codes.len();
+        if (id as usize) < n {
+            self.table.codes[id as usize].clone()
+        } else {
+            self.extra.borrow().0[id as usize - n].clone()
+        }
+    }
+
+    /// Hops::departs по номерам (коды без рейсов отброшены — из них не улететь).
+    pub fn departs(&self, i: usize, city: u32) -> Rc<Vec<u32>> {
+        if let Some(v) = self.departs.borrow().get(&(i, city)) {
+            return v.clone();
+        }
+        let got: Rc<Vec<u32>> = Rc::new(self.hops.departs(i, &self.code_name(city)).iter().filter_map(|c| self.table.code_id(c)).collect());
+        self.departs.borrow_mut().insert((i, city), got.clone());
+        got
+    }
+
+    /// Город или аэропорт прилёта строки r разрешён остановке i.
+    pub fn dest_allowed(&self, i: usize, r: usize) -> bool {
+        match &self.allow[i] {
+            None => true,
+            Some(bits) => {
+                let (d, a) = (self.table.dest_id[r], self.table.dest_airport_id[r]);
+                (d != NO_CODE && bits[d as usize]) || (a != NO_CODE && bits[a as usize])
+            }
+        }
+    }
 }
 
 /// Строки рейсов каждого плеча, прошедшие фильтр плеча (до перебора).
@@ -54,36 +114,60 @@ pub fn leg_rows(table: &FlightCols, legs: usize, query: Option<&PlanQuery>) -> V
 pub fn build_ctx<'a>(stops: &'a [Stop], table: &'a FlightCols, query: Option<&PlanQuery>) -> Ctx<'a> {
     let legs = stops.len().saturating_sub(1);
     let rows = leg_rows(table, legs, query);
-    let legs_by_origin = rows.iter().map(|r| table.by_origin(r)).collect();
+    let legs_by_origin = rows.iter().map(|r| table.by_origin_ids(r)).collect();
     let chain_start = leg_dates(stops, 0).into_iter().next().unwrap_or_else(|| crate::stops::DEFAULT_START.to_string());
-    Ctx { stops, table, legs_by_origin, chain_start, last: legs, hops: Hops::new(stops) }
+    let hops = Hops::new(stops);
+    let n_codes = table.codes.len();
+    let allow = (0..stops.len())
+        .map(|i| {
+            hops.arrive_allowed(i).map(|set| {
+                let mut bits = vec![false; n_codes];
+                for code in &set {
+                    if let Some(id) = table.code_id(code) {
+                        bits[id as usize] = true;
+                    }
+                }
+                bits
+            })
+        })
+        .collect();
+    Ctx {
+        stops,
+        table,
+        legs_by_origin,
+        chain_start,
+        last: legs,
+        hops,
+        allow,
+        extra: RefCell::new((Vec::new(), FxHashMap::default())),
+        departs: RefCell::new(FxHashMap::default()),
+    }
 }
 
-/// Нижняя оценка стоимости «хвоста»: lb[i][city] — минимально возможная суммарная
-/// цена, чтобы, прилетев в city на остановку i, добраться до финала (только цены,
-/// разрешённые города и переезды — без времени и повторов; admissible).
-pub fn completion_lb(ctx: &Ctx) -> Vec<HashMap<String, f64>> {
+/// Нижняя оценка стоимости «хвоста»: lb[i][город] — минимально возможная суммарная
+/// цена, чтобы, прилетев в город на остановку i, добраться до финала (только цены,
+/// разрешённые города и переезды — без времени и повторов; admissible). Ключи — номера кодов.
+pub fn completion_lb(ctx: &Ctx) -> Vec<FxHashMap<u32, f64>> {
     let t = ctx.table;
     let last = ctx.last;
-    let mut lb: Vec<HashMap<String, f64>> = vec![HashMap::new(); ctx.stops.len()];
+    let mut lb: Vec<FxHashMap<u32, f64>> = vec![FxHashMap::default(); ctx.stops.len()];
     for i in (0..last).rev() {
-        let allow_next = ctx.hops.arrive_allowed(i + 1);
         let terminal_next = i + 1 == last;
-        let mut dep: HashMap<String, f64> = HashMap::new();
-        for (city, rows) in &ctx.legs_by_origin[i] {
+        let mut dep: FxHashMap<u32, f64> = FxHashMap::default();
+        for (&city, rows) in &ctx.legs_by_origin[i] {
             let mut best = f64::INFINITY;
             for &r in rows {
-                let dest = &t.dest[r];
-                if dest.is_empty() || dest == city {
+                let dest = t.dest_id[r];
+                if dest == NO_CODE || dest == city {
                     continue;
                 }
-                if !t.dest_in(r, allow_next.as_ref()) {
+                if !ctx.dest_allowed(i + 1, r) {
                     continue;
                 }
                 let tail = if terminal_next {
                     0.0
                 } else {
-                    match lb[i + 1].get(dest) {
+                    match lb[i + 1].get(&dest) {
                         Some(v) => *v,
                         None => continue,
                     }
@@ -94,22 +178,22 @@ pub fn completion_lb(ctx: &Ctx) -> Vec<HashMap<String, f64>> {
                 }
             }
             if best < f64::INFINITY {
-                dep.insert(city.clone(), best);
+                dep.insert(city, best);
             }
         }
         if ctx.hops.radius[i] <= 0.0 {
             lb[i] = dep;
             continue;
         }
-        let mut arrivals: HashSet<String> = dep.keys().cloned().collect();
-        for d in dep.keys() {
-            for n in crate::nearby::neighbors(d, ctx.hops.radius[i]) {
-                arrivals.insert(n);
+        let mut arrivals: FxHashSet<u32> = dep.keys().copied().collect();
+        for &d in dep.keys() {
+            for n in crate::nearby::neighbors(&ctx.code_name(d), ctx.hops.radius[i]) {
+                arrivals.insert(ctx.code_id(&n));
             }
         }
-        let mut cur = HashMap::new();
+        let mut cur = FxHashMap::default();
         for a in arrivals {
-            let best = ctx.hops.departs(i, &a).iter().filter_map(|d| dep.get(d)).cloned().fold(f64::INFINITY, f64::min);
+            let best = ctx.departs(i, a).iter().filter_map(|d| dep.get(d)).cloned().fold(f64::INFINITY, f64::min);
             if best < f64::INFINITY {
                 cur.insert(a, best);
             }
@@ -128,51 +212,49 @@ struct CandList {
 
 struct Candidates<'c, 'a> {
     ctx: &'c Ctx<'a>,
-    lb: &'c [HashMap<String, f64>],
-    cache: HashMap<(usize, String), Arc<CandList>>,
+    lb: &'c [FxHashMap<u32, f64>],
+    cache: FxHashMap<(usize, u32), Rc<CandList>>,
 }
 
 impl<'c, 'a> Candidates<'c, 'a> {
-    fn get(&mut self, i: usize, city: &str) -> Arc<CandList> {
-        let key = (i, city.to_string());
-        if let Some(got) = self.cache.get(&key) {
+    fn get(&mut self, i: usize, city: u32) -> Rc<CandList> {
+        if let Some(got) = self.cache.get(&(i, city)) {
             return got.clone();
         }
-        let built = Arc::new(self.build(i, city));
-        self.cache.insert(key, built.clone());
+        let built = Rc::new(self.build(i, city));
+        self.cache.insert((i, city), built.clone());
         built
     }
 
-    fn build(&self, i: usize, city: &str) -> CandList {
+    fn build(&self, i: usize, city: u32) -> CandList {
         let ctx = self.ctx;
         let t = ctx.table;
-        let allow_next = ctx.hops.arrive_allowed(i + 1);
         let terminal = i + 1 == ctx.last;
         let mut pairs: Vec<(f64, usize, bool)> = Vec::new();
-        let mut seen: HashSet<usize> = HashSet::new();
-        for d in ctx.hops.departs(i, city) {
+        let departs = ctx.departs(i, city);
+        let mut seen: FxHashSet<usize> = FxHashSet::default();
+        for &d in departs.iter() {
             let Some(rows) = ctx.legs_by_origin[i].get(&d) else { continue };
             for &fi in rows {
-                if !seen.insert(fi) {
+                if departs.len() > 1 && !seen.insert(fi) {
                     continue;
                 }
-                let dest = &t.dest[fi];
-                if dest.is_empty() || dest == city || *dest == d || t.dep_ord[fi] < 0 {
+                let dest = t.dest_id[fi];
+                if dest == NO_CODE || dest == city || dest == d || t.dep_ord[fi] < 0 {
                     continue;
                 }
-                if !t.dest_in(fi, allow_next.as_ref()) {
+                if !ctx.dest_allowed(i + 1, fi) {
                     continue;
                 }
                 let tail = if terminal {
                     0.0
                 } else {
-                    match self.lb[i + 1].get(dest) {
+                    match self.lb[i + 1].get(&dest) {
                         Some(v) => *v,
                         None => continue,
                     }
                 };
-                let (oc, oa) = t.origin_codes(fi);
-                pairs.push((t.price[fi] + tail, fi, city != oc && city != oa));
+                pairs.push((t.price[fi] + tail, fi, city != t.orig_city_id[fi] && city != t.orig_airport_id[fi]));
             }
         }
         pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal).then(a.1.cmp(&b.1)));
@@ -182,11 +264,13 @@ impl<'c, 'a> Candidates<'c, 'a> {
 
 struct Node {
     i: usize,
-    city: String,
+    city: u32,
     arrive_ord: i64,
     arrive_ts: f64,
     g: f64,
     parent: Option<(usize, usize)>, // (узел, рейс)
+    /// Кандидаты (плечо i, город) — чтобы не искать их в кэше на каждом шаге.
+    list: Rc<CandList>,
 }
 
 struct HeapItem {
@@ -220,8 +304,8 @@ fn gap_ok(arrive_ts: f64, depart_ts: f64) -> bool {
 }
 
 /// Фильтр пребывания в промежуточном городе: дни между прилётом и вылетом,
-/// обязательное окно, выходные.
-fn stay_ok(cf: &CityFilter, arrive_ts: f64, arrive_ord: i64, depart_ts: f64, depart_ord: i64) -> bool {
+/// обязательное окно, выходные. cover — окно «покрыть даты» номерами дней.
+fn stay_ok(cf: &CityFilter, cover: Option<Option<(i64, i64)>>, arrive_ts: f64, arrive_ord: i64, depart_ts: f64, depart_ord: i64) -> bool {
     let days = stay_days_secs(arrive_ts, depart_ts);
     if days < cf.min_stay {
         return false;
@@ -231,8 +315,8 @@ fn stay_ok(cf: &CityFilter, arrive_ts: f64, arrive_ord: i64, depart_ts: f64, dep
             return false;
         }
     }
-    if let Some(cover) = &cf.must_cover {
-        let (Some(a), Some(b)) = (date_ordinal(&cover[0]), date_ordinal(&cover[1])) else { return false };
+    if let Some(cover) = cover {
+        let Some((a, b)) = cover else { return false };
         if !(arrive_ord <= a && depart_ord >= b) {
             return false;
         }
@@ -248,18 +332,33 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, que
     let t = ctx.table;
     let last = ctx.last;
     let lb = completion_lb(ctx);
-    let mut cands = Candidates { ctx, lb: &lb, cache: HashMap::new() };
+    let mut cands = Candidates { ctx, lb: &lb, cache: FxHashMap::default() };
     let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
     let mut nodes: Vec<Node> = Vec::new();
     let mut seq: u64 = 0;
-    let city_filters: HashMap<usize, &CityFilter> = (1..last).filter_map(|i| query.and_then(|q| q.city_filter(i)).map(|cf| (i, cf))).collect();
+    // фильтры городов и их окна «покрыть даты» (номера дней) — по номеру остановки
+    let city_filters: Vec<Option<(&CityFilter, Option<Option<(i64, i64)>>)>> = (0..ctx.stops.len())
+        .map(|i| {
+            if i == 0 || i >= last {
+                return None;
+            }
+            query.and_then(|q| q.city_filter(i)).map(|cf| {
+                let cover = cf.must_cover.as_ref().map(|c| match (date_ordinal(&c[0]), date_ordinal(&c[1])) {
+                    (Some(a), Some(b)) => Some((a, b)),
+                    _ => None,
+                });
+                (cf, cover)
+            })
+        })
+        .collect();
+    let any_next: Vec<bool> = (0..ctx.stops.len()).map(|i| i + 1 < ctx.stops.len() && ctx.stops[i + 1].kind == "any").collect();
     let trip = query.map(|q| q.trip_length).filter(|tl| tl.0 != 0 || tl.1.is_some());
 
     let start_dt = parse_naive(&format!("{}T00:00:00", ctx.chain_start)).expect("chain_start");
     let start_ord = ordinal(start_dt.date());
     let start_ts = naive_seconds(start_dt);
 
-    fn visited(nodes: &[Node], mut idx: usize, dest: &str) -> bool {
+    fn visited(nodes: &[Node], mut idx: usize, dest: u32) -> bool {
         loop {
             if nodes[idx].city == dest {
                 return true;
@@ -272,12 +371,11 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, que
     }
 
     // Кладёт в кучу первого валидного ребёнка узла, начиная с позиции start.
-    let push_next = |node_idx: usize, start: usize, nodes: &Vec<Node>, cands: &mut Candidates, heap: &mut BinaryHeap<HeapItem>, seq: &mut u64| {
+    let push_next = |node_idx: usize, start: usize, nodes: &Vec<Node>, heap: &mut BinaryHeap<HeapItem>, seq: &mut u64| {
         let node = &nodes[node_idx];
         let i = node.i;
-        let list = cands.get(i, &node.city);
-        let any_next = ctx.stops[i + 1].kind == "any";
-        let cf = city_filters.get(&i).copied();
+        let list = &node.list;
+        let cf = city_filters[i];
         for k in start..list.idxs.len() {
             let f = node.g + list.keys[k];
             if let Some(mc) = max_cost {
@@ -292,11 +390,11 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, que
             if list.hop[k] && i > 0 && !gap_ok(node.arrive_ts, t.dep_ts[fi]) {
                 continue;
             }
-            if any_next && visited(nodes, node_idx, &t.dest[fi]) {
+            if any_next[i] && visited(nodes, node_idx, t.dest_id[fi]) {
                 continue;
             }
-            if let Some(cf) = cf {
-                if !stay_ok(cf, node.arrive_ts, node.arrive_ord, t.dep_ts[fi], t.dep_ord[fi]) {
+            if let Some((cf, cover)) = cf {
+                if !stay_ok(cf, cover, node.arrive_ts, node.arrive_ord, t.dep_ts[fi], t.dep_ord[fi]) {
                     continue;
                 }
             }
@@ -307,15 +405,17 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, que
     };
 
     for start in &ctx.stops[0].codes {
-        let Some(tail) = lb[0].get(start) else { continue };
+        let sid = ctx.code_id(start);
+        let Some(tail) = lb[0].get(&sid) else { continue };
         if let Some(mc) = max_cost {
             if *tail > mc {
                 continue;
             }
         }
-        nodes.push(Node { i: 0, city: start.clone(), arrive_ord: start_ord, arrive_ts: start_ts, g: 0.0, parent: None });
+        let list = cands.get(0, sid);
+        nodes.push(Node { i: 0, city: sid, arrive_ord: start_ord, arrive_ts: start_ts, g: 0.0, parent: None, list });
         let idx = nodes.len() - 1;
-        push_next(idx, 0, &nodes, &mut cands, &mut heap, &mut seq);
+        push_next(idx, 0, &nodes, &mut heap, &mut seq);
     }
 
     let mut out: Vec<Vec<usize>> = Vec::new();
@@ -325,9 +425,9 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, que
         }
         let Some(item) = heap.pop() else { break };
         check(out.len())?;
-        push_next(item.node, item.k + 1, &nodes, &mut cands, &mut heap, &mut seq);
-        let (i, city) = (nodes[item.node].i, nodes[item.node].city.clone());
-        let fi = cands.get(i, &city).idxs[item.k];
+        push_next(item.node, item.k + 1, &nodes, &mut heap, &mut seq);
+        let i = nodes[item.node].i;
+        let fi = nodes[item.node].list.idxs[item.k];
         if i + 1 == last {
             let mut chain = vec![fi];
             let mut cur = item.node;
@@ -345,10 +445,11 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, max_cost: Option<f64>, que
             out.push(chain);
             continue;
         }
-        let dest = t.dest[fi].clone();
-        nodes.push(Node { i: i + 1, city: dest, arrive_ord: t.arr_ord[fi], arrive_ts: t.arr_ts[fi], g: nodes[item.node].g + t.price[fi], parent: Some((item.node, fi)) });
+        let dest = t.dest_id[fi];
+        let list = cands.get(i + 1, dest);
+        nodes.push(Node { i: i + 1, city: dest, arrive_ord: t.arr_ord[fi], arrive_ts: t.arr_ts[fi], g: nodes[item.node].g + t.price[fi], parent: Some((item.node, fi)), list });
         let idx = nodes.len() - 1;
-        push_next(idx, 0, &nodes, &mut cands, &mut heap, &mut seq);
+        push_next(idx, 0, &nodes, &mut heap, &mut seq);
     }
     Ok(out)
 }
@@ -707,7 +808,8 @@ pub mod tests {
             let allow_next = ctx.hops.arrive_allowed(i + 1);
             let mut seen = HashSet::new();
             for d in ctx.hops.departs(i, city) {
-                for &fi in ctx.legs_by_origin[i].get(&d).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let rows: &[usize] = t.code_id(&d).and_then(|id| ctx.legs_by_origin[i].get(&id)).map(|v| v.as_slice()).unwrap_or(&[]);
+                for &fi in rows {
                     if !seen.insert(fi) {
                         continue;
                     }
