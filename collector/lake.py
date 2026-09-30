@@ -162,10 +162,16 @@ class LakeWriter:
     row group) и читает её обратно (из S3 — одним GET). Пустая серия пишется пустым
     файлом: в папке видно, что направление читали и там ничего нет."""
 
-    def __init__(self, store, index):
+    def __init__(self, store, index, pusher=None):
         self.store = store
         self.index = index
         self.files_written = 0
+        # collector.push.TicketsPusher: те же байты файла — в склад билетов (None — без пуша).
+        self.pusher = pusher
+
+    def _pushed(self, key: str, data: bytes, observed: datetime) -> None:
+        if self.pusher is not None:
+            self.pusher.push(key, data, observed)
 
     def write(self, series_id: int, origin: Optional[str], destination: Optional[str], day: str,
               params_key: str, tickets: List[Dict[str, Any]], observed: datetime) -> str:
@@ -177,6 +183,7 @@ class LakeWriter:
         self.store.put_bytes(key, data)
         self.index.attach_file(key, day, len(data), [(series_id, 0)], observed=observed)
         self.files_written += 1
+        self._pushed(key, data, observed)
         return key
 
     def write_window(self, parts: List[Tuple[int, str, List[Dict[str, Any]]]], origin: Optional[str],
@@ -204,10 +211,16 @@ class LakeWriter:
         self.store.put_bytes(key, data)
         self.index.attach_file(key, day_from, len(data), placements, observed=observed)
         self.files_written += 1
+        self._pushed(key, data, observed)
         return key
 
     def read(self, file_key: str, row_group: int = 0) -> List[Dict[str, Any]]:
         return tickets_from_table(self.read_table(file_key, row_group))
+
+    def read_bytes(self, file_key: str) -> bytes:
+        """Файл целиком (для склада билетов: он разбирает Parquet сам)."""
+        with self.store.open_input_file(file_key) as f:
+            return f.read()
 
     def read_table(self, file_key: str, row_group: int = 0) -> pa.Table:
         with self.store.open_input_file(file_key) as f:

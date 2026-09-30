@@ -204,6 +204,19 @@ class Index:
                 "ORDER BY created_at, key").fetchall()
         return [dict(r) for r in rows]
 
+    def files_since(self, since: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Файлы озера для сверки склада билетов: ключ, момент загрузки (created_at), размер;
+        since — ISO-время, отдаём файлы не раньше него (пусто — все)."""
+        with self._lock:
+            if since:
+                rows = self._conn.execute(
+                    "SELECT key, created_at, bytes FROM files WHERE created_at >= ? ORDER BY created_at, key",
+                    (since,)).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT key, created_at, bytes FROM files ORDER BY created_at, key").fetchall()
+        return [{"key": r["key"], "created_at": r["created_at"], "bytes": int(r["bytes"])} for r in rows]
+
     def files_bytes(self) -> int:
         with self._lock:
             return int(self._conn.execute("SELECT COALESCE(SUM(bytes), 0) FROM files").fetchone()[0])

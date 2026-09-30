@@ -25,10 +25,12 @@
 
 - Архитектура и фазы — `docs/PLAN.md`; локальный запуск — `docs/RUN.md`.
 - Коллектор и Parquet-озеро (очередь к GraphQL с приоритетами app > crawl, лимит
-  ручки, серии в S3, индекс, ретеншн, фазы 1–5) — `docs/COLLECTOR.md`. На VM три
-  контейнера из трёх Dockerfile: `planner` (**Rust**, крейт `planner/`, axum `/api/*`),
-  `collector` (Python, порт 8001, единственный с токеном и S3), `crawler`
-  (Python, фоновый обход «город × день» на 180 дней, только HTTP к коллектору) + `web`.
+  ручки, серии в S3, индекс, ретеншн, фазы 1–5) — `docs/COLLECTOR.md`. На VM контейнеры:
+  `planner` (**Rust**, крейт `planner/`, axum `/api/*`), `collector` (Python, порт 8001,
+  единственный с токеном и S3), `crawler` (Python, фоновый обход «город × день» на 180
+  дней, только HTTP к коллектору), `tickets` (**Rust**, крейт `tickets/`, порт 8002 —
+  склад билетов: текущее состояние серий X→ANY в Postgres `tickets-db`, выборки для
+  планировщика, `docs/TICKETS.md`) + `web`. VM: 2 vCPU, 8 ГБ, диск 100 ГБ, статический IP.
   Прод-compose `deploy/compose.prod.yml` едет в образе planner; на уже созданной
   VM один раз запускается `deploy/vm-migrate.sh`.
 - Дашборд «Flights · Коллектор» — в общей Grafana аналитической VM Market Data

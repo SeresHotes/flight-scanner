@@ -5,6 +5,10 @@ terraform {
       source  = "yandex-cloud/yandex"
       version = ">= 0.100"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.5"
+    }
   }
 }
 
@@ -94,14 +98,31 @@ data "yandex_compute_image" "ubuntu" {
 }
 
 # ---------------------------------------------------------------------------
+# Статический публичный IP VM: на него смотрит A-запись site_domain. Без него
+# адрес эфемерный и меняется при каждой остановке VM (смена памяти/диска).
+# На проде адрес 93.77.186.45 (ранее эфемерный) зарезервирован 01.10.2026 через
+# `yc vpc address update --reserved` и импортирован: terraform import yandex_vpc_address.app <id>.
+# ---------------------------------------------------------------------------
+resource "yandex_vpc_address" "app" {
+  name = "flights-app-ip"
+  external_ipv4_address {
+    zone_id = var.zone
+  }
+}
+
+# ---------------------------------------------------------------------------
 # VM (burstable). cloud-init поднимает Docker, засеивает данные из S3 и
-# запускает docker compose (api + caddy). См. cloud-init.yaml.tftpl.
+# запускает docker compose (planner + collector + crawler + tickets + postgres + caddy).
+# См. cloud-init.yaml.tftpl. Смена ресурсов (память, диск) требует остановки VM —
+# allow_stopping_for_update; данные на диске сохраняются, root-раздел cloud-init
+# (growpart/resizefs) расширяет при загрузке.
 # ---------------------------------------------------------------------------
 resource "yandex_compute_instance" "app" {
-  name               = "flights-app"
-  platform_id        = "standard-v3"
-  zone               = var.zone
-  service_account_id = yandex_iam_service_account.app.id
+  name                      = "flights-app"
+  platform_id               = "standard-v3"
+  zone                      = var.zone
+  service_account_id        = yandex_iam_service_account.app.id
+  allow_stopping_for_update = true
 
   resources {
     cores         = var.vm_cores
@@ -117,8 +138,9 @@ resource "yandex_compute_instance" "app" {
   }
 
   network_interface {
-    subnet_id = data.yandex_vpc_subnet.subnet.id
-    nat       = true
+    subnet_id      = data.yandex_vpc_subnet.subnet.id
+    nat            = true
+    nat_ip_address = yandex_vpc_address.app.external_ipv4_address[0].address
   }
 
   metadata = {
@@ -130,9 +152,19 @@ resource "yandex_compute_instance" "app" {
   # заставляет terraform ПЕРЕСОЗДАТЬ VM (и потерять /opt/flights/data). cloud-init
   # (user-data) на живой VM тоже не перезапускается: правки шаблона применяются
   # только к новым машинам, для существующей — deploy/vm-migrate.sh.
+  # Размер загрузочного диска в initialize_params провайдер меняет только пересозданием
+  # VM, поэтому на живой машине диск растим руками (`yc compute disk update <id> --size N`,
+  # root-раздел расширяет cloud-init growpart при следующей загрузке), а здесь размер
+  # игнорируем; vm_disk_gb действует для новых VM. Прод: 20 → 100 ГБ 01.10.2026.
   lifecycle {
-    ignore_changes = [boot_disk[0].initialize_params[0].image_id]
+    ignore_changes = [boot_disk[0].initialize_params[0].image_id, boot_disk[0].initialize_params[0].size]
   }
+}
+
+# Пароль Postgres склада билетов (контейнер postgres в compose, только внутри сети VM).
+resource "random_password" "tickets_pg" {
+  length  = 32
+  special = false
 }
 
 locals {
@@ -140,6 +172,7 @@ locals {
   image_collector_ref = "cr.yandex/${yandex_container_registry.flights.id}/flights-collector:${var.image_tag}"
   image_crawler_ref   = "cr.yandex/${yandex_container_registry.flights.id}/flights-crawler:${var.image_tag}"
   image_web_ref       = "cr.yandex/${yandex_container_registry.flights.id}/flights-web:${var.image_tag}"
+  image_tickets_ref   = "cr.yandex/${yandex_container_registry.flights.id}/flights-tickets:${var.image_tag}"
 
   # /opt/flights/.env: и переменные подстановки compose (${PLANNER_IMAGE}...), и секреты
   # (env_file для planner и collector). SITE_DOMAIN уходит в web (Caddy).
@@ -150,6 +183,8 @@ locals {
     "COLLECTOR_IMAGE=${local.image_collector_ref}",
     "CRAWLER_IMAGE=${local.image_crawler_ref}",
     "WEB_IMAGE=${local.image_web_ref}",
+    "TICKETS_IMAGE=${local.image_tickets_ref}",
+    "TICKETS_PG_PASSWORD=${random_password.tickets_pg.result}",
     "TRAVELPAYOUTS_TOKEN=${var.travelpayouts_token}",
     "S3_ENDPOINT=https://storage.yandexcloud.net",
     "S3_REGION=ru-central1",

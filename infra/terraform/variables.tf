@@ -57,14 +57,14 @@ variable "vm_core_fraction" {
 
 variable "vm_memory_gb" {
   type        = number
-  description = "RAM, ГБ"
-  default     = 4
+  description = "RAM, ГБ (8 с 01.10.2026: склад билетов в Postgres + планировщик)"
+  default     = 8
 }
 
 variable "vm_disk_gb" {
   type        = number
-  description = "Размер загрузочного диска, ГБ (данные + образы + SQLite)"
-  default     = 20
+  description = "Размер загрузочного диска, ГБ (данные + образы + SQLite + Postgres склада билетов ~30 ГБ)"
+  default     = 100
 }
 
 variable "ssh_public_key" {

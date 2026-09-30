@@ -87,3 +87,21 @@ def test_client_reports_unreachable_collector():
     cc = CollectorClient("http://127.0.0.1:9", timeout=0.2)
     with pytest.raises(CollectorError):
         cc.health()
+
+
+def test_lake_files_and_file_for_tickets_store(client):
+    """Сверка склада билетов: список файлов по индексу и байты файла озера."""
+    client.post("/v1/fetch", json={"origin": "MOW", "day": "2026-10-15", "wait": 10})
+    files = client.get("/v1/lake/files").json()
+    assert files["count"] == 1 and files["files"][0]["key"].startswith("tickets/fetched=")
+    assert files["files"][0]["created_at"] and files["files"][0]["bytes"] > 0
+    key = files["files"][0]["key"]
+    r = client.get("/v1/lake/file", params={"key": key})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/octet-stream")
+    assert r.content[:4] == b"PAR1"
+    assert client.get("/v1/lake/file", params={"key": "tickets/nope.parquet"}).status_code == 404
+    assert client.get("/v1/lake/file", params={"key": "../etc/passwd"}).status_code == 400
+    # since — фильтр по created_at
+    later = client.get("/v1/lake/files", params={"since": "2999-01-01T00:00:00+00:00"}).json()
+    assert later["count"] == 0
+    assert client.get("/v1/lake/files", params={"since": files["files"][0]["created_at"]}).json()["count"] == 1

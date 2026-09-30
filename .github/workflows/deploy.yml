@@ -1,6 +1,6 @@
 name: Deploy
 
-# Собирает образы flights-planner (Rust, planner/), flights-collector, flights-crawler и flights-web, пушит в Yandex
+# Собирает образы flights-planner (Rust, planner/), flights-collector, flights-crawler, flights-tickets (Rust, tickets/) и flights-web, пушит в Yandex
 # Container Registry и (опционально) мгновенно выкатывает на VM по SSH. Если
 # SSH-секреты не заданы — VM подхватит свежие образы сама (systemd-таймер
 # flights-update каждые 2 мин).
@@ -21,6 +21,7 @@ on:
       - "planner/**"
       - "collector/**"
       - "crawler/**"
+      - "tickets/**"
       - "core/**"
       - "storage/**"
       - "frontend/**"
@@ -79,7 +80,7 @@ jobs:
           REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
         run: |
           SHA="${GITHUB_SHA::7}"
-          for pair in planner:deploy/Dockerfile.planner collector:deploy/Dockerfile.collector crawler:deploy/Dockerfile.crawler web:deploy/Dockerfile.web; do
+          for pair in planner:deploy/Dockerfile.planner collector:deploy/Dockerfile.collector crawler:deploy/Dockerfile.crawler tickets:deploy/Dockerfile.tickets web:deploy/Dockerfile.web; do
             NAME="${pair%%:*}"; FILE="${pair#*:}"
             IMAGE="cr.yandex/$REGISTRY_ID/flights-$NAME"
             docker build -t "$IMAGE:latest" -t "$IMAGE:$SHA" -f "$FILE" .
