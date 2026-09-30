@@ -578,7 +578,7 @@
   },
   {
    "id": 12,
-   "title": "Запас свежести по дням вылета на 180 дней, p95 городов (7 − возраст в сутках)",
+   "title": "Запас свежести по дням вылета на 180 дней: p50 / p95 / p100 городов (7 − возраст в сутках)",
    "type": "barchart",
    "gridPos": {
     "x": 0,
@@ -597,7 +597,7 @@
       "uid": "flights-clickhouse"
      },
      "editorType": "sql",
-     "rawSql": "SELECT formatDateTime(d.day, '%d.%m') AS \"день\", c.p95_left AS \"p95 городов\", c.avg_left AS \"среднее по городам\", c.min_left AS \"худший город\", ifNull(c.cities, 0) AS \"городов\" FROM (SELECT today() + number AS day FROM numbers(180)) AS d LEFT JOIN (SELECT day, round(7 - quantile(0.95)(age_h) / 24, 2) AS p95_left, round(7 - avg(age_h) / 24, 2) AS avg_left, round(7 - max(age_h) / 24, 2) AS min_left, count() AS cities FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day) AS c ON c.day = d.day ORDER BY d.day SETTINGS join_use_nulls = 1",
+     "rawSql": "SELECT formatDateTime(d.day, '%d.%m') AS \"день\", c.p50 AS \"p50\", c.p95 AS \"p95\", c.p100 AS \"p100\", ifNull(c.cities, 0) AS \"городов\" FROM (SELECT today() + number AS day FROM numbers(180)) AS d LEFT JOIN (SELECT day, round(7 - quantile(0.5)(age_h) / 24, 2) AS p50, round(7 - quantile(0.95)(age_h) / 24, 2) AS p95, round(7 - max(age_h) / 24, 2) AS p100, count() AS cities FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day) AS c ON c.day = d.day ORDER BY d.day SETTINGS join_use_nulls = 1",
      "queryType": "table",
      "refId": "A"
     }
@@ -605,11 +605,11 @@
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 80,
-      "lineWidth": 0
-     },
-     "color": {
-      "mode": "thresholds"
+      "fillOpacity": 90,
+      "lineWidth": 0,
+      "thresholdsStyle": {
+       "mode": "dashed"
+      }
      },
      "softMax": 7,
      "decimals": 1,
@@ -617,7 +617,7 @@
       "mode": "absolute",
       "steps": [
        {
-        "color": "red",
+        "color": "transparent",
         "value": null
        },
        {
@@ -635,15 +635,14 @@
      {
       "matcher": {
        "id": "byName",
-       "options": "среднее по городам"
+       "options": "p50"
       },
       "properties": [
        {
-        "id": "custom.hideFrom",
+        "id": "color",
         "value": {
-         "viz": true,
-         "legend": true,
-         "tooltip": false
+         "mode": "fixed",
+         "fixedColor": "#9ec5f4"
         }
        }
       ]
@@ -651,15 +650,29 @@
      {
       "matcher": {
        "id": "byName",
-       "options": "худший город"
+       "options": "p95"
       },
       "properties": [
        {
-        "id": "custom.hideFrom",
+        "id": "color",
         "value": {
-         "viz": true,
-         "legend": true,
-         "tooltip": false
+         "mode": "fixed",
+         "fixedColor": "#3d7fd9"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "p100"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#1a3f7a"
         }
        }
       ]
@@ -688,14 +701,17 @@
     "showValue": "never",
     "xTickLabelSpacing": 100,
     "barWidth": 0.9,
+    "groupWidth": 0.8,
     "tooltip": {
      "mode": "multi"
     },
     "legend": {
-     "showLegend": false
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
     }
    },
-   "description": "Столбец — 95-й перцентиль по городам: у 95 % городов этого дня данные свежее. Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за каждые сутки. ≥ 4 — в пределах 72 ч (цель до 60 дней вперёд), 0…4 — до недели (цель для дальних дат), < 0 — старше недели. Пустой день — данных ещё нет; пары с ошибкой источника не учитываются."
+   "description": "Перцентили возраста данных по городам дня вылета: p50 — половина городов свежее, p95 — все, кроме 5 % самых отстающих, p100 — худший город. Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за каждые сутки. Пунктир: 4 — 72 ч (цель до 60 дней вперёд), 0 — неделя (цель для дальних дат). Пустой день — данных ещё нет; пары с ошибкой источника не учитываются."
   },
   {
    "id": 13,

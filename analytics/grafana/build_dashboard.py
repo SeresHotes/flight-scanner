@@ -118,41 +118,48 @@ def build() -> dict:
     ]
     y += 8
     # Запас свежести по дню вылета: 7 − возраст в сутках. Только что собранный день = 7,
-    # дальше убывает на 1 в сутки; ниже 0 — старше недели. Столбец — p95 по городам
-    # (95 % городов этого дня свежее): среднее прятало хвост, а максимум — один выброс.
-    # Среднее, худший город и число городов — только в подсказке (скрыты с графика),
-    # чтобы 180 столбцов не двоились. Ось — весь горизонт сборщика (180 дней): дни без
-    # данных — пустые (NULL), а не 0.
+    # дальше убывает на 1 в сутки; ниже 0 — старше недели. Три ряда — перцентили возраста
+    # по городам дня: p50 (половина городов свежее), p95 (все, кроме 5 % отстающих) и
+    # p100 (худший город). Цвет — ряд (оттенки одного синего от p50 к p100), пороги целей —
+    # пунктиром. Число городов — только в подсказке. Ось — весь горизонт сборщика
+    # (180 дней): дни без данных — пустые (NULL), а не 0.
     hidden = {"id": "custom.hideFrom", "value": {"viz": True, "legend": True, "tooltip": False}}
+    shades = {"p50": "#9ec5f4", "p95": "#3d7fd9", "p100": "#1a3f7a"}
     panels += [
-        panel("Запас свежести по дням вылета на 180 дней, p95 городов (7 − возраст в сутках)",
+        panel("Запас свежести по дням вылета на 180 дней: p50 / p95 / p100 городов (7 − возраст в сутках)",
               "SELECT formatDateTime(d.day, '%d.%m') AS \"день\", "
-              "c.p95_left AS \"p95 городов\", c.avg_left AS \"среднее по городам\", "
-              "c.min_left AS \"худший город\", ifNull(c.cities, 0) AS \"городов\" "
+              "c.p50 AS \"p50\", c.p95 AS \"p95\", c.p100 AS \"p100\", ifNull(c.cities, 0) AS \"городов\" "
               "FROM (SELECT today() + number AS day FROM numbers(180)) AS d "
-              "LEFT JOIN (SELECT day, round(7 - quantile(0.95)(age_h) / 24, 2) AS p95_left, "
-              "round(7 - avg(age_h) / 24, 2) AS avg_left, "
-              "round(7 - max(age_h) / 24, 2) AS min_left, count() AS cities "
+              "LEFT JOIN (SELECT day, round(7 - quantile(0.5)(age_h) / 24, 2) AS p50, "
+              "round(7 - quantile(0.95)(age_h) / 24, 2) AS p95, "
+              "round(7 - max(age_h) / 24, 2) AS p100, count() AS cities "
               "FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY day) AS c ON c.day = d.day "
               "ORDER BY d.day SETTINGS join_use_nulls = 1",
               0, y, w=24, ptype="barchart", kind="table",
-              description="Столбец — 95-й перцентиль по городам: у 95 % городов этого дня данные "
-                          "свежее. Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за "
-                          "каждые сутки. ≥ 4 — в пределах 72 ч (цель до 60 дней вперёд), 0…4 — до недели "
-                          "(цель для дальних дат), < 0 — старше недели. Пустой день — данных ещё нет; "
+              description="Перцентили возраста данных по городам дня вылета: p50 — половина городов "
+                          "свежее, p95 — все, кроме 5 % самых отстающих, p100 — худший город. "
+                          "Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за "
+                          "каждые сутки. Пунктир: 4 — 72 ч (цель до 60 дней вперёд), 0 — неделя "
+                          "(цель для дальних дат). Пустой день — данных ещё нет; "
                           "пары с ошибкой источника не учитываются.",
-              extra={"fieldConfig": {"defaults": {"custom": {"fillOpacity": 80, "lineWidth": 0},
-                                                  "color": {"mode": "thresholds"}, "softMax": 7, "decimals": 1,
+              extra={"fieldConfig": {"defaults": {"custom": {"fillOpacity": 90, "lineWidth": 0,
+                                                             "thresholdsStyle": {"mode": "dashed"}},
+                                                  "softMax": 7, "decimals": 1,
                                                   "thresholds": {"mode": "absolute", "steps": [
-                                                      {"color": "red", "value": None},
+                                                      {"color": "transparent", "value": None},
                                                       {"color": "orange", "value": 0},
                                                       {"color": "green", "value": 4}]}},
                                      "overrides": [{"matcher": {"id": "byName", "options": name},
-                                                    "properties": [hidden]}
-                                                   for name in ("среднее по городам", "худший город", "городов")]},
+                                                    "properties": [{"id": "color", "value": {
+                                                        "mode": "fixed", "fixedColor": color}}]}
+                                                   for name, color in shades.items()]
+                                                  + [{"matcher": {"id": "byName", "options": "городов"},
+                                                      "properties": [hidden]}]},
                      "options": {"orientation": "vertical", "xField": "день", "showValue": "never",
-                                 "xTickLabelSpacing": 100, "barWidth": 0.9,
-                                 "tooltip": {"mode": "multi"}, "legend": {"showLegend": False}}}),
+                                 "xTickLabelSpacing": 100, "barWidth": 0.9, "groupWidth": 0.8,
+                                 "tooltip": {"mode": "multi"},
+                                 "legend": {"showLegend": True, "displayMode": "list",
+                                            "placement": "bottom"}}}),
     ]
     y += 8
     panels.append(row("Ручка GraphQL и очередь", y))
