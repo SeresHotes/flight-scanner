@@ -168,6 +168,8 @@ pub mod tests {
                     out.push(t.clone());
                 }
             }
+            // как ORDER BY dep_day, origin, price у настоящего склада
+            out.sort_by(|a, b| a.search_date.cmp(&b.search_date).then(a.origin.cmp(&b.origin)).then(a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal)));
             Ok(out)
         }
 

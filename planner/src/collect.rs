@@ -738,7 +738,7 @@ pub mod tests {
         // плечо 1: из IST и DXB (не TAS), только в BKK и HKG (вылеты плеча 2): IST→BKK, DXB→BKK,
         // плюс hidden-city DXB→HKG (хаб HKG — город вылета плеча 2); IST→LON отсечён
         let names: Vec<String> = got[1].iter().map(|t| format!("{}>{}{}", t.origin.as_deref().unwrap(), t.destination.as_deref().unwrap(), if t.hidden_city.is_some() { "*" } else { "" })).collect();
-        assert_eq!(names, vec!["IST>BKK", "DXB>BKK", "DXB>HKG*"]);
+        assert_eq!(names, vec!["DXB>BKK", "IST>BKK", "DXB>HKG*"]);
         assert!(f.1.lock().unwrap().is_empty(), "в серии не ходили");
         let calls = st.calls.lock().unwrap();
         assert!(calls.iter().any(|c| c.starts_with("tickets o=DXB,IST d= via= 2026-11-01")), "{calls:?}");

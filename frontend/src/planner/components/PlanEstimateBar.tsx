@@ -27,8 +27,7 @@ export function PlanEstimateBar({
 
   return (
     <div className="pl-estimate">
-      {/* Оценку показываем только для корректного маршрута — иначе число бессмысленно
-          (напр. два «любых» подряд → плечо нечем заякорить). */}
+      {/* Оценку показываем только для корректного маршрута — иначе число бессмысленно. */}
       {validation.ok && (
         <div className="pl-est-info">
           <div className="pl-est-num">

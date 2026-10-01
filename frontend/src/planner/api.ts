@@ -30,6 +30,7 @@ export interface CombosPage {
   total: number // наборов (не больше 1000 самых дешёвых)
   totalCount: number // цепочек в выданных наборах
   truncated?: boolean // наборов больше — показаны 1000 самых дешёвых
+  incomplete?: boolean // обход наборов остановлен по лимиту шагов — список неполный
   offset: number
   limit: number
   items: CityCombo[]

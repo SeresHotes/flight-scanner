@@ -12,6 +12,13 @@ use crate::segments::city_info;
 pub const SECONDS_PER_REQUEST: f64 = 1.0;
 /// Предохранитель: столько ХОЛОДНЫХ страниц (не в кэше) за один сбор, ~35 мин.
 pub const MAX_REQUESTS: i64 = 2000;
+/// Потолок суммарной ширины окон дат всех плеч (дни): объём выборки из склада растёт с числом
+/// «любых» подряд и шириной окон. Совпадает с frontend/src/planner/validation.ts.
+pub const MAX_TOTAL_WINDOW_DAYS: i64 = 60;
+/// Потолок шагов перебора маршрутов (извлечений из кучи) на одну стыковку.
+pub const MAX_SEARCH_STEPS: usize = 3_000_000;
+/// Потолок стыковок групп (extend) при обходе наборов городов.
+pub const MAX_COMBO_STEPS: usize = 2_000_000;
 /// Потолок max_results: компактный перебор держит его в памяти VM (4 ГБ).
 pub const MAX_RESULTS: i64 = 1_000_000;
 /// Сколько самых дешёвых цепочек строит джоба, если запрос не задал.
@@ -261,6 +268,11 @@ pub fn estimate_plan(stops: &[Stop], is_cached: Option<&dyn Fn(&Series) -> bool>
     Estimate { requests, cached, cold, seconds: (cold as f64 * SECONDS_PER_REQUEST).round() as i64, legs, source: "collector".into() }
 }
 
+/// Суммарная ширина окон всех плеч (дни).
+pub fn total_window_days(stops: &[Stop]) -> i64 {
+    (0..stops.len().saturating_sub(1)).map(|i| leg_days(stops, i)).sum()
+}
+
 pub fn request_count(stops: &[Stop]) -> i64 {
     let stops = collect_view(stops);
     (0..stops.len().saturating_sub(1)).map(|i| leg_requests(&stops, i)).sum()
@@ -291,6 +303,20 @@ mod tests {
         assert_eq!(est2.cached, 42);
         assert_eq!(est2.cold, 96);
         assert_eq!(leg_dates(&stops, 0).len(), 3);
+    }
+
+    #[test]
+    fn total_window_days_sums_legs() {
+        let stops = vec![
+            Stop::new("cities", vec!["MOW"], ["", ""]),
+            Stop::new("any", vec![], ["2026-11-01", "2026-11-10"]),
+            Stop::new("any", vec![], ["2026-11-05", "2026-11-24"]),
+            Stop::new("cities", vec!["TBS"], ["", ""]),
+        ];
+        // плечо 0 — окно остановки 1 (10 дн.), плечо 1 — остановки 1 (10), плечо 2 — остановки 2 (20)
+        assert_eq!(total_window_days(&stops), 40);
+        assert!(total_window_days(&stops) <= MAX_TOTAL_WINDOW_DAYS);
+        assert_eq!(plan_series(&stops).iter().filter(|s| s.origin.is_none() && s.dest.is_none()).count(), 10, "любой → любой: серия на день");
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::hot;
 use crate::overview::{build_overview, Overview};
 use crate::planquery::PlanQuery;
 use crate::search::{build_itineraries_compact, Aborted, View};
-use crate::stops::{estimate_plan, parse_stops, request_count, Stop};
+use crate::stops::{estimate_plan, parse_stops, request_count, Stop, MAX_SEARCH_STEPS};
 
 /// Свежесть кэша серий: источник сам отдаёт кэш цен с задержкой ~суток.
 pub const FETCH_CACHE_TTL_SECONDS: f64 = 24.0 * 3600.0;
@@ -27,6 +27,8 @@ pub const FETCH_CACHE_TTL_SECONDS: f64 = 24.0 * 3600.0;
 pub const COLLECTOR_FETCH_WORKERS: usize = 8;
 /// Как часто стыковка пишет прогресс в jobs (и держит свежим updated_at).
 pub const BUILD_FLUSH_SECONDS: f64 = 0.5;
+/// Сообщение при срабатывании лимита шагов перебора маршрутов.
+pub const STEP_LIMIT_ERROR: &str = "Перебор маршрутов превысил лимит шагов (3 млн): слишком широкий запрос. Сузьте окна дат, задайте города вместо «любых» или добавьте фильтры.";
 
 /// Отмена зависших джоб — кооперативная: /api/jobs/rescue кладёт id сюда, воркер
 /// проверяет флаг на каждом запросе к источнику и на каждом шаге стыковки.
@@ -245,12 +247,21 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
     rep.stage("build", &[])?;
 
     let limit = pq.max_results;
-    let mut progress = |found: usize, explored: usize| rep.build_progress(found, limit, explored).map_err(|_| Aborted);
+    let step_limit = std::cell::Cell::new(false);
+    let mut progress = |found: usize, explored: usize| -> Result<(), Aborted> {
+        rep.build_progress(found, limit, explored).map_err(|_| Aborted)?;
+        if explored > MAX_SEARCH_STEPS {
+            step_limit.set(true);
+            return Err(Aborted);
+        }
+        Ok(())
+    };
     let on_stage = |key: &str| {
         let _ = rep.stage(key, &[]);
     };
     let result = match build_view(&stops, &table, pq, &mut progress, &on_stage) {
         Ok(r) => r,
+        Err(Aborted) if step_limit.get() => return Err(CollectError::Failed(STEP_LIMIT_ERROR.into())),
         Err(Aborted) => return Err(CollectError::Cancelled),
     };
     if cancel.is_requested(job_id) {

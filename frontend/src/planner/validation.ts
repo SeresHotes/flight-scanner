@@ -2,12 +2,34 @@
 //  • минимум 2 остановки;
 //  • концы (первая и последняя) — конкретные города (не «любой»), ≥1 город;
 //  • у каждой остановки с городами выбран хотя бы один город;
-//  • два «любых» подряд запрещены;
+//  • несколько «любых» подряд разрешены (рейсы берутся из склада билетов), но суммарная
+//    ширина окон дат всех плеч ограничена MAX_TOTAL_WINDOW_DAYS — иначе выборка непомерна;
 //  • один и тот же единственный город не может идти дважды подряд;
 //  • у ПРОМЕЖУТОЧНЫХ остановок задан диапазон дат (start <= end); у концов даты
 //    выводятся из соседей — поле не показывается и не требуется.
 
+import { daysInWindow } from './dates'
 import type { PlannerStop } from './types'
+
+// Совпадает с planner/src/stops.rs MAX_TOTAL_WINDOW_DAYS и DEFAULT_LEG_DAYS.
+export const MAX_TOTAL_WINDOW_DAYS = 60
+const DEFAULT_LEG_DAYS = 7
+
+// Окно плеча i (stop i → i+1): заданное окно того конца, у кого оно есть; без окон — дефолт.
+export function legDays(stops: PlannerStop[], i: number): number {
+  const wi = stops[i].window
+  if (wi[0] && wi[1]) return daysInWindow(wi)
+  const wj = stops[i + 1].window
+  if (wj[0] && wj[1]) return daysInWindow(wj)
+  return DEFAULT_LEG_DAYS
+}
+
+// Суммарная ширина окон всех плеч (в днях).
+export function totalWindowDays(stops: PlannerStop[]): number {
+  let total = 0
+  for (let i = 0; i < stops.length - 1; i++) total += legDays(stops, i)
+  return total
+}
 
 export interface StopIssue {
   index: number
@@ -58,10 +80,11 @@ export function validatePlan(stops: PlannerStop[]): Validation {
     }
   })
 
-  // Два «любых» подряд.
-  for (let i = 0; i < stops.length - 1; i++) {
-    if (stops[i].kind === 'any' && stops[i + 1].kind === 'any') {
-      flag(i + 1, `Точки ${pointLabel(i)} и ${pointLabel(i + 1)}: два «любых» города подряд запрещены.`)
+  // Суммарная ширина окон: объём выборки растёт с числом «любых» и шириной окон.
+  if (stops.length >= 2) {
+    const total = totalWindowDays(stops)
+    if (total > MAX_TOTAL_WINDOW_DAYS) {
+      general.push(`Суммарная ширина окон дат — ${total} дн., максимум ${MAX_TOTAL_WINDOW_DAYS}. Сузьте диапазоны.`)
     }
   }
 
