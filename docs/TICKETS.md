@@ -29,9 +29,13 @@ planner ── GET /v1/tickets?origin=|destination=|via=&from=&to= (Arrow IPC в
 - `airport_city (airport, city)` — карта аэропорт → город из концов билетов: `via=<город>`
   расширяется до его аэропортов.
 
-Объём на 01.10.2026: 514 тыс. серий, 19,2 млн билетов, ~1,1 КБ на строку → ~21 ГБ данных
-+ индексы; диск VM расширен до 100 ГБ, память до 8 ГБ (Terraform). Postgres 16 в compose
-(`tickets-db`, том `/opt/flights/pg`, `shared_buffers` 1 ГБ).
+Объём на 01.10.2026: 511 тыс. серий, 18,7 млн билетов, ~1,3 КБ на строку → 26 ГБ с индексами;
+память VM 8 ГБ, диск 100 ГБ (Terraform). Postgres 16 в compose (`tickets-db`, `shared_buffers`
+1 ГБ) на **отдельном SSD** `/opt/flights/pg` (network-ssd-nonreplicated 93 ГБ,
+`yandex_compute_disk.pg`, перенос — `deploy/vm-pg-ssd.sh`): таблица не влезает в память, выборка
+— тысячи случайных чтений; на network-hdd холодный запрос шёл 25–86 с, на SSD с предвыборкой
+(`effective_io_concurrency=200`) — 0,4–2,5 с холодный (ANY→MOW за неделю, 38 МБ — 2,4 с),
+< 0,7 с тёплый. Без реплик: склад целиком восстанавливается из озера сверкой.
 
 ## Как серии попадают в склад
 

@@ -47,8 +47,11 @@ services:
       - collector
     restart: always
 
-  # Postgres склада билетов: ~20 млн строк (~30 ГБ с индексами), данные на диске VM.
-  # Память под 8 ГБ VM: shared_buffers 1 ГБ; остальное — кэш ОС.
+  # Postgres склада билетов: ~20 млн строк (~26 ГБ с индексами) на отдельном SSD
+  # (/opt/flights/pg — network-ssd-nonreplicated, deploy/vm-pg-ssd.sh). Память под 8 ГБ VM:
+  # shared_buffers 1 ГБ, остальное — кэш ОС. Выборка — bitmap-скан на тысячи случайных
+  # страниц: без предвыборки (effective_io_concurrency) читались по одной, ANY→Y за неделю
+  # шла 5–18 с на SSD, с предвыборкой — 0.4–2.5 с холодная, < 0.7 с тёплая.
   tickets-db:
     image: postgres:16-alpine
     environment:
@@ -58,7 +61,8 @@ services:
     command: >
       postgres -c shared_buffers=1GB -c effective_cache_size=3GB -c work_mem=64MB
       -c maintenance_work_mem=512MB -c max_wal_size=4GB -c checkpoint_completion_target=0.9
-      -c synchronous_commit=off -c autovacuum_vacuum_scale_factor=0.02 -c random_page_cost=1.5
+      -c synchronous_commit=off -c autovacuum_vacuum_scale_factor=0.02 -c random_page_cost=1.1
+      -c effective_io_concurrency=200 -c maintenance_io_concurrency=200
     shm_size: 512m
     volumes:
       - /opt/flights/pg:/var/lib/postgresql/data

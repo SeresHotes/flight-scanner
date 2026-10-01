@@ -111,6 +111,20 @@ resource "yandex_vpc_address" "app" {
 }
 
 # ---------------------------------------------------------------------------
+# Диск под Postgres склада билетов (/opt/flights/pg). Нереплицируемый SSD: ~28 000 IOPS
+# против ~300 у network-hdd — выборка склада это тысячи случайных чтений по таблице в
+# 24+ ГБ, которая не влезает в память; без реплик, но склад целиком восстанавливается
+# из озера сверкой. Размер — кратно 93 ГБ (требование типа). Подключается к живой VM
+# (hot attach); разметка, fstab и перенос данных — deploy/vm-pg-ssd.sh.
+# ---------------------------------------------------------------------------
+resource "yandex_compute_disk" "pg" {
+  name = "flights-pg"
+  type = "network-ssd-nonreplicated"
+  zone = var.zone
+  size = var.pg_disk_gb
+}
+
+# ---------------------------------------------------------------------------
 # VM (burstable). cloud-init поднимает Docker, засеивает данные из S3 и
 # запускает docker compose (planner + collector + crawler + tickets + postgres + caddy).
 # См. cloud-init.yaml.tftpl. Смена ресурсов (память, диск) требует остановки VM —
@@ -135,6 +149,12 @@ resource "yandex_compute_instance" "app" {
       image_id = data.yandex_compute_image.ubuntu.id
       size     = var.vm_disk_gb
     }
+  }
+
+  secondary_disk {
+    disk_id     = yandex_compute_disk.pg.id
+    device_name = "flights-pg"
+    auto_delete = false
   }
 
   network_interface {
