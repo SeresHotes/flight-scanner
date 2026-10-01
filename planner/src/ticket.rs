@@ -125,6 +125,10 @@ pub struct Ticket {
     /// Наследие REST (`layover_minutes`): у билетов GraphQL нет.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layover_minutes: Option<i64>,
+    /// Строка склада, из которой разобран билет (у виртуального — и выход на пересадке):
+    /// рейсы джобы хранят её вместо полного билета (`flightcols::FlightSrc`).
+    #[serde(skip)]
+    pub src: Option<crate::lakestore::StoreRow>,
 }
 
 fn de_int_or_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
@@ -270,6 +274,7 @@ impl Ticket {
         v.transfer_points = Some(points[..k].to_vec());
         v.legs = legs;
         v.chain = self.chain[..(cut + 1).min(self.chain.len())].to_vec();
+        v.src = self.src.as_ref().map(|s| s.with_hub(k, hub_city));
         v.hidden_city = Some(HiddenCity {
             final_: self.destination.clone(),
             final_airport: self.destination_airport.clone(),

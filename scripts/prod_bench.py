@@ -39,7 +39,15 @@ def scenarios():
 
 def health(base: str) -> dict:
     t = time.time()
-    h = call(base, "/api/health")
+    for attempt in range(10):
+        try:
+            h = call(base, "/api/health", timeout=120)
+            break
+        except Exception as e:  # планировщик перезапускается или занят загрузкой склада
+            print(f"health: {e!r}, повтор через 30 с")
+            time.sleep(30)
+    else:
+        raise SystemExit("health недоступен")
     print(f"health за {time.time() - t:.2f} с")
     print(json.dumps({k: h.get(k) for k in ("status", "process", "tickets")}, ensure_ascii=False, indent=1))
     return h

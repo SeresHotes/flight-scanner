@@ -25,6 +25,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::airports::search_airports;
 use crate::collector::{collector_url, CollectorClient};
+use crate::flightcols::FlightCols;
 use crate::hot::{self, Job};
 use crate::planquery::PlanQuery;
 use crate::search::{build_combo_views, Aborted, ComboRoutes};
@@ -90,7 +91,13 @@ pub struct AppState {
     /// LRU видов по (джоба, view_key): последний использованный — в конце.
     pub views: Mutex<Vec<((String, String), Arc<ViewEntry>)>>,
     pub view_state: Mutex<HashMap<(String, String), Arc<Mutex<ViewState>>>>,
+    /// Рейсы последних джоб в памяти (колонки + номера строк склада — сотни байт на рейс):
+    /// другие фильтры и маршруты наборов без чтения Parquet.
+    pub tables: Mutex<Vec<(String, Arc<FlightCols>)>>,
 }
+
+/// Сколько таблиц рейсов джоб держать в памяти.
+const TABLE_CACHE_SIZE: usize = 4;
 
 impl AppState {
     pub fn new(db_path: &str) -> Result<Arc<AppState>, String> {
@@ -105,11 +112,29 @@ impl AppState {
             view_executor: Executor::new("view-builder"),
             views: Mutex::new(Vec::new()),
             view_state: Mutex::new(HashMap::new()),
+            tables: Mutex::new(Vec::new()),
         }))
     }
 
     fn collector(&self) -> Option<CollectorClient> {
         collector_url().map(|u| CollectorClient::new(&u))
+    }
+
+    pub fn put_table(&self, job_id: &str, table: Arc<FlightCols>) {
+        let mut tables = self.tables.lock().unwrap();
+        tables.retain(|(k, _)| k != job_id);
+        tables.push((job_id.to_string(), table));
+        while tables.len() > TABLE_CACHE_SIZE {
+            tables.remove(0);
+        }
+    }
+
+    /// Рейсы джобы: из памяти, иначе из Parquet (джоба до рестарта или вытеснена).
+    pub fn table(&self, job_id: &str) -> Result<Option<Arc<FlightCols>>, String> {
+        if let Some((_, t)) = self.tables.lock().unwrap().iter().find(|(k, _)| k == job_id) {
+            return Ok(Some(t.clone()));
+        }
+        Ok(hot::get_plan_flights(&self.db_path, job_id)?.map(Arc::new))
     }
 
     /// Кладёт готовый вид в кэш (вытесняя самый старый) и снимает состояние стройки.
@@ -168,7 +193,7 @@ impl AppState {
 /// Стыковка под фильтры из сохранённых рейсов джобы (фон, view_executor).
 fn build_view_task(app: Arc<AppState>, job_id: String, pq: PlanQuery, state: Arc<Mutex<ViewState>>) {
     let outcome = (|| -> Result<ViewResult, String> {
-        let table = hot::get_plan_flights(&app.db_path, &job_id)?.ok_or("Рейсы этого поиска не сохранились — запустите поиск заново.")?;
+        let table = app.table(&job_id)?.ok_or("Рейсы этого поиска не сохранились — запустите поиск заново.")?;
         let stops = parse_stops(&pq.stops);
         let limit = pq.max_results;
         let mut progress = |found: usize, explored: usize| -> Result<(), Aborted> {
@@ -367,7 +392,8 @@ fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery, fresh: bool) -> Val
     let q = query.clone();
     app.executor.submit(Box::new(move || {
         let on_view = |pq: &PlanQuery, result: ViewResult| app2.put_view(&jid, pq, result);
-        worker::run_plan_collection(&app2.db_path, &jid, &q, app2.cancel.clone(), &on_view);
+        let on_table = |table: Arc<FlightCols>| app2.put_table(&jid, table);
+        worker::run_plan_collection(&app2.db_path, &jid, &q, app2.cancel.clone(), &on_view, &on_table);
     }));
     json!({"status": "collecting", "job_id": job_id, "total": est.requests, "mode": query.mode()})
 }
@@ -486,7 +512,7 @@ fn combo_routes(app: &AppState, job_id: &str, entry: &ViewEntry, wanted: &[Strin
     if let Some((_, items)) = entry.combo_routes.lock().unwrap().iter().find(|(k, _)| *k == key) {
         return Some(items.clone());
     }
-    let table = hot::get_plan_flights(&app.db_path, job_id).ok().flatten()?;
+    let table = app.table(job_id).ok().flatten()?;
     let stops = parse_stops(&entry.query.stops);
     let combos: Vec<Vec<String>> = keys.iter().map(|c| c.split('-').map(|s| s.to_string()).collect()).collect();
     let items = Arc::new(build_combo_views(&stops, &table, &combos, Some(&entry.query)));
