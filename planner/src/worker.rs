@@ -3,7 +3,7 @@
 //! наборы городов (overview), прогресс в таблице jobs, котировки — в SQLite.
 //! Выполняется в потоке однопоточного исполнителя.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -256,7 +256,8 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
     let fetcher = CountingFetcher { inner, on_hit: &on_hit };
     let store = make_store();
     let view = store_view(store.as_deref(), &stops);
-    let mut airport_city = hot::airport_city_map(conn).map_err(CollectError::Failed)?;
+    // карта из quotes — кэш процесса (полный проход по таблице на проде — 6–17 с)
+    let mut airport_city: HashMap<String, String> = (*hot::airport_city_map_cached(db_path)).clone();
     if let Some(s) = crate::lakestore::global() {
         for (a, c) in s.airport_city() {
             airport_city.entry(a).or_insert(c);
