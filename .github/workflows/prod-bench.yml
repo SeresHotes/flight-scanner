@@ -1,0 +1,22 @@
+name: Prod bench
+
+# Замер прода через публичный API (scripts/prod_bench.py): склад билетов, память
+# планировщика, типовые джобы. Запуск руками (Actions → Prod bench) или workflow_dispatch
+# через API; only=health — только состояние без джоб.
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "health — только состояние; пусто — с джобами"
+        required: false
+        default: ""
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bench
+        run: python3 scripts/prod_bench.py --only "${{ inputs.only }}"
