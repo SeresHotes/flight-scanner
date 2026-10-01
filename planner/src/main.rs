@@ -57,6 +57,15 @@ fn main() {
     if lakesync::bootstrap(&db_path).is_none() {
         println!("[startup] склад билетов: нет (озеро не задано) — рейсы только сериями");
     }
+    // карта аэропорт → город для страницы динамики — прогрев в фоне (проход по quotes)
+    {
+        let db = db_path.clone();
+        std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            let n = hot::airport_city_map_cached(&db).len();
+            println!("[startup] карта аэропорт → город: {n} за {:.1} с", t.elapsed().as_secs_f64());
+        });
+    }
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8000);
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     rt.block_on(async move {

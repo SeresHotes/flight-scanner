@@ -67,6 +67,10 @@ def main() -> int:
         ("SVO→AER (аэропорт), 1 день", {"origin": "SVO", "destination": "AER", "from": d(14), "to": d(14), "history": 60}),
     ]
     print(f"База: {a.base}")
+    for _ in range(3):
+        t = time.time()
+        urllib.request.urlopen(f"{a.base}/api/airports?q=mos", timeout=60).read()
+        print(f"  сеть: /api/airports — {time.time() - t:.2f} с", flush=True)
     ok = all([run_case(a.base, n, p) for n, p in cases])
     return 0 if ok else 1
 
