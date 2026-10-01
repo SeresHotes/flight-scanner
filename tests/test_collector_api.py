@@ -101,7 +101,18 @@ def test_lake_files_and_file_for_tickets_store(client):
     assert r.content[:4] == b"PAR1"
     assert client.get("/v1/lake/file", params={"key": "tickets/nope.parquet"}).status_code == 404
     assert client.get("/v1/lake/file", params={"key": "../etc/passwd"}).status_code == 400
+    assert client.get("/v1/lake/file", params={"key": "tickets/../x.parquet"}).status_code == 400
+    # окно дат в имени файла — законные «..»
+    client.post("/v1/batch", json={"items": [{"origin": "LED", "day": "2026-10-15", "day_to": "2026-10-16"}]})
+    import time
+    for _ in range(100):
+        if client.get("/v1/queue").json()["count"] == 0 and not client.engine.queue_stats()["running"]:
+            break
+        time.sleep(0.05)
+    win = [f for f in client.get("/v1/lake/files").json()["files"] if ".." in f["key"]]
+    assert win, "файл окна не записан"
+    assert client.get("/v1/lake/file", params={"key": win[0]["key"]}).status_code == 200
     # since — фильтр по created_at
     later = client.get("/v1/lake/files", params={"since": "2999-01-01T00:00:00+00:00"}).json()
     assert later["count"] == 0
-    assert client.get("/v1/lake/files", params={"since": files["files"][0]["created_at"]}).json()["count"] == 1
+    assert client.get("/v1/lake/files", params={"since": files["files"][0]["created_at"]}).json()["count"] == 2  # + файл окна

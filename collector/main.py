@@ -199,7 +199,8 @@ def create_app(engine: Optional[Engine] = None, settings: Optional[Settings] = N
 
     @app.get("/v1/lake/file")
     def lake_file(key: str) -> Response:
-        if not key.startswith("tickets/") or ".." in key:
+        # Защита от обхода пути: сегмент «..»; сами «..» в имени файла окна (A..B) законны.
+        if not key.startswith("tickets/") or any(seg in ("", ".", "..") for seg in key.split("/")):
             raise HTTPException(400, "ключ вне озера")
         try:
             data = eng().writer.read_bytes(key)

@@ -24,7 +24,13 @@ use crate::dates::{date_ordinal, weekend_deadline, DAY_SECONDS};
 use crate::flightcols::{FlightCols, NO_CODE};
 use crate::nearby::{Hops, HOP_MIN_GAP_MIN};
 use crate::planquery::{CityFilter, PlanQuery};
-use crate::search::{build_ctx, completion_lb, leg_rows};
+use crate::search::{build_ctx, completion_lb, completion_lb_day, day_lb_get, leg_rows, DayLb, RESEARCH_DAY_LB};
+use std::sync::atomic::{AtomicUsize, Ordering as AtOrd};
+
+/// ИССЛЕДОВАНИЕ: число стыковок групп (extend) и отсечённых групп.
+pub static OV_EXTENDS: AtomicUsize = AtomicUsize::new(0);
+pub static OV_PRUNED: AtomicUsize = AtomicUsize::new(0);
+pub static OV_EMPTY: AtomicUsize = AtomicUsize::new(0);
 use crate::segments::city_pair;
 use crate::stops::{leg_dates, Stop, MAX_COMBO_STEPS};
 
@@ -407,6 +413,7 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
     // Нижняя оценка хвоста по городу (без дат) — та же, что у поиска маршрутов.
     let ctx = build_ctx(stops, table, query);
     let lb = completion_lb(&ctx);
+    let day_lb: Option<DayLb> = if RESEARCH_DAY_LB.load(AtOrd::Relaxed) { Some(completion_lb_day(&ctx)) } else { None };
 
     let mut best = Best { heap: BinaryHeap::new(), k: top, truncated: false, steps: 0, max_steps };
 
@@ -421,6 +428,7 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
         trip_active: bool,
         last: usize,
         lb: &'a [FxHashMap<u32, f64>],
+        day_lb: Option<&'a DayLb>,
     }
 
     impl Env<'_> {
@@ -428,6 +436,17 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
         /// None — из этого города до финала не добраться вовсе).
         fn tail(&self, stop: usize, city: u32) -> Option<f64> {
             if stop == self.last { Some(0.0) } else { self.lb[stop].get(&city).copied() }
+        }
+
+        /// То же с учётом дня прилёта (прототип оценки по городу + дню).
+        fn tail_day(&self, stop: usize, city: u32, arr_ord: i64) -> Option<f64> {
+            if stop == self.last {
+                return Some(0.0);
+            }
+            match self.day_lb {
+                Some(dl) => day_lb_get(dl, stop, city, arr_ord, false),
+                None => self.lb[stop].get(&city).copied(),
+            }
         }
     }
 
@@ -497,9 +516,13 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
         let mut out: Vec<(f64, u32, Vec<usize>)> = groups(env, leg, f_idx, k, seq)
             .into_iter()
             .filter_map(|(dest, fis)| {
-                let tail = env.tail(k + 1, dest)?;
-                let fmin = fis.iter().map(|&fi| leg.price[fi]).fold(f64::INFINITY, f64::min);
-                Some((prefix_min + fmin + tail, dest, fis))
+                env.tail(k + 1, dest)?;
+                // лучший рейс группы с его хвостом (по дню прилёта, если включена оценка по дню)
+                let fmin = fis.iter().filter_map(|&fi| env.tail_day(k + 1, dest, leg.arr_ord[fi]).map(|t| leg.price[fi] + t)).fold(f64::INFINITY, f64::min);
+                if !fmin.is_finite() {
+                    return None;
+                }
+                Some((prefix_min + fmin, dest, fis))
             })
             .collect();
         out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
@@ -508,6 +531,22 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
 
     fn state_min(state: &State) -> f64 {
         state.minp.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+
+    /// Точная нижняя оценка префикса: минимум по ячейкам (minp + хвост из города по дню прилёта рейса).
+    fn exact_bound(env: &Env, state: &State, leg: &Leg, f_idx: &[usize], stop: usize, dest: u32) -> f64 {
+        let n_f = state.n_p;
+        let mut best = f64::INFINITY;
+        for (j, &fi) in f_idx.iter().enumerate() {
+            let Some(tail) = env.tail_day(stop, dest, leg.arr_ord[fi]) else { continue };
+            for d in 0..state.n_days {
+                let v = state.minp[d * n_f + j];
+                if v.is_finite() && v + tail < best {
+                    best = v + tail;
+                }
+            }
+        }
+        best
     }
 
     fn finish(env: &Env, seq: &[u32], leg: &Leg, f_idx: &[usize], state: &State, first_days: &[i64], best: &mut Best) {
@@ -566,12 +605,16 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
             }
             let hop: Vec<bool> = fis.iter().map(|&fi| !leg.origin_has(fi, city)).collect();
             let new_state = extend(state, prev, p_idx, leg, &fis, env.city_filters.get(&k).copied(), Some(&hop));
+            OV_EXTENDS.fetch_add(1, AtOrd::Relaxed);
             if new_state.total() <= 0.0 {
+                OV_EMPTY.fetch_add(1, AtOrd::Relaxed);
                 continue;
             }
-            // точная оценка после стыковки: минимум нового префикса + хвост
-            let exact = state_min(&new_state) + env.tail(k + 1, dest).unwrap_or(f64::INFINITY);
+            // точная оценка после стыковки: минимум нового префикса + хвост (по ячейкам —
+            // у каждой свой последний рейс и день прилёта)
+            let exact = exact_bound(env, &new_state, leg, &fis, k + 1, dest);
             if exact > best.cutoff() {
+                OV_PRUNED.fetch_add(1, AtOrd::Relaxed);
                 best.truncated = true;
                 continue;
             }
@@ -585,7 +628,7 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
         }
     }
 
-    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last, lb: &lb };
+    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last, lb: &lb, day_lb: day_lb.as_ref() };
     let leg0 = &legs[0];
     let mut starts: Vec<u32> = Vec::new();
     for code in &stops[0].codes {
@@ -648,7 +691,7 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
         if state.total() <= 0.0 {
             continue;
         }
-        let exact = state_min(&state) + env.tail(1, dest).unwrap_or(f64::INFINITY);
+        let exact = exact_bound(&env, &state, leg0, &fis, 1, dest);
         if exact > best.cutoff() {
             best.truncated = true;
             continue;
