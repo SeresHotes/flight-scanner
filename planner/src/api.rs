@@ -7,6 +7,7 @@
 //! - GET  /api/plan/jobs/{id}                 — прогресс + сводка
 //! - GET  /api/plan/jobs/{id}/combos|routes   — страницы наборов городов / маршрутов
 //! - POST /api/jobs/rescue                    — сброс зависших джоб
+//! - GET  /api/dynamics?origin&destination&from&to&history — история цен направления из озера
 
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
@@ -262,6 +263,52 @@ fn default_airport_limit() -> usize {
 async fn airports(Query(q): Query<AirportsQuery>) -> Json<Value> {
     let items = tokio::task::spawn_blocking(move || search_airports(&q.q, q.limit)).await.unwrap_or_default();
     Json(json!({"airports": items}))
+}
+
+// -------------------------------- dynamics -----------------------------------
+
+#[derive(Deserialize)]
+struct DynamicsParams {
+    #[serde(default)]
+    origin: String,
+    #[serde(default)]
+    destination: String,
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    history: Option<i64>,
+}
+
+/// История цен направления по снимкам озера (`dynamics`): рейсы и цены «рейс × снимок».
+async fn dynamics(State(app): State<Arc<AppState>>, Query(p): Query<DynamicsParams>) -> Json<Value> {
+    use crate::dynamics::{DynamicsQuery, DEFAULT_HISTORY_DAYS, MAX_DAYS, MAX_HISTORY_DAYS};
+    let origin = p.origin.trim().to_uppercase();
+    let destination = p.destination.trim().to_uppercase();
+    let day = |s: &str| chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok();
+    let (Some(from), to) = (day(&p.from), day(&p.to)) else {
+        return Json(json!({"error": "Нужна дата вылета (from=ГГГГ-ММ-ДД)."}));
+    };
+    let to = to.unwrap_or(from);
+    if origin.is_empty() || destination.is_empty() || origin == destination {
+        return Json(json!({"error": "Нужны два разных города: откуда и куда."}));
+    }
+    if to < from || (to - from).num_days() >= MAX_DAYS {
+        return Json(json!({"error": format!("Дни вылета: от 1 до {MAX_DAYS} подряд.")}));
+    }
+    let history_days = p.history.unwrap_or(DEFAULT_HISTORY_DAYS).clamp(1, MAX_HISTORY_DAYS);
+    let out = tokio::task::spawn_blocking(move || {
+        // серии озера лежат по городу вылета: аэропорт → его город (по накопленным котировкам)
+        let origin_city = {
+            let conn = app.conn.lock().unwrap();
+            hot::airport_city_map(&conn).ok().and_then(|m| m.get(&origin).cloned()).unwrap_or_else(|| origin.clone())
+        };
+        crate::dynamics::handle(DynamicsQuery { origin, origin_city, destination, from, to, history_days })
+    })
+    .await
+    .unwrap_or_else(|e| json!({"error": e.to_string()}));
+    Json(out)
 }
 
 // -------------------------------- rescue -------------------------------------
@@ -632,6 +679,7 @@ pub fn router(app: Arc<AppState>) -> Router {
         .route("/api/plan/jobs/{job_id}/combos", get(plan_job_combos))
         .route("/api/plan/jobs/{job_id}/routes", get(plan_job_routes))
         .route("/api/jobs/rescue", post(rescue_jobs))
+        .route("/api/dynamics", get(dynamics))
         .layer(CompressionLayer::new().gzip(true).compress_when(SizeAbove::new(1024)))
         .layer(cors)
         .with_state(app)

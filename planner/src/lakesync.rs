@@ -31,6 +31,20 @@ pub trait Lake: Send + Sync {
     fn list(&self, prefix: &str) -> Result<Vec<String>, String>;
     fn get(&self, key: &str) -> Result<bytes::Bytes, String>;
     fn describe(&self) -> String;
+
+    /// Последние `n` байт файла и его полный размер (чтение Parquet по частям: футер).
+    fn get_tail(&self, key: &str, n: u64) -> Result<(bytes::Bytes, u64), String> {
+        let all = self.get(key)?;
+        let len = all.len() as u64;
+        Ok((all.slice(len.saturating_sub(n) as usize..), len))
+    }
+
+    /// Байты [start, start + len) файла.
+    fn get_range(&self, key: &str, start: u64, len: u64) -> Result<bytes::Bytes, String> {
+        let all = self.get(key)?;
+        let end = (start + len).min(all.len() as u64);
+        Ok(all.slice(start.min(end) as usize..end as usize))
+    }
 }
 
 // ---------------------------------------------------------------- S3 (SigV4)
@@ -110,6 +124,11 @@ impl S3Lake {
 
     /// GET path-style `/<bucket>/<key>` с подписью AWS SigV4.
     fn signed_get(&self, key: &str, query: &[(&str, String)]) -> Result<reqwest::blocking::Response, String> {
+        self.signed_get_range(key, query, None)
+    }
+
+    /// То же с заголовком Range (не подписывается — SigV4 его не требует).
+    fn signed_get_range(&self, key: &str, query: &[(&str, String)], range: Option<String>) -> Result<reqwest::blocking::Response, String> {
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let path = if key.is_empty() { format!("/{}", self.bucket) } else { format!("/{}/{}", self.bucket, uri_encode(key, true)) };
@@ -119,7 +138,11 @@ impl S3Lake {
         let payload = "UNSIGNED-PAYLOAD";
         let auth = self.authorization(&path, &qs, &amz_date);
         let url = if qs.is_empty() { format!("{}{path}", self.endpoint) } else { format!("{}{path}?{qs}", self.endpoint) };
-        let r = self.http.get(url).header("x-amz-date", amz_date).header("x-amz-content-sha256", payload).header("authorization", auth).send().map_err(|e| format!("S3: {e}"))?;
+        let mut req = self.http.get(url).header("x-amz-date", amz_date).header("x-amz-content-sha256", payload).header("authorization", auth);
+        if let Some(r) = range {
+            req = req.header("range", r);
+        }
+        let r = req.send().map_err(|e| format!("S3: {e}"))?;
         if !r.status().is_success() {
             let status = r.status();
             let body = r.text().unwrap_or_default();
@@ -150,6 +173,29 @@ impl Lake for S3Lake {
 
     fn get(&self, key: &str) -> Result<bytes::Bytes, String> {
         self.signed_get(key, &[])?.bytes().map_err(|e| format!("S3 {key}: {e}"))
+    }
+
+    fn get_tail(&self, key: &str, n: u64) -> Result<(bytes::Bytes, u64), String> {
+        let r = self.signed_get_range(key, &[], Some(format!("bytes=-{n}")))?;
+        // 206: «bytes a-b/total»; 200 — файл меньше n, пришёл целиком
+        let total = r.headers().get("content-range").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit('/').next()).and_then(|t| t.parse::<u64>().ok());
+        let body = r.bytes().map_err(|e| format!("S3 {key}: {e}"))?;
+        let len = total.unwrap_or(body.len() as u64);
+        Ok((body, len))
+    }
+
+    fn get_range(&self, key: &str, start: u64, len: u64) -> Result<bytes::Bytes, String> {
+        if len == 0 {
+            return Ok(bytes::Bytes::new());
+        }
+        let r = self.signed_get_range(key, &[], Some(format!("bytes={start}-{}", start + len - 1)))?;
+        let partial = r.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        let body = r.bytes().map_err(|e| format!("S3 {key}: {e}"))?;
+        if partial {
+            return Ok(body);
+        }
+        let end = (start + len).min(body.len() as u64);
+        Ok(body.slice(start.min(end) as usize..end as usize))
     }
 
     fn describe(&self) -> String {
@@ -193,6 +239,21 @@ impl Lake for LocalLake {
 
     fn get(&self, key: &str) -> Result<bytes::Bytes, String> {
         std::fs::read(self.root.join(key)).map(bytes::Bytes::from).map_err(|e| format!("{key}: {e}"))
+    }
+
+    fn get_tail(&self, key: &str, n: u64) -> Result<(bytes::Bytes, u64), String> {
+        let len = std::fs::metadata(self.root.join(key)).map_err(|e| format!("{key}: {e}"))?.len();
+        let start = len.saturating_sub(n);
+        Ok((self.get_range(key, start, len - start)?, len))
+    }
+
+    fn get_range(&self, key: &str, start: u64, len: u64) -> Result<bytes::Bytes, String> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(self.root.join(key)).map_err(|e| format!("{key}: {e}"))?;
+        f.seek(SeekFrom::Start(start)).map_err(|e| format!("{key}: {e}"))?;
+        let mut buf = Vec::with_capacity(len as usize);
+        f.take(len).read_to_end(&mut buf).map_err(|e| format!("{key}: {e}"))?;
+        Ok(bytes::Bytes::from(buf))
     }
 
     fn describe(&self) -> String {

@@ -137,11 +137,11 @@ impl LakeCols {
         out
     }
 
-    fn empty() -> LakeCols {
+    pub fn empty() -> LakeCols {
         LakeCols { n: 0, strs: vec![Vec::new(); STR_FIELDS.len()], ints: vec![Vec::new(); INT_FIELDS.len()], ..Default::default() }
     }
 
-    fn append(&mut self, other: LakeCols) {
+    pub fn append(&mut self, other: LakeCols) {
         self.n += other.n;
         for (a, b) in self.strs.iter_mut().zip(other.strs) {
             a.extend(b);
