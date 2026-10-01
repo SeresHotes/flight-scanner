@@ -47,9 +47,6 @@ class Settings:
     coverage_snapshot_seconds: float = field(default_factory=lambda: _float("COVERAGE_SNAPSHOT_SECONDS", 600))
     # Сколько держать завершённые задания в памяти (результат забирают один раз).
     job_keep_seconds: int = field(default_factory=lambda: _int("COLLECTOR_JOB_KEEP_SECONDS", 3600))
-    # Склад билетов (tickets/): каждый записанный в озеро файл пушится туда же байтами.
-    # Пусто — пуша нет (склад сам сверяется с озером через /v1/lake/*).
-    tickets_url: Optional[str] = field(default_factory=lambda: os.getenv("TICKETS_URL") or None)
 
     @property
     def s3_configured(self) -> bool:

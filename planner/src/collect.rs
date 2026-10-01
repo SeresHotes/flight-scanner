@@ -338,7 +338,7 @@ pub fn collect_plan(
         };
         progress.leg(i)?;
         let Some(view) = store else {
-            return Err(CollectError::Failed("плечо «любой → любой» требует склад билетов (TICKETS_URL)".into()));
+            return Err(CollectError::Failed("плечо «любой → любой» требует склад билетов (озеро S3_* у планировщика)".into()));
         };
         let mut origins: Vec<String> = Vec::new();
         if i > 0 {

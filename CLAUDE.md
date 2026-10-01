@@ -28,9 +28,10 @@
   ручки, серии в S3, индекс, ретеншн, фазы 1–5) — `docs/COLLECTOR.md`. На VM контейнеры:
   `planner` (**Rust**, крейт `planner/`, axum `/api/*`), `collector` (Python, порт 8001,
   единственный с токеном и S3), `crawler` (Python, фоновый обход «город × день» на 180
-  дней, только HTTP к коллектору), `tickets` (**Rust**, крейт `tickets/`, порт 8002 —
-  склад билетов: текущее состояние серий X→ANY в Postgres `tickets-db`, выборки для
-  планировщика, `docs/TICKETS.md`) + `web`. VM: 2 vCPU, 8 ГБ, диск 100 ГБ, статический IP.
+  дней, только HTTP к коллектору) + `web`. Склад билетов (текущее состояние серий X→ANY)
+  живёт в памяти `planner` (`lakestore.rs`/`lakesync.rs`, `docs/TICKETS.md`): читает озеро
+  из S3 сам (только список и GET), снапшот `data/store.snap`; сервис `tickets` с Postgres
+  удалён 01.10.2026. VM: 2 vCPU, 8 ГБ, диск 100 ГБ, статический IP.
   Прод-compose `deploy/compose.prod.yml` едет в образе planner; на уже созданной
   VM один раз запускается `deploy/vm-migrate.sh`.
 - Дашборд «Flights · Коллектор» — в общей Grafana аналитической VM Market Data
@@ -47,10 +48,10 @@
 Единый запрос `PlanQuery` (`planner/src/planquery.rs`; скелет + фильтры городов/плеч/длины
 поездки, `maxResults`; бюджет `maxCost` удалён 01.10.2026): `POST /api/plan/run` → джоба = рейсы по
 остановкам (ключ `collect_key` — виды, города, окна, радиус; TTL сутки). Сбор (`collect.rs`):
-рейсы — из склада билетов `tickets` (`TICKETS_URL`, один запрос `/v1/tickets` на плечо:
+рейсы — из склада билетов в памяти планировщика (`lakestore`, одна выборка на плечо:
 X→ANY, ANY→Y, пара, ANY→ANY — после плеч с городом, сужен городами соседних плеч), серии
 «направление × день» через коллектор/GraphQL — только за городами и днями без покрытия
-в складе (`/v1/coverage`); все фильтры — при чтении: параметр `f` (JSON фильтров) у `GET /api/plan/jobs/{id}`,
+в складе; все фильтры — при чтении: параметр `f` (JSON фильтров) у `GET /api/plan/jobs/{id}`,
 `…/combos`, `…/routes` — вид под фильтры стыкуется из сохранённых рейсов в фоне
 (этап «Стыковка»), кэш в памяти по `(джоба, view_key)`. Рейсы джобы — колонками
 (`core/flightcols.FlightCols`, Parquet `plan_flights/<job>.parquet` рядом с БД): A* и

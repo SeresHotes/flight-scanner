@@ -1,9 +1,11 @@
 //! Точка входа: `flights-planner` слушает 0.0.0.0:PORT (по умолчанию 8000).
 //! Переменные: FLIGHT_DB (data/flights.db), COLLECTOR_URL, TRAVELPAYOUTS_TOKEN (без
-//! коллектора), GEO_PATH, CITY_NAMES_PATH, AIRPORT_NETWORK_PATH.
+//! коллектора), GEO_PATH, CITY_NAMES_PATH, AIRPORT_NETWORK_PATH; склад билетов — S3_*
+//! (или LAKE_LOCAL_ROOT), LAKE_* (`lakesync`).
 
 use flights_planner::api::{router, AppState};
 use flights_planner::collector::collector_url;
+use flights_planner::lakesync;
 use flights_planner::{hot, nearby, segments};
 
 /// Простейший .env: KEY=VALUE построчно, без перекрытия уже заданных переменных.
@@ -51,6 +53,10 @@ fn main() {
         "[startup] котировок в БД: {quotes}; зависших джоб сброшено: {stale}; коллектор: {}",
         collector_url().unwrap_or_else(|| "нет (прямой GraphQL)".into())
     );
+    // Склад билетов в памяти: снапшот с диска, затем озеро (S3 или LAKE_LOCAL_ROOT) в фоне.
+    if lakesync::bootstrap(&db_path).is_none() {
+        println!("[startup] склад билетов: нет (озеро не задано) — рейсы только сериями");
+    }
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8000);
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     rt.block_on(async move {

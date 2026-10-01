@@ -30,7 +30,6 @@ use crate::planquery::PlanQuery;
 use crate::search::{build_combo_views, Aborted, ComboRoutes};
 use crate::collect::store_view;
 use crate::stops::{estimate_plan, is_valid_max_results, parse_stops, total_window_days, Estimate, Series, DEFAULT_MAX_RESULTS, MAX_REQUESTS, MAX_RESULTS, MAX_SEARCH_STEPS, MAX_TOTAL_WINDOW_DAYS};
-use crate::tickets::{tickets_url, TicketsClient};
 use crate::worker::{self, CancelSet, ViewResult, FETCH_CACHE_TTL_SECONDS};
 
 /// Сколько джоба в running может молчать, прежде чем /jobs/rescue сочтёт её зависшей.
@@ -111,10 +110,6 @@ impl AppState {
 
     fn collector(&self) -> Option<CollectorClient> {
         collector_url().map(|u| CollectorClient::new(&u))
-    }
-
-    fn tickets(&self) -> Option<TicketsClient> {
-        tickets_url().map(|u| TicketsClient::new(&u))
     }
 
     /// Кладёт готовый вид в кэш (вытесняя самый старый) и снимает состояние стройки.
@@ -207,11 +202,8 @@ async fn health(State(app): State<Arc<AppState>>) -> Json<Value> {
                 Err(e) => json!({"status": "unreachable", "error": e.to_string()}),
             };
         }
-        if let Some(client) = app.tickets() {
-            out["tickets"] = match client.health() {
-                Ok(v) => v,
-                Err(e) => json!({"status": "unreachable", "error": e.to_string()}),
-            };
+        if let Some(store) = crate::lakestore::global() {
+            out["tickets"] = store.health();
         }
         out
     })
@@ -271,7 +263,8 @@ fn job_stage(job: &Job) -> Value {
 /// или, без коллектора, в локальном ticket_cache.
 fn estimate(app: &AppState, query: &PlanQuery) -> Estimate {
     let stops = parse_stops(&query.stops);
-    let store = app.tickets();
+    // склад ещё грузится — оценка без него (не ждём загрузку в HTTP-запросе)
+    let store = crate::lakestore::global().filter(|s| s.is_ready()).map(crate::lakestore::SharedStore);
     let view = store_view(store.as_ref().map(|s| s as &dyn crate::tickets::TicketStore), &stops);
     let client = app.collector();
     let probe = |s: &Series| -> bool {

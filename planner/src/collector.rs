@@ -10,8 +10,8 @@ use arrow::record_batch::RecordBatch;
 use serde_json::Value;
 
 use crate::collect::{CollectError, SeriesFetcher, SeriesResult};
-use crate::flightcols::{bool_col, f64_col, i64_col, str_col};
-use crate::ticket::{Baggage, Leg, Ticket, TransferPoint};
+use crate::lakestore::LakeCols;
+use crate::ticket::Ticket;
 
 pub const ARROW_MEDIA_TYPE: &str = "application/vnd.apache.arrow.stream";
 pub const DEFAULT_TIMEOUT: f64 = 30.0;
@@ -175,56 +175,8 @@ pub fn tickets_from_ipc(bytes: &[u8]) -> Result<Vec<Ticket>, CollectError> {
 }
 
 pub fn tickets_from_batch(b: &RecordBatch) -> Result<Vec<Ticket>, CollectError> {
-    let n = b.num_rows();
-    if n == 0 {
-        return Ok(Vec::new());
-    }
-    let e = |s: String| CollectError::Failed(format!("arrow: {s}"));
-    let s = |name: &str| str_col(b, name).map_err(e);
-    let i = |name: &str| i64_col(b, name).map_err(e);
-    let f = |name: &str| f64_col(b, name).map_err(e);
-    let bl = |name: &str| -> Result<Vec<bool>, CollectError> { if b.column_by_name(name).is_some() { bool_col(b, name).map_err(e) } else { Ok(vec![false; n]) } };
-    let (search_origin, search_destination, search_date) = (s("search_origin")?, s("search_destination")?, s("search_date")?);
-    let (origin, destination, origin_airport, destination_airport) = (s("origin")?, s("destination")?, s("origin_airport")?, s("destination_airport")?);
-    let (departure_at, arrival_at, duration, duration_to, transfers) = (s("departure_at")?, s("arrival_at")?, i("duration")?, i("duration_to")?, i("transfers")?);
-    let (airline, flight_number, price, currency, link) = (s("airline")?, s("flight_number")?, f("price")?, s("currency")?, s("link")?);
-    let (baggage_code, source) = (s("baggage_code")?, s("source")?);
-    let (chain_json, legs_json, points_json) = (s("chain_json")?, s("legs_json")?, s("transfer_points_json")?);
-    let (known, included, pieces, kg) = (bl("baggage_known")?, bl("baggage_included")?, i("baggage_pieces")?, i("baggage_kg")?);
-    let mut out = Vec::with_capacity(n);
-    for r in 0..n {
-        let chain: Vec<String> = chain_json[r].as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
-        let legs: Vec<Leg> = legs_json[r].as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
-        let transfer_points: Vec<TransferPoint> = points_json[r].as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
-        out.push(Ticket {
-            origin: origin[r].clone(),
-            destination: destination[r].clone(),
-            origin_airport: origin_airport[r].clone(),
-            destination_airport: destination_airport[r].clone(),
-            departure_at: departure_at[r].clone(),
-            arrival_at: arrival_at[r].clone(),
-            duration: duration[r],
-            duration_to: duration_to[r],
-            transfers: transfers[r].unwrap_or(0),
-            airline: airline[r].clone(),
-            flight_number: flight_number[r].clone(),
-            price: price[r],
-            currency: currency[r].clone(),
-            link: link[r].clone(),
-            chain,
-            legs,
-            transfer_points: Some(transfer_points),
-            baggage: Some(Baggage { known: known[r], included: included[r], pieces: pieces[r], kg: kg[r] }),
-            baggage_code: baggage_code[r].clone(),
-            source: source[r].clone(),
-            search_origin: search_origin[r].clone(),
-            search_destination: search_destination[r].clone(),
-            search_date: search_date[r].clone(),
-            hidden_city: None,
-            layover_minutes: None,
-        });
-    }
-    Ok(out)
+    let cols = LakeCols::from_batch(b).map_err(|e| CollectError::Failed(format!("arrow: {e}")))?;
+    Ok((0..cols.n).map(|r| cols.ticket(r)).collect())
 }
 
 /// Вспомогательное для тестов (и интеграционных): серия → Arrow IPC в схеме озера.
@@ -311,6 +263,7 @@ pub mod testing {
 mod tests {
     use super::*;
     use super::testing::lake_ipc;
+    use crate::ticket::Baggage;
 
     #[test]
     fn ipc_roundtrip() {
