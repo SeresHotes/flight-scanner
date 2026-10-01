@@ -129,11 +129,13 @@ impl Syncer {
     }
 
     /// Фоновый цикл: полная сверка на старте (заливка), затем инкрементальная раз в interval.
+    /// Если в проходе были ошибки (коллектор перезапускался, файл не прочитался) — следующий
+    /// проход снова полный: иначе файл старше окна lookback не попал бы в склад никогда.
     pub async fn run_forever(self, interval: Duration) {
-        let mut first = true;
+        let mut full = true;
         loop {
-            match self.run_once(first).await {
-                Ok(_) => first = false,
+            match self.run_once(full).await {
+                Ok((_, failed)) => full = failed > 0,
                 Err(e) => println!("[tickets] сверка не удалась: {e}"),
             }
             tokio::time::sleep(interval).await;

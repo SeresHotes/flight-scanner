@@ -17,6 +17,89 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtOrd};
+
+// ---------------------------- ИССЛЕДОВАНИЕ (не в прод) ----------------------------
+/// Нижняя оценка по (город, день прилёта) вместо (город): переключатель прототипа.
+pub static RESEARCH_DAY_LB: AtomicBool = AtomicBool::new(false);
+/// Счётчики перебора: извлечения из кучи, положенные в кучу, кандидаты, отброшенные по дате,
+/// узлы без единого валидного ребёнка, построенные списки кандидатов (записей).
+pub static ST_POPS: AtomicUsize = AtomicUsize::new(0);
+pub static ST_PUSHES: AtomicUsize = AtomicUsize::new(0);
+pub static ST_SKIP_DATE: AtomicUsize = AtomicUsize::new(0);
+pub static ST_DEAD_NODES: AtomicUsize = AtomicUsize::new(0);
+pub static ST_CAND_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+pub static ST_NODES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn research_reset() {
+    for c in [&ST_POPS, &ST_PUSHES, &ST_SKIP_DATE, &ST_DEAD_NODES, &ST_CAND_ENTRIES, &ST_NODES] {
+        c.store(0, AtOrd::Relaxed);
+    }
+}
+
+pub fn research_stats() -> serde_json::Value {
+    json!({
+        "pops": ST_POPS.load(AtOrd::Relaxed), "pushes": ST_PUSHES.load(AtOrd::Relaxed),
+        "skip_date": ST_SKIP_DATE.load(AtOrd::Relaxed), "dead_nodes": ST_DEAD_NODES.load(AtOrd::Relaxed),
+        "cand_entries": ST_CAND_ENTRIES.load(AtOrd::Relaxed), "nodes": ST_NODES.load(AtOrd::Relaxed),
+    })
+}
+
+/// Оценка хвоста по (город, день прилёта): для остановки i и города c — список
+/// (день вылета d, минимальная цена хвоста при вылете в день ≥ d), по убыванию d с
+/// суффиксным минимумом. Запрос: минимум по вылетам в день > прилёт (с старта — ≥).
+pub type DayLb = Vec<FxHashMap<u32, Vec<(i64, f64)>>>;
+
+pub fn completion_lb_day(ctx: &Ctx) -> DayLb {
+    let t = ctx.table;
+    let last = ctx.last;
+    let mut lb: DayLb = vec![FxHashMap::default(); ctx.stops.len()];
+    for i in (0..last).rev() {
+        let terminal_next = i + 1 == last;
+        // (город вылета, день вылета) → лучшая цена рейс + хвост
+        let mut best: FxHashMap<(u32, i64), f64> = FxHashMap::default();
+        for (&city, rows) in &ctx.legs_by_origin[i] {
+            for &r in rows {
+                let dest = t.dest_id[r];
+                if dest == NO_CODE || dest == city || t.dep_ord[r] < 0 || !ctx.dest_allowed(i + 1, r) {
+                    continue;
+                }
+                let tail = if terminal_next { 0.0 } else { match day_lb_get(&lb, i + 1, dest, t.arr_ord[r], false) { Some(v) => v, None => continue } };
+                let cand = t.price[r] + tail;
+                let e = best.entry((city, t.dep_ord[r])).or_insert(f64::INFINITY);
+                if cand < *e {
+                    *e = cand;
+                }
+            }
+        }
+        let mut per_city: FxHashMap<u32, Vec<(i64, f64)>> = FxHashMap::default();
+        for ((city, day), v) in best {
+            per_city.entry(city).or_default().push((day, v));
+        }
+        for list in per_city.values_mut() {
+            list.sort_by(|a, b| b.0.cmp(&a.0)); // по убыванию дня
+            let mut run = f64::INFINITY;
+            for item in list.iter_mut() {
+                run = run.min(item.1);
+                item.1 = run; // суффиксный минимум: лучший хвост при вылете в день ≥ item.0
+            }
+        }
+        // прототип: переезды к соседям (radius) не учитываем — для многих ANY подряд радиус 0
+        lb[i] = per_city;
+    }
+    lb
+}
+
+/// Минимум хвоста из города при прилёте в день arrive (вылет строго позже; со старта — в тот же день).
+pub fn day_lb_get(lb: &DayLb, i: usize, city: u32, arrive: i64, first: bool) -> Option<f64> {
+    let list = lb.get(i)?.get(&city)?;
+    let min_dep = if first { arrive } else { arrive + 1 };
+    // список по убыванию дня: первая запись с днём >= min_dep, идя с конца (меньшие дни) — берём
+    // последнюю запись, у которой day >= min_dep
+    let pos = list.partition_point(|(d, _)| *d >= min_dep);
+    if pos == 0 { None } else { Some(list[pos - 1].1) }
+}
+// ---------------------------------------------------------------------------------
 
 use serde_json::{json, Value};
 
@@ -213,6 +296,7 @@ struct CandList {
 struct Candidates<'c, 'a> {
     ctx: &'c Ctx<'a>,
     lb: &'c [FxHashMap<u32, f64>],
+    day_lb: Option<&'c DayLb>,
     cache: FxHashMap<(usize, u32), Rc<CandList>>,
 }
 
@@ -248,6 +332,11 @@ impl<'c, 'a> Candidates<'c, 'a> {
                 }
                 let tail = if terminal {
                     0.0
+                } else if let Some(dl) = self.day_lb {
+                    match day_lb_get(dl, i + 1, dest, t.arr_ord[fi], false) {
+                        Some(v) => v,
+                        None => continue,
+                    }
                 } else {
                     match self.lb[i + 1].get(&dest) {
                         Some(v) => *v,
@@ -257,6 +346,7 @@ impl<'c, 'a> Candidates<'c, 'a> {
                 pairs.push((t.price[fi] + tail, fi, city != t.orig_city_id[fi] && city != t.orig_airport_id[fi]));
             }
         }
+        ST_CAND_ENTRIES.fetch_add(pairs.len(), AtOrd::Relaxed);
         pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal).then(a.1.cmp(&b.1)));
         CandList { keys: pairs.iter().map(|p| p.0).collect(), idxs: pairs.iter().map(|p| p.1).collect(), hop: pairs.iter().map(|p| p.2).collect() }
     }
@@ -339,7 +429,8 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>,
     let t = ctx.table;
     let last = ctx.last;
     let lb = completion_lb(ctx);
-    let mut cands = Candidates { ctx, lb: &lb, cache: FxHashMap::default() };
+    let day_lb_store = if RESEARCH_DAY_LB.load(AtOrd::Relaxed) { Some(completion_lb_day(ctx)) } else { None };
+    let mut cands = Candidates { ctx, lb: &lb, day_lb: day_lb_store.as_ref(), cache: FxHashMap::default() };
     let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
     let mut nodes: Vec<Node> = Vec::new();
     let mut seq: u64 = 0;
@@ -387,6 +478,7 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>,
             let f = node.g + list.keys[k];
             let fi = list.idxs[k];
             if t.dep_ord[fi] < min_depart_ord(i, node.arrive_ord) {
+                ST_SKIP_DATE.fetch_add(1, AtOrd::Relaxed);
                 continue;
             }
             if list.hop[k] && i > 0 && !gap_ok(node.arrive_ts, t.dep_ts[fi]) {
@@ -402,7 +494,11 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>,
             }
             heap.push(HeapItem { f, seq: *seq, node: node_idx, k });
             *seq += 1;
+            ST_PUSHES.fetch_add(1, AtOrd::Relaxed);
             return;
+        }
+        if start == 0 {
+            ST_DEAD_NODES.fetch_add(1, AtOrd::Relaxed);
         }
     };
 
@@ -410,6 +506,11 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>,
         let sid = ctx.code_id(start);
         if !lb[0].contains_key(&sid) {
             continue;
+        }
+        if let Some(dl) = &day_lb_store {
+            if day_lb_get(dl, 0, sid, start_ord, true).is_none() {
+                continue;
+            }
         }
         let list = cands.get(0, sid);
         nodes.push(Node { i: 0, city: sid, arrive_ord: start_ord, arrive_ts: start_ts, g: 0.0, parent: None, list });
@@ -423,6 +524,7 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>,
             break;
         }
         let Some(item) = heap.pop() else { break };
+        ST_POPS.fetch_add(1, AtOrd::Relaxed);
         check(out.len())?;
         push_next(item.node, item.k + 1, &nodes, &mut heap, &mut seq);
         let i = nodes[item.node].i;
@@ -446,6 +548,7 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>,
         }
         let dest = t.dest_id[fi];
         let list = cands.get(i + 1, dest);
+        ST_NODES.fetch_add(1, AtOrd::Relaxed);
         nodes.push(Node { i: i + 1, city: dest, arrive_ord: t.arr_ord[fi], arrive_ts: t.arr_ts[fi], g: nodes[item.node].g + t.price[fi], parent: Some((item.node, fi)), list });
         let idx = nodes.len() - 1;
         push_next(idx, 0, &nodes, &mut heap, &mut seq);
