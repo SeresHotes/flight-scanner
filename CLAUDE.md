@@ -42,6 +42,13 @@
 - Фронтенд: Vite + React + TS (`frontend/`), только планировщик: `pages/PlanPage`
   (`/`, запрос) → `pages/CombosPage` (`/combos/:job`) → `pages/RoutesPage`
   (`/routes/:job`); общее — `frontend/src/planner/` (запрос `query.ts`, API `api.ts`).
+- Динамика цены — отдельная страница `/dynamics` (`pages/DynamicsPage`, `frontend/src/dynamics/`)
+  и ручка `GET /api/dynamics?origin&destination&from&to&history` (`planner/src/dynamics.rs`):
+  история цены направления по снимкам озера — каждый файл X→ANY (и X→Y) без коридора цен,
+  чьё окно задевает дни вылета (≤ 7), = снимок на момент загрузки. Читает S3 сам (список
+  `tickets/fetched=<день>/origin=<город>/` за `history` дней + GET), со складом и джобами не
+  связана; кэш ответа 10 мин. Фильтры (время вылета/прилёта, пересадки, багаж, время в пути,
+  авиакомпании) и режимы «самая низкая цена» / «конкретный рейс» считает фронт.
 
 ## Планировщик v2 (docs/PLANNER_V2.md)
 
