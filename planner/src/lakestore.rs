@@ -408,6 +408,14 @@ pub struct SyncStatus {
     pub last_sync_seconds: Option<f64>,
     pub snapshot_at: Option<String>,
     pub loaded_from_snapshot: bool,
+    /// От старта процесса до готовности склада, с.
+    pub ready_seconds: Option<f64>,
+    /// Чтение снапшота на старте и последняя запись: секунды, МБ на диске.
+    pub snapshot_load_seconds: Option<f64>,
+    pub snapshot_write_seconds: Option<f64>,
+    pub snapshot_mb: Option<u64>,
+    /// Последний полный проход по озеру: ключей, нужно, применено, строк, МБ скачано, секунд.
+    pub last_full: Option<Value>,
 }
 
 #[derive(Default)]

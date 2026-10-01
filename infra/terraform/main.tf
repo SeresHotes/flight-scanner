@@ -111,22 +111,8 @@ resource "yandex_vpc_address" "app" {
 }
 
 # ---------------------------------------------------------------------------
-# Диск под Postgres склада билетов (/opt/flights/pg). Нереплицируемый SSD: ~28 000 IOPS
-# против ~300 у network-hdd — выборка склада это тысячи случайных чтений по таблице в
-# 24+ ГБ, которая не влезает в память; без реплик, но склад целиком восстанавливается
-# из озера сверкой. Размер — кратно 93 ГБ (требование типа). Подключается к живой VM
-# (hot attach); разметка, fstab и перенос данных — deploy/vm-pg-ssd.sh.
-# ---------------------------------------------------------------------------
-resource "yandex_compute_disk" "pg" {
-  name = "flights-pg"
-  type = "network-ssd-nonreplicated"
-  zone = var.zone
-  size = var.pg_disk_gb
-}
-
-# ---------------------------------------------------------------------------
 # VM (burstable). cloud-init поднимает Docker, засеивает данные из S3 и
-# запускает docker compose (planner + collector + crawler + tickets + postgres + caddy).
+# запускает docker compose (planner + collector + crawler + caddy).
 # См. cloud-init.yaml.tftpl. Смена ресурсов (память, диск) требует остановки VM —
 # allow_stopping_for_update; данные на диске сохраняются, root-раздел cloud-init
 # (growpart/resizefs) расширяет при загрузке.
@@ -149,12 +135,6 @@ resource "yandex_compute_instance" "app" {
       image_id = data.yandex_compute_image.ubuntu.id
       size     = var.vm_disk_gb
     }
-  }
-
-  secondary_disk {
-    disk_id     = yandex_compute_disk.pg.id
-    device_name = "flights-pg"
-    auto_delete = false
   }
 
   network_interface {
@@ -181,18 +161,11 @@ resource "yandex_compute_instance" "app" {
   }
 }
 
-# Пароль Postgres склада билетов (контейнер postgres в compose, только внутри сети VM).
-resource "random_password" "tickets_pg" {
-  length  = 32
-  special = false
-}
-
 locals {
   image_planner_ref   = "cr.yandex/${yandex_container_registry.flights.id}/flights-planner:${var.image_tag}"
   image_collector_ref = "cr.yandex/${yandex_container_registry.flights.id}/flights-collector:${var.image_tag}"
   image_crawler_ref   = "cr.yandex/${yandex_container_registry.flights.id}/flights-crawler:${var.image_tag}"
   image_web_ref       = "cr.yandex/${yandex_container_registry.flights.id}/flights-web:${var.image_tag}"
-  image_tickets_ref   = "cr.yandex/${yandex_container_registry.flights.id}/flights-tickets:${var.image_tag}"
 
   # /opt/flights/.env: и переменные подстановки compose (${PLANNER_IMAGE}...), и секреты
   # (env_file для planner и collector). SITE_DOMAIN уходит в web (Caddy).
@@ -203,8 +176,6 @@ locals {
     "COLLECTOR_IMAGE=${local.image_collector_ref}",
     "CRAWLER_IMAGE=${local.image_crawler_ref}",
     "WEB_IMAGE=${local.image_web_ref}",
-    "TICKETS_IMAGE=${local.image_tickets_ref}",
-    "TICKETS_PG_PASSWORD=${random_password.tickets_pg.result}",
     "TRAVELPAYOUTS_TOKEN=${var.travelpayouts_token}",
     "S3_ENDPOINT=https://storage.yandexcloud.net",
     "S3_REGION=ru-central1",

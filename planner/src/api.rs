@@ -206,11 +206,19 @@ async fn health(State(app): State<Arc<AppState>>) -> Json<Value> {
         if let Some(store) = crate::lakestore::global() {
             out["tickets"] = store.health();
         }
+        out["process"] = process_memory();
         out
     })
     .await
     .unwrap_or_else(|e| json!({"status": "error", "error": e.to_string()}));
     Json(out)
+}
+
+/// Память процесса из /proc/self/status: текущая (VmRSS) и пиковая (VmHWM), МБ.
+fn process_memory() -> Value {
+    let text = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = |name: &str| text.lines().find(|l| l.starts_with(name)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok());
+    json!({"rss_mb": kb("VmRSS:").map(|k| k / 1024), "peak_mb": kb("VmHWM:").map(|k| k / 1024)})
 }
 
 // -------------------------------- airports -----------------------------------
@@ -353,7 +361,7 @@ async fn plan_estimate(State(app): State<Arc<AppState>>, Json(body): Json<Value>
 }
 
 /// Общий запуск сбора: проверки, дедуп по остановкам (collect_key), постановка в очередь.
-fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery) -> Value {
+fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery, fresh: bool) -> Value {
     let stops = parse_stops(&query.stops);
     if stops.len() < 2 {
         return json!({"status": "invalid", "message": "Нужно минимум две остановки."});
@@ -380,7 +388,8 @@ fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery) -> Value {
         });
     }
     let key = query.collect_key();
-    let existing = {
+    // fresh — новая джоба даже при готовой с тем же ключом (замеры, scripts/prod_bench.py)
+    let existing = if fresh { None } else {
         let conn = app.conn.lock().unwrap();
         hot::find_job_by_key(&conn, &key, PLAN_JOB_TTL_SECONDS).unwrap_or(None)
     };
@@ -412,7 +421,7 @@ fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery) -> Value {
 
 async fn plan_run(State(app): State<Arc<AppState>>, Json(body): Json<Value>) -> Json<Value> {
     let out = tokio::task::spawn_blocking(move || match PlanQuery::from_value(&body) {
-        Ok(q) => start_plan_job(&app, q),
+        Ok(q) => start_plan_job(&app, q, body.get("fresh").and_then(|v| v.as_bool()).unwrap_or(false)),
         Err(e) => json!({"status": "invalid", "message": format!("Некорректный фильтр: {e}")}),
     })
     .await

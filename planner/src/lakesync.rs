@@ -299,6 +299,7 @@ pub struct SyncStats {
     pub applied: usize,
     pub failed: usize,
     pub rows: usize,
+    pub bytes: usize,
 }
 
 /// Из ключей — файлы, нужные складу: по каждому (город, день) не раньше cutoff — самый
@@ -341,12 +342,16 @@ pub fn apply_files(store: &LakeStore, lake: &dyn Lake, files: &[(String, FileMet
             s.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some((key, meta)) = files.get(i) else { break };
-                let res = lake.get(key).and_then(read_lake_parquet).and_then(|cols| store.apply(meta, &cols, cutoff));
+                let res = lake.get(key).and_then(|data| {
+                    let n = data.len();
+                    read_lake_parquet(data).and_then(|cols| store.apply(meta, &cols, cutoff)).map(|a| (a, n))
+                });
                 let mut st = stats.lock().unwrap();
                 match res {
-                    Ok(a) => {
+                    Ok((a, n)) => {
                         st.applied += 1;
                         st.rows += a.rows;
+                        st.bytes += n;
                     }
                     Err(e) => {
                         st.failed += 1;
@@ -427,7 +432,11 @@ pub fn start(store: Arc<LakeStore>, lake: Arc<dyn Lake>, cfg: SyncConfig) {
             match store.load_snapshot(&cfg.snapshot_path, cutoff_day()) {
                 Ok(n) => {
                     println!("[lake] снапшот {}: {n} серий за {:.1} с", cfg.snapshot_path, t0.elapsed().as_secs_f64());
-                    store.status.lock().unwrap().loaded_from_snapshot = true;
+                    let mut st = store.status.lock().unwrap();
+                    st.loaded_from_snapshot = true;
+                    st.snapshot_load_seconds = Some(t0.elapsed().as_secs_f64());
+                    st.ready_seconds = Some(t0.elapsed().as_secs_f64());
+                    drop(st);
                     store.set_ready();
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("[lake] снапшота нет — полная загрузка из {}", lake.describe()),
@@ -445,14 +454,18 @@ pub fn start(store: Arc<LakeStore>, lake: Arc<dyn Lake>, cfg: SyncConfig) {
                             last_full = Some(Instant::now());
                         }
                         if full || s.applied > 0 || s.failed > 0 {
-                            println!("[lake] {}: ключей {}, нужно {}, применено {} ({} строк), ошибок {} — {:.1} с", if full { "полный проход" } else { "дельта" }, s.listed, s.needed, s.applied, s.rows, s.failed, t.elapsed().as_secs_f64());
+                            println!("[lake] {}: ключей {}, нужно {}, применено {} ({} строк, {} МБ), ошибок {} — {:.1} с", if full { "полный проход" } else { "дельта" }, s.listed, s.needed, s.applied, s.rows, s.bytes >> 20, s.failed, t.elapsed().as_secs_f64());
                         }
                         let mut st = store.status.lock().unwrap();
+                        if full {
+                            st.last_full = Some(serde_json::json!({"listed": s.listed, "needed": s.needed, "applied": s.applied, "failed": s.failed, "rows": s.rows, "mb": s.bytes >> 20, "seconds": t.elapsed().as_secs_f64()}));
+                        }
                         st.last_sync_at = Some(Utc::now().to_rfc3339());
                         st.last_sync_seconds = Some(t.elapsed().as_secs_f64());
                         drop(st);
                         if full && !store.is_ready() {
                             println!("[lake] склад готов за {:.1} с", t0.elapsed().as_secs_f64());
+                            store.status.lock().unwrap().ready_seconds = Some(t0.elapsed().as_secs_f64());
                             store.set_ready();
                         }
                     }
@@ -469,7 +482,10 @@ pub fn start(store: Arc<LakeStore>, lake: Arc<dyn Lake>, cfg: SyncConfig) {
                     match store.save_snapshot(&cfg.snapshot_path) {
                         Ok(n) => {
                             println!("[lake] снапшот записан: {n} серий за {:.1} с", t.elapsed().as_secs_f64());
-                            store.status.lock().unwrap().snapshot_at = Some(Utc::now().to_rfc3339());
+                            let mut st = store.status.lock().unwrap();
+                            st.snapshot_at = Some(Utc::now().to_rfc3339());
+                            st.snapshot_write_seconds = Some(t.elapsed().as_secs_f64());
+                            st.snapshot_mb = std::fs::metadata(&cfg.snapshot_path).ok().map(|m| m.len() >> 20);
                         }
                         Err(e) => println!("[lake] снапшот не записан: {e}"),
                     }
