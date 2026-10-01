@@ -6,12 +6,14 @@ import { resolveAirport, type AirportOption } from '../data/airports'
 import { addDaysISO, daysBetweenISO, todayISO } from '../lib/dates'
 import { durFmt, plural } from '../lib/format'
 import { RangeSlider } from '../planner/components/RangeSlider'
-import { PriceChart } from '../dynamics/PriceChart'
+import { FORMATS, PriceChart, type ChartFormat, type ChartUnit } from '../dynamics/PriceChart'
+import { CalendarView, GridView, HeatmapView, ProfileView, SingleView, WeekView } from '../dynamics/Views'
 import {
   DEFAULT_FILTERS,
   PALETTE,
   clock,
   dayLabel,
+  dayRange,
   dayShift,
   fetchDynamics,
   flightPrices,
@@ -22,22 +24,45 @@ import {
   passes,
   snapLabel,
   snapTime,
+  toPct,
   type DynFilters,
   type DynResponse,
   type Series,
 } from '../dynamics/data'
 
-// Отдельная страница «Динамика цены»: два города, день(и) вылета и фильтры — как менялась
-// цена по снимкам озера (каждая повторная выборка коллектора — снимок). Два режима:
-// самая низкая цена под фильтры (линия на каждый день вылета) и конкретные рейсы.
-// Состояние — в URL (ссылку можно переслать), с планировщиком ничего не делит.
+// Отдельная страница «Динамика цены»: два города, дни вылета (до месяца) и фильтры — как
+// менялась цена по снимкам озера (каждая повторная выборка коллектора — снимок).
+// Что считаем: самая низкая цена под фильтры (линия на день вылета) или конкретные рейсы.
+// Вид: один график, рядом, неделя, календарь, тепловая карта, по дням вылета, один день
+// или все сразу; формат графика и шкала (₽ / %) — отдельно. Состояние — в URL.
 
-const MAX_DAYS = 7
+const MAX_DAYS = 31
 const MAX_PICK = 8
 const HISTORY = [14, 30, 60, 90, 180]
+const SPANS: [number, string][] = [
+  [1, '1 день'],
+  [7, 'неделя'],
+  [14, '2 недели'],
+  [31, 'месяц'],
+]
 const placeholder = (code: string): AirportOption => ({ code, city: code, label: code })
 
 type Mode = 'min' | 'flight'
+type View = 'overlay' | 'grid' | 'week' | 'calendar' | 'heatmap' | 'profile' | 'single' | 'all'
+
+const VIEWS: [View, string, string][] = [
+  ['overlay', 'Один график', 'все дни вылета на одном графике'],
+  ['grid', 'Рядом', 'график на каждый день, одна шкала'],
+  ['week', 'Неделя', 'дни одной недели и их график'],
+  ['calendar', 'Календарь', 'месяц: в клетке цена и её линия'],
+  ['heatmap', 'Тепловая карта', 'день вылета × день наблюдения'],
+  ['profile', 'По дням вылета', 'как сдвигался весь профиль цен'],
+  ['single', 'Один день', 'крупно один день вылета'],
+  ['all', 'Все сразу', 'все виды друг под другом'],
+]
+const FLIGHT_VIEWS: View[] = ['overlay', 'grid']
+const isView = (v: string | null): v is View => VIEWS.some(([k]) => k === v)
+const isFormat = (v: string | null): v is ChartFormat => FORMATS.some(([k]) => k === v)
 
 function filtersFromUrl(sp: URLSearchParams): DynFilters {
   const range = (k: string): [number, number] => {
@@ -72,6 +97,10 @@ export function DynamicsPage() {
   const [to, setTo] = useState(sp.get('to') ?? '')
   const [history, setHistory] = useState(Number(sp.get('h')) || 60)
   const [mode, setMode] = useState<Mode>(sp.get('m') === 'flight' ? 'flight' : 'min')
+  const [view, setView] = useState<View>(() => (isView(sp.get('v')) ? (sp.get('v') as View) : 'overlay'))
+  const [format, setFormat] = useState<ChartFormat>(() => (isFormat(sp.get('fmt')) ? (sp.get('fmt') as ChartFormat) : 'line'))
+  const [unit, setUnit] = useState<ChartUnit>(sp.get('u') === 'pct' ? 'pct' : 'rub')
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [filters, setFilters] = useState<DynFilters>(() => filtersFromUrl(sp))
   const [data, setData] = useState<DynResponse | null>(null)
   const [busy, setBusy] = useState(false)
@@ -96,9 +125,12 @@ export function DynamicsPage() {
     if (to && to !== from) p.set('to', to)
     p.set('h', String(history))
     if (mode === 'flight') p.set('m', 'flight')
+    if (view !== 'overlay') p.set('v', view)
+    if (format !== 'line') p.set('fmt', format)
+    if (unit === 'pct') p.set('u', 'pct')
     filtersToUrl(filters, p)
     setSp(p, { replace: true })
-  }, [origin.code, dest.code, from, to, history, mode, filters, setSp])
+  }, [origin.code, dest.code, from, to, history, mode, view, format, unit, filters, setSp])
 
   const toEff = to || from
   const span = from ? daysBetweenISO(from, toEff) + 1 : 0
@@ -114,8 +146,15 @@ export function DynamicsPage() {
     if (formError || busy) return
     setBusy(true)
     setError(null)
+    setProgress(null)
     try {
-      const res = await fetchDynamics({ origin: origin.code, destination: dest.code, from, to: toEff, history })
+      // бэк считает в фоне: опрашиваем теми же параметрами, пока не придёт результат
+      let res = await fetchDynamics({ origin: origin.code, destination: dest.code, from, to: toEff, history })
+      while (res.pending) {
+        setProgress({ done: res.done ?? 0, total: res.total ?? 0 })
+        await new Promise((r) => setTimeout(r, 700))
+        res = await fetchDynamics({ origin: origin.code, destination: dest.code, from, to: toEff, history })
+      }
       if (res.error) {
         setError(res.error)
         setData(null)
@@ -128,6 +167,7 @@ export function DynamicsPage() {
       setError('Не удалось связаться с сервером.')
     } finally {
       setBusy(false)
+      setProgress(null)
     }
   }
 
@@ -164,7 +204,7 @@ export function DynamicsPage() {
           </button>
           <AirportCombobox label="Куда" value={dest} onChange={setDest} />
           <div className="field">
-            <label>Дата вылета (можно до {MAX_DAYS} дней подряд)</label>
+            <label>Даты вылета (до {MAX_DAYS} дней подряд)</label>
             <DateRangePicker
               label="Вылет"
               from={from}
@@ -175,6 +215,18 @@ export function DynamicsPage() {
                 setTo(t)
               }}
             />
+            <div className="dyn-spans">
+              {SPANS.map(([n, l]) => (
+                <button
+                  key={n}
+                  type="button"
+                  className={span === n ? 'active' : ''}
+                  onClick={() => from && setTo(n === 1 ? '' : addDaysISO(from, n - 1))}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="field">
             <label>Глубина истории</label>
@@ -191,7 +243,17 @@ export function DynamicsPage() {
           </button>
         </div>
         {formError && <div className="dyn-hint">{formError}</div>}
-        {busy && <div className="dyn-hint">Читаем все снимки направления из озера — обычно несколько секунд.</div>}
+        {busy && (
+          <div className="dyn-hint">
+            Читаем снимки направления из озера
+            {progress && progress.total > 0 ? `: ${progress.done} из ${progress.total} файлов` : '…'}
+            {progress && progress.total > 0 && (
+              <div className="progressbar progressbar-small dyn-progress">
+                <div className="progressbar-fill" style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }} />
+              </div>
+            )}
+          </div>
+        )}
         {error && (
           <div className="backend-note">
             <div className="bn-title">Не получилось</div>
@@ -205,6 +267,12 @@ export function DynamicsPage() {
           data={data}
           mode={mode}
           setMode={setMode}
+          view={view}
+          setView={setView}
+          format={format}
+          setFormat={setFormat}
+          unit={unit}
+          setUnit={setUnit}
           filters={filters}
           setF={setF}
           resetFilters={() => setFilters(DEFAULT_FILTERS)}
@@ -222,6 +290,12 @@ function Result({
   data,
   mode,
   setMode,
+  view,
+  setView,
+  format,
+  setFormat,
+  unit,
+  setUnit,
   filters,
   setF,
   resetFilters,
@@ -233,6 +307,12 @@ function Result({
   data: DynResponse
   mode: Mode
   setMode: (m: Mode) => void
+  view: View
+  setView: (v: View) => void
+  format: ChartFormat
+  setFormat: (f: ChartFormat) => void
+  unit: ChartUnit
+  setUnit: (u: ChartUnit) => void
   filters: DynFilters
   setF: (p: Partial<DynFilters>) => void
   resetFilters: () => void
@@ -241,11 +321,8 @@ function Result({
   showAll: boolean
   setShowAll: (v: boolean) => void
 }) {
-  const days = useMemo(() => {
-    const out: string[] = []
-    for (let d = data.from; d <= data.to; d = addDaysISO(d, 1)) out.push(d)
-    return out
-  }, [data])
+  const days = useMemo(() => dayRange(data.from, data.to), [data])
+  const [focusDay, setFocusDay] = useState<string | null>(null)
   const prices = useMemo(() => flightPrices(data, filters.baggage), [data, filters.baggage])
   const ok = useMemo(() => data.flights.map((f) => passes(f, filters)), [data, filters])
   const airlines = useMemo(() => {
@@ -275,13 +352,15 @@ function Result({
     [data, prices],
   )
 
+  // список рейсов можно сузить до одного дня вылета
+  const [listDay, setListDay] = useState('')
   const list = useMemo(
     () =>
       data.flights
         .map((_, fi) => fi)
-        .filter((fi) => ok[fi] && flightStats[fi])
+        .filter((fi) => ok[fi] && flightStats[fi] && (!listDay || data.flights[fi].day === listDay))
         .sort((a, b) => Number(flightStats[b]!.live) - Number(flightStats[a]!.live) || flightStats[a]!.last - flightStats[b]!.last),
-    [data, ok, flightStats],
+    [data, ok, flightStats, listDay],
   )
 
   // В режиме рейсов без выбора — самый дешёвый из продающихся.
@@ -291,13 +370,15 @@ function Result({
     return m
   }, [picked, ok, flightStats, list])
 
+  const daySeries: Series[] = useMemo(() => minSeries(data, ok, prices, days), [data, ok, prices, days])
   const series: Series[] = useMemo(
     () =>
       mode === 'min'
-        ? minSeries(data, ok, prices, days)
+        ? daySeries
         : flightSeries(data, [...effectivePicked.keys()], prices, (fi) => PALETTE[effectivePicked.get(fi)! % PALETTE.length]),
-    [mode, data, ok, prices, days, effectivePicked],
+    [mode, data, daySeries, prices, effectivePicked],
   )
+  const effView: View = mode === 'flight' && !FLIGHT_VIEWS.includes(view) ? 'overlay' : view
 
   function toggle(fi: number) {
     const m = new Map(effectivePicked)
@@ -422,32 +503,96 @@ function Result({
             </div>
           </div>
 
-          <div className="segbtns big dyn-modes">
-            <button className={mode === 'min' ? 'active' : ''} onClick={() => setMode('min')}>
-              Самая низкая цена
-            </button>
-            <button className={mode === 'flight' ? 'active' : ''} onClick={() => setMode('flight')}>
-              Конкретный рейс
-            </button>
+          <div className="dyn-viewbar">
+            <div className="dyn-vb-group">
+              <span className="dyn-vb-l">Что считаем</span>
+              <div className="segbtns">
+                <button className={mode === 'min' ? 'active' : ''} onClick={() => setMode('min')}>
+                  Самая низкая цена
+                </button>
+                <button className={mode === 'flight' ? 'active' : ''} onClick={() => setMode('flight')}>
+                  Конкретный рейс
+                </button>
+              </div>
+            </div>
+            <div className="dyn-vb-group">
+              <span className="dyn-vb-l">Шкала</span>
+              <div className="segbtns">
+                <button className={unit === 'rub' ? 'active' : ''} onClick={() => setUnit('rub')}>₽</button>
+                <button className={unit === 'pct' ? 'active' : ''} onClick={() => setUnit('pct')} title="В процентах от первой цены каждой линии">
+                  % от первой
+                </button>
+              </div>
+            </div>
+            <div className="dyn-vb-group wide">
+              <span className="dyn-vb-l">Вид</span>
+              <div className="dyn-views">
+                {VIEWS.map(([k, l, hint]) => {
+                  const off = mode === 'flight' && !FLIGHT_VIEWS.includes(k)
+                  return (
+                    <button key={k} className={`${effView === k ? 'active' : ''} ${off ? 'off' : ''}`} disabled={off} title={off ? 'Только для «самой низкой цены»' : hint} onClick={() => setView(k)}>
+                      {l}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+            <div className="dyn-vb-group wide">
+              <span className="dyn-vb-l">Формат графика</span>
+              <div className="dyn-views">
+                {FORMATS.map(([k, l]) => (
+                  <button key={k} className={format === k ? 'active' : ''} onClick={() => setFormat(k)} title={k === 'band' ? 'От самой низкой цены до медианы подходящих рейсов' : undefined}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
 
           <Stats series={series} />
 
-          <PriceChart
-            series={series}
-            emptyText={mode === 'flight' ? 'Выберите рейс в списке ниже.' : 'Под фильтры нет ни одного билета — ослабьте фильтры.'}
-          />
+          {mode === 'flight' ? (
+            effView === 'grid' ? (
+              <GridView series={series} format={format} unit={unit} />
+            ) : (
+              <PriceChart series={unit === 'pct' ? toPct(series) : series} format={format} unit={unit} emptyText="Выберите рейс в списке ниже." />
+            )
+          ) : (
+            <MinViews
+              view={effView}
+              series={daySeries}
+              snapshots={data.snapshots}
+              format={format}
+              unit={unit}
+              focusDay={focusDay}
+              setFocusDay={setFocusDay}
+            />
+          )}
           <div className="dyn-note">
             Точка — снимок: когда коллектор смотрел цены. Разрыв линии — в этом снимке подходящих билетов не было (распроданы
             или не продавались). {filters.baggage ? 'Цена — тарифы с багажом.' : 'Цена — самый дешёвый тариф (багаж любой).'}
+            {format === 'band' && mode === 'min' && ' Коридор — от самой низкой цены до медианы подходящих рейсов в снимке.'}
+            {format === 'step' && ' Ступеньки: цена держится до следующего снимка.'}
           </div>
 
           {mode === 'min' ? (
-            <MinTable data={data} series={series} />
+            (effView === 'overlay' || effView === 'single' || effView === 'all') && <MinTable data={data} series={series} />
           ) : (
             <div className="dyn-flights">
-              <div className="count">
-                Рейсы под фильтры: <b>{list.length}</b> · отметьте до {MAX_PICK}, чтобы сравнить на графике
+              <div className="count dyn-flights-h">
+                <span>
+                  Рейсы под фильтры: <b>{list.length}</b> · отметьте до {MAX_PICK}, чтобы сравнить на графике
+                </span>
+                {days.length > 1 && (
+                  <select value={listDay} onChange={(e) => setListDay(e.target.value)}>
+                    <option value="">все дни вылета</option>
+                    {days.map((d) => (
+                      <option key={d} value={d}>
+                        {dayLabel(d)}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
               {visible.map((fi) => {
                 const f = data.flights[fi]
@@ -505,44 +650,116 @@ function Result({
   )
 }
 
+// Виды «самой низкой цены» по дням вылета.
+function MinViews({
+  view,
+  series,
+  snapshots,
+  format,
+  unit,
+  focusDay,
+  setFocusDay,
+}: {
+  view: View
+  series: Series[]
+  snapshots: DynResponse['snapshots']
+  format: ChartFormat
+  unit: ChartUnit
+  focusDay: string | null
+  setFocusDay: (d: string) => void
+}) {
+  const one = (v: View) => {
+    switch (v) {
+      case 'overlay':
+        return <PriceChart series={unit === 'pct' ? toPct(series) : series} format={format} unit={unit} emptyText="Под фильтры нет ни одного билета — ослабьте фильтры." />
+      case 'grid':
+        return <GridView series={series} format={format} unit={unit} onPick={setFocusDay} />
+      case 'week':
+        return <WeekView series={series} format={format} unit={unit} />
+      case 'calendar':
+        return (
+          <>
+            <CalendarView series={series} onPick={setFocusDay} picked={focusDay} />
+            {focusDay && <SingleView series={series} format={format} unit={unit} day={focusDay} setDay={setFocusDay} />}
+          </>
+        )
+      case 'heatmap':
+        return <HeatmapView series={series} snapshots={snapshots} />
+      case 'profile':
+        return <ProfileView series={series} snapshots={snapshots} format={format} unit={unit} />
+      case 'single':
+        return <SingleView series={series} format={format} unit={unit} day={focusDay} setDay={setFocusDay} />
+      default:
+        return null
+    }
+  }
+  if (view !== 'all') return one(view)
+  return (
+    <div className="dyn-all">
+      {VIEWS.filter(([k]) => k !== 'all').map(([k, l, hint]) => (
+        <section key={k} className="dyn-all-sec">
+          <h3>
+            {l} <span>{hint}</span>
+          </h3>
+          {one(k)}
+        </section>
+      ))}
+    </div>
+  )
+}
+
 // Индекс последнего снимка, покрывшего день.
 function lastSnapFor(data: DynResponse, day: string, fallback: number): number {
   for (let i = data.snapshots.length - 1; i >= 0; i--) if (data.snapshots[i].days.includes(day)) return i
   return fallback
 }
 
-// Плитки: сейчас, минимум и максимум за историю, изменение с первого снимка.
+// Плитки: сейчас (дешевле всего среди линий по их последнему снимку), минимум и максимум
+// за историю, изменение с первого снимка (так же — по первым снимкам линий).
 function Stats({ series }: { series: Series[] }) {
   const pts = series.flatMap((s) => s.points.filter((p) => p.v !== null).map((p) => ({ ...p, s })))
   if (!pts.length) return null
-  const byT = [...pts].sort((a, b) => a.t - b.t)
-  const lastT = byT[byT.length - 1].t
-  const firstT = byT[0].t
-  const at = (t: number) => Math.min(...pts.filter((p) => p.t === t).map((p) => p.v!))
-  const now = at(lastT)
-  const first = at(firstT)
+  const ends = series
+    .map((s) => {
+      const vals = s.points.filter((p) => p.v !== null)
+      const last = s.points[s.points.length - 1]
+      return { s, last: last && last.v !== null ? last : null, first: vals[0] ?? null }
+    })
+  const lastOk = ends.filter((e) => e.last)
+  const nowE = lastOk.length ? lastOk.reduce((a, b) => (b.last!.v! < a.last!.v! ? b : a)) : null
+  const firstOk = ends.filter((e) => e.first)
+  const firstE = firstOk.reduce((a, b) => (b.first!.v! < a.first!.v! ? b : a))
   const lo = pts.reduce((a, b) => (b.v! < a.v! ? b : a))
   const hi = pts.reduce((a, b) => (b.v! > a.v! ? b : a))
-  const diff = now - first
+  const many = series.length > 1
+  const now = nowE ? nowE.last!.v! : null
+  const first = firstE.first!.v!
+  const diff = now !== null ? now - first : null
   return (
     <div className="stats dyn-stats">
       <div className="stat">
-        <div className="n">{money(now)}</div>
-        <div className="l">последний снимок, {snapLabel(lastT)}</div>
+        <div className="n">{now !== null ? money(now) : '—'}</div>
+        <div className="l">
+          {many ? 'дешевле всего сейчас' : 'последний снимок'}
+          {nowE && <>, {many ? nowE.s.label : snapLabel(nowE.last!.t)}</>}
+        </div>
       </div>
       <div className="stat">
         <div className="n dyn-good">{money(lo.v!)}</div>
-        <div className="l">минимум — {snapLabel(lo.t)}{series.length > 1 ? `, ${lo.s.label}` : ''}</div>
+        <div className="l">минимум — {snapLabel(lo.t)}{many ? `, ${lo.s.label}` : ''}</div>
       </div>
       <div className="stat">
         <div className="n">{money(hi.v!)}</div>
-        <div className="l">максимум — {snapLabel(hi.t)}{series.length > 1 ? `, ${hi.s.label}` : ''}</div>
+        <div className="l">максимум — {snapLabel(hi.t)}{many ? `, ${hi.s.label}` : ''}</div>
       </div>
       <div className="stat">
-        <div className={`n ${diff > 0 ? 'dyn-bad' : diff < 0 ? 'dyn-good' : ''}`}>
-          {diff === 0 ? '0 ₽' : `${diff > 0 ? '+' : '−'}${money(Math.abs(diff))}`}
+        <div className={`n ${diff && diff > 0 ? 'dyn-bad' : diff && diff < 0 ? 'dyn-good' : ''}`}>
+          {diff === null ? '—' : diff === 0 ? '0 ₽' : `${diff > 0 ? '+' : '−'}${money(Math.abs(diff))}`}
         </div>
-        <div className="l">с первого снимка ({snapLabel(firstT, false)}){first ? `, ${diff > 0 ? '+' : ''}${Math.round((diff / first) * 100)}%` : ''}</div>
+        <div className="l">
+          {many ? 'дешевле всего сейчас vs в первых снимках' : `с первого снимка (${snapLabel(firstE.first!.t, false)})`}
+          {diff !== null && first ? `, ${diff > 0 ? '+' : ''}${Math.round((diff / first) * 100)}%` : ''}
+        </div>
       </div>
     </div>
   )

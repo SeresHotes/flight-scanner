@@ -6,33 +6,55 @@
 //! (момент загрузки из имени), рейс = маршрут (цепочка аэропортов, вылет, номера рейсов).
 //!
 //! Склад в памяти (`lakestore`) держит только последний снимок дня, поэтому история
-//! читается из озера напрямую (только список и GET) и ни на что больше не влияет.
+//! читается из озера напрямую и ни на что больше не влияет. Из файла читаются только
+//! нужные колонки и row group'ы (в файле окна row group на день): футер — запросом хвоста,
+//! колонки — Range-запросами (ссылка и пересадки — самые тяжёлые колонки — не качаются).
+//! Файлы неизменяемы, поэтому выжимка файла под направление кэшируется.
+//!
+//! Запрос идёт в фоне: ручка сразу отвечает `{pending, done, total}`, фронт опрашивает её
+//! теми же параметрами, пока не придёт результат (кэш ответа — 10 минут).
 //! Фильтры (время вылета/прилёта, пересадки, багаж, авиакомпании) — на фронте: ответ
 //! компактный (рейсы + тройки «рейс × снимок → цена»).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use chrono::{NaiveDate, Utc};
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::ProjectionMask;
+use parquet::errors::ParquetError;
+use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
+use parquet::file::reader::{ChunkReader, Length};
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::lakestore::{parse_file_key, read_lake_parquet, FileMeta, LakeCols};
 use crate::lakesync::{lake_from_env, Lake};
-use crate::segments::{booking_url, city_info};
+use crate::segments::{booking_link, city_info};
 
-/// Сколько дней вылета подряд можно смотреть разом.
-pub const MAX_DAYS: i64 = 7;
+/// Сколько дней вылета подряд можно смотреть разом (календарь на месяц).
+pub const MAX_DAYS: i64 = 31;
 /// Глубина истории по дню загрузки, дней.
 pub const DEFAULT_HISTORY_DAYS: i64 = 60;
 pub const MAX_HISTORY_DAYS: i64 = 180;
 /// Потолок файлов на запрос (страховка от слишком широкого окна).
-pub const MAX_FILES: usize = 800;
-const WORKERS: usize = 16;
+pub const MAX_FILES: usize = 6000;
+const WORKERS: usize = 24;
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
-const CACHE_SIZE: usize = 16;
+const CACHE_SIZE: usize = 12;
+/// Выжимки файлов в кэше: суммарно строк (≈ 250 Б на строку).
+const FILE_CACHE_ROWS: usize = 600_000;
+/// Хвост файла за один запрос: футер с метаданными обычно меньше.
+const TAIL_BYTES: u64 = 64 * 1024;
+/// Соседние диапазоны колонок с зазором меньше этого качаются одним запросом.
+const RANGE_GAP: u64 = 16 * 1024;
+/// Колонки схемы озера, нужные динамике (ссылка, пересадки, служебные — нет).
+const COLUMNS: [&str; 16] = [
+    "search_date", "origin", "destination", "origin_airport", "destination_airport", "departure_at", "arrival_at", "duration", "transfers", "airline", "flight_number", "price", "chain_json", "legs_json", "baggage_known", "baggage_included",
+];
 
 fn lake() -> Option<Arc<dyn Lake>> {
     static LAKE: OnceLock<Option<Arc<dyn Lake>>> = OnceLock::new();
@@ -70,11 +92,11 @@ pub struct Flight {
     pub flights: Vec<String>,
     /// Аэропорты по цепочке: вылет, пересадки, прилёт.
     pub chain: Vec<String>,
-    /// Коды пересадок (как у билета).
+    /// Аэропорты пересадок (середина цепочки).
     pub via: Vec<String>,
     pub origin_airport: Option<String>,
     pub destination_airport: Option<String>,
-    /// Ссылка на самый свежий билет рейса.
+    /// Поиск на Aviasales на день вылета.
     pub link: Option<String>,
 }
 
@@ -85,12 +107,12 @@ pub struct Snapshot {
     pub days: Vec<String>,
 }
 
-/// Что дал один файл: снимок и билеты под направление.
-struct FileRows {
+/// Что дал один файл под направление (все дни файла — фильтр дней при сборке ответа).
+pub struct FileRows {
     observed: i64,
     days: Vec<NaiveDate>,
-    /// (ключ рейса, рейс, цена, багаж: 1 включён, 0 нет, -1 неизвестно).
-    rows: Vec<(String, Flight, f64, i8)>,
+    /// (день вылета, ключ рейса, рейс, цена, багаж: 1 включён, 0 нет, -1 неизвестно).
+    rows: Vec<(NaiveDate, String, Arc<Flight>, f64, i8)>,
 }
 
 fn up(s: Option<&str>) -> String {
@@ -106,20 +128,17 @@ fn leg_label(carrier: Option<&str>, number: Option<&str>) -> String {
     if c.is_empty() || n.starts_with(c) { n.to_string() } else { format!("{c} {n}") }
 }
 
-/// Строки файла под направление и дни [from, to].
-fn rows_of(q: &DynamicsQuery, meta: &FileMeta, cols: &LakeCols) -> FileRows {
+/// Строки файла под направление (дни — все, что есть в файле).
+fn rows_of(origin: &str, origin_city: &str, destination: &str, meta: &FileMeta, cols: &LakeCols) -> FileRows {
     let mut rows = Vec::new();
-    let origin_is_city = q.origin == q.origin_city;
+    let origin_is_city = origin == origin_city;
     for r in 0..cols.n {
         let Some(day) = cols.dep_day(r) else { continue };
-        if day < q.from || day > q.to {
-            continue;
-        }
         let t = cols.ticket(r);
         let (Some(price), Some(dep)) = (t.price, t.departure_at.clone().filter(|s| !s.is_empty())) else { continue };
-        let dest_ok = up(t.destination.as_deref()) == q.destination || up(t.destination_airport.as_deref()) == q.destination;
-        let origin_ok = (origin_is_city && up(t.origin.as_deref()) == q.origin) || up(t.origin_airport.as_deref()) == q.origin;
-        if !dest_ok || !origin_ok || t.hidden_city.is_some() {
+        let dest_ok = up(t.destination.as_deref()) == destination || up(t.destination_airport.as_deref()) == destination;
+        let origin_ok = (origin_is_city && up(t.origin.as_deref()) == origin) || up(t.origin_airport.as_deref()) == origin;
+        if !dest_ok || !origin_ok {
             continue;
         }
         let flights: Vec<String> = if t.legs.is_empty() {
@@ -132,12 +151,10 @@ fn rows_of(q: &DynamicsQuery, meta: &FileMeta, cols: &LakeCols) -> FileRows {
         } else {
             t.chain.clone()
         };
-        let via: Vec<String> = t.transfer_points.as_deref().unwrap_or(&[]).iter().filter_map(|p| p.code.clone()).collect();
+        let via: Vec<String> = if chain.len() > 2 { chain[1..chain.len() - 1].to_vec() } else { Vec::new() };
         let key = format!("{}|{}|{}", chain.join(">"), dep, flights.join(","));
-        let bag = match &t.baggage {
-            Some(b) if b.known => i8::from(b.included),
-            _ => -1,
-        };
+        let bag = if cols.known[r] { i8::from(cols.included[r]) } else { -1 };
+        let link = Some(booking_link(t.origin.as_deref().unwrap_or(origin_city), t.destination.as_deref().unwrap_or(destination), &dep));
         let flight = Flight {
             day: day.to_string(),
             departure_at: dep,
@@ -150,13 +167,170 @@ fn rows_of(q: &DynamicsQuery, meta: &FileMeta, cols: &LakeCols) -> FileRows {
             via,
             origin_airport: t.origin_airport.clone(),
             destination_airport: t.destination_airport.clone(),
-            link: booking_url(t.link.as_deref()),
+            link,
         };
-        rows.push((key, flight, price, bag));
+        rows.push((day, key, Arc::new(flight), price, bag));
     }
-    let days = meta.days().into_iter().filter(|d| *d >= q.from && *d <= q.to).collect();
-    FileRows { observed: meta.observed.timestamp(), days, rows }
+    FileRows { observed: meta.observed.timestamp(), days: meta.days(), rows }
 }
+
+// ---------------------------------------------------------------- чтение по частям
+
+/// Файл, от которого скачаны только некоторые диапазоны байт.
+struct Sparse {
+    len: u64,
+    parts: Vec<(u64, Bytes)>,
+}
+
+impl Sparse {
+    /// Добавляет диапазон и склеивает соседние/перекрывающиеся.
+    fn add(&mut self, start: u64, data: Bytes) {
+        self.parts.push((start, data));
+        self.parts.sort_by_key(|p| p.0);
+        let mut out: Vec<(u64, Bytes)> = Vec::new();
+        for (s, b) in self.parts.drain(..) {
+            if let Some((ls, lb)) = out.last_mut() {
+                let lend = *ls + lb.len() as u64;
+                if s <= lend {
+                    let end = s + b.len() as u64;
+                    if end > lend {
+                        let mut v = Vec::with_capacity((end - *ls) as usize);
+                        v.extend_from_slice(lb);
+                        v.extend_from_slice(&b[(lend - s) as usize..]);
+                        *lb = Bytes::from(v);
+                    }
+                    continue;
+                }
+            }
+            out.push((s, b));
+        }
+        self.parts = out;
+    }
+
+    fn covers(&self, start: u64, len: u64) -> bool {
+        self.parts.iter().any(|(s, b)| *s <= start && start + len <= s + b.len() as u64)
+    }
+}
+
+impl Length for Sparse {
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+impl ChunkReader for Sparse {
+    type T = std::io::Cursor<Bytes>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let (s, b) = self.parts.iter().find(|(s, b)| *s <= start && start < s + b.len() as u64).ok_or_else(|| ParquetError::General(format!("байты {start} не скачаны")))?;
+        Ok(std::io::Cursor::new(b.slice((start - s) as usize..)))
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        let (s, b) = self.parts.iter().find(|(s, b)| *s <= start && start + length as u64 <= s + b.len() as u64).ok_or_else(|| ParquetError::General(format!("байты {start}+{length} не скачаны")))?;
+        let off = (start - s) as usize;
+        Ok(b.slice(off..off + length))
+    }
+}
+
+/// Можно ли пропустить row group по статистике дня вылета.
+fn row_group_outside(meta: &ParquetMetaData, rg: usize, day_col: Option<usize>, from: NaiveDate, to: NaiveDate) -> bool {
+    let Some(c) = day_col else { return false };
+    let Some(st) = meta.row_group(rg).column(c).statistics() else { return false };
+    let day = |b: Option<&[u8]>| b.and_then(|b| std::str::from_utf8(b).ok()).and_then(|s| NaiveDate::parse_from_str(s.get(..10)?, "%Y-%m-%d").ok());
+    match (day(st.min_bytes_opt()), day(st.max_bytes_opt())) {
+        (Some(lo), Some(hi)) => hi < from || lo > to,
+        _ => false,
+    }
+}
+
+/// Нужные колонки нужных row group'ов файла: хвост → метаданные → Range по колонкам.
+/// Любая неожиданность — файл целиком (`read_lake_parquet`).
+pub fn read_projected(lake: &dyn Lake, key: &str, from: NaiveDate, to: NaiveDate) -> Result<LakeCols, String> {
+    let (tail, len) = lake.get_tail(key, TAIL_BYTES)?;
+    if tail.len() as u64 >= len {
+        return read_lake_parquet(tail);
+    }
+    let mut sp = Sparse { len, parts: vec![(len - tail.len() as u64, tail)] };
+    let meta = match ParquetMetaDataReader::new().parse_and_finish(&sp) {
+        Ok(m) => m,
+        Err(_) => return lake.get(key).and_then(read_lake_parquet),
+    };
+    let schema = meta.file_metadata().schema_descr();
+    let leaves: Vec<usize> = (0..schema.num_columns()).filter(|&i| COLUMNS.contains(&schema.column(i).name())).collect();
+    let day_col = (0..schema.num_columns()).find(|&i| schema.column(i).name() == "search_date");
+    let groups: Vec<usize> = (0..meta.num_row_groups()).filter(|&rg| !row_group_outside(&meta, rg, day_col, from, to)).collect();
+    if groups.is_empty() {
+        return Ok(LakeCols::empty());
+    }
+    let mut ranges: Vec<(u64, u64)> = groups.iter().flat_map(|&rg| leaves.iter().map(move |&c| (rg, c))).map(|(rg, c)| meta.row_group(rg).column(c).byte_range()).collect();
+    ranges.sort();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (s, l) in ranges {
+        match merged.last_mut() {
+            Some((ms, ml)) if s <= *ms + *ml + RANGE_GAP => *ml = (*ml).max(s + l - *ms),
+            _ => merged.push((s, l)),
+        }
+    }
+    for (s, l) in merged {
+        if !sp.covers(s, l) {
+            let data = lake.get_range(key, s, l)?;
+            sp.add(s, data);
+        }
+    }
+    let arrow_meta = ArrowReaderMetadata::try_new(Arc::new(meta), ArrowReaderOptions::default()).map_err(|e| format!("parquet: {e}"))?;
+    let mask = ProjectionMask::leaves(arrow_meta.metadata().file_metadata().schema_descr(), leaves);
+    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(sp, arrow_meta).with_projection(mask).with_row_groups(groups).with_batch_size(8192).build().map_err(|e| format!("parquet: {e}"))?;
+    let mut out: Option<LakeCols> = None;
+    for batch in reader {
+        let cols = LakeCols::from_batch(&batch.map_err(|e| format!("parquet: {e}"))?)?;
+        match &mut out {
+            Some(o) => o.append(cols),
+            None => out = Some(cols),
+        }
+    }
+    Ok(out.unwrap_or_else(LakeCols::empty))
+}
+
+// ---------------------------------------------------------------- кэш выжимок файлов
+
+#[derive(Default)]
+struct FileCache {
+    map: HashMap<String, Arc<FileRows>>,
+    order: VecDeque<String>,
+    rows: usize,
+}
+
+fn file_cache() -> &'static Mutex<FileCache> {
+    static C: OnceLock<Mutex<FileCache>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(FileCache::default()))
+}
+
+fn file_cache_key(q: &DynamicsQuery, key: &str) -> String {
+    format!("{}|{}|{}|{}|{}", q.origin, q.destination, q.from, q.to, key)
+}
+
+fn cache_get(k: &str) -> Option<Arc<FileRows>> {
+    file_cache().lock().unwrap().map.get(k).cloned()
+}
+
+fn cache_put(k: String, v: Arc<FileRows>) {
+    let mut c = file_cache().lock().unwrap();
+    if c.map.contains_key(&k) {
+        return;
+    }
+    c.rows += v.rows.len() + 1;
+    c.map.insert(k.clone(), v);
+    c.order.push_back(k);
+    while c.rows > FILE_CACHE_ROWS {
+        let Some(old) = c.order.pop_front() else { break };
+        if let Some(v) = c.map.remove(&old) {
+            c.rows -= v.rows.len() + 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- сбор ответа
 
 /// Файлы озера под запрос: X→ANY и X→Y без параметров, окно задевает [from, to].
 pub fn pick_files(q: &DynamicsQuery, keys: &[String]) -> Vec<(String, FileMeta)> {
@@ -205,16 +379,18 @@ fn list_keys(lake: &dyn Lake, q: &DynamicsQuery) -> Result<Vec<String>, String> 
     }
 }
 
-/// Собирает ответ из строк файлов (снимки по времени, рейсы по вылету).
-fn assemble(q: &DynamicsQuery, files: Vec<FileRows>, failed: usize) -> Value {
+/// Собирает ответ из выжимок файлов (снимки по времени, рейсы по вылету).
+fn assemble(q: &DynamicsQuery, files: &[Arc<FileRows>], failed: usize) -> Value {
+    let in_range = |d: &NaiveDate| *d >= q.from && *d <= q.to;
     // снимки: один на момент загрузки (два файла одной секунды склеиваются)
     let mut snap_days: BTreeMap<i64, Vec<NaiveDate>> = BTreeMap::new();
-    for f in &files {
+    for f in files {
         let e = snap_days.entry(f.observed).or_default();
-        e.extend(f.days.iter().copied());
+        e.extend(f.days.iter().copied().filter(in_range));
         e.sort();
         e.dedup();
     }
+    snap_days.retain(|_, d| !d.is_empty());
     let snap_ix: HashMap<i64, usize> = snap_days.keys().enumerate().map(|(i, t)| (*t, i)).collect();
     let snapshots: Vec<Snapshot> = snap_days
         .iter()
@@ -224,29 +400,26 @@ fn assemble(q: &DynamicsQuery, files: Vec<FileRows>, failed: usize) -> Value {
         })
         .collect();
     // рейсы: описание — из самого свежего снимка, цена — минимум на (рейс, снимок, багаж)
-    let mut flights: HashMap<String, (i64, Flight)> = HashMap::new();
-    let mut prices: HashMap<(String, usize, i8), f64> = HashMap::new();
+    let mut flights: HashMap<&str, (i64, &Arc<Flight>)> = HashMap::new();
+    let mut prices: HashMap<(&str, usize, i8), f64> = HashMap::new();
     for f in files {
-        let si = snap_ix[&f.observed];
-        for (key, flight, price, bag) in f.rows {
-            let p = prices.entry((key.clone(), si, bag)).or_insert(f64::INFINITY);
-            *p = p.min(price);
-            match flights.get_mut(&key) {
-                Some((t, cur)) if *t <= f.observed => {
-                    *t = f.observed;
-                    *cur = flight;
-                }
-                Some(_) => {}
-                None => {
-                    flights.insert(key, (f.observed, flight));
-                }
+        let Some(&si) = snap_ix.get(&f.observed) else { continue };
+        for (day, key, flight, price, bag) in &f.rows {
+            if !in_range(day) {
+                continue;
+            }
+            let p = prices.entry((key.as_str(), si, *bag)).or_insert(f64::INFINITY);
+            *p = p.min(*price);
+            let e = flights.entry(key.as_str()).or_insert((f.observed, flight));
+            if e.0 <= f.observed {
+                *e = (f.observed, flight);
             }
         }
     }
-    let mut order: Vec<(String, Flight)> = flights.into_iter().map(|(k, (_, f))| (k, f)).collect();
-    order.sort_by(|a, b| a.1.departure_at.cmp(&b.1.departure_at).then_with(|| a.1.transfers.cmp(&b.1.transfers)).then_with(|| a.0.cmp(&b.0)));
-    let flight_ix: HashMap<&str, usize> = order.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
-    let mut obs: Vec<(usize, usize, f64, i8)> = prices.iter().map(|((k, s, b), p)| (flight_ix[k.as_str()], *s, *p, *b)).collect();
+    let mut order: Vec<(&str, &Arc<Flight>)> = flights.into_iter().map(|(k, (_, f))| (k, f)).collect();
+    order.sort_by(|a, b| a.1.departure_at.cmp(&b.1.departure_at).then_with(|| a.1.transfers.cmp(&b.1.transfers)).then_with(|| a.0.cmp(b.0)));
+    let flight_ix: HashMap<&str, usize> = order.iter().enumerate().map(|(i, (k, _))| (*k, i)).collect();
+    let mut obs: Vec<(usize, usize, f64, i8)> = prices.iter().map(|((k, s, b), p)| (flight_ix[k], *s, *p, *b)).collect();
     obs.sort_by(|a, b| (a.0, a.1, a.3).cmp(&(b.0, b.1, b.3)));
     let (oc, dc) = (city_info(&q.origin), city_info(&q.destination));
     json!({
@@ -261,26 +434,48 @@ fn assemble(q: &DynamicsQuery, files: Vec<FileRows>, failed: usize) -> Value {
         "files": snapshots.len(),
         "files_failed": failed,
         "snapshots": snapshots,
-        "flights": order.into_iter().map(|(_, f)| f).collect::<Vec<_>>(),
+        "flights": order.into_iter().map(|(_, f)| f.as_ref()).collect::<Vec<_>>(),
         "obs": obs.into_iter().map(|(f, s, p, b)| json!([f, s, p, b])).collect::<Vec<_>>(),
     })
 }
 
+/// Ход фонового запроса.
+#[derive(Default)]
+pub struct Progress {
+    pub stage: String,
+    pub done: AtomicUsize,
+    pub total: AtomicUsize,
+    pub cached: AtomicUsize,
+}
+
 /// История цен направления из озера.
-pub fn run(lake: &dyn Lake, q: &DynamicsQuery) -> Result<Value, String> {
+pub fn run(lake: &dyn Lake, q: &DynamicsQuery, progress: &Progress) -> Result<Value, String> {
     let keys = list_keys(lake, q)?;
     let files = pick_files(q, &keys);
     if files.len() > MAX_FILES {
         return Err(format!("Слишком много снимков ({}): сузьте дни вылета или глубину истории.", files.len()));
     }
+    progress.total.store(files.len(), Ordering::Relaxed);
     let next = AtomicUsize::new(0);
-    let results: Mutex<(Vec<FileRows>, usize)> = Mutex::new((Vec::new(), 0));
+    let results: Mutex<(Vec<Arc<FileRows>>, usize)> = Mutex::new((Vec::new(), 0));
     std::thread::scope(|s| {
         for _ in 0..WORKERS.min(files.len().max(1)) {
             s.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some((key, meta)) = files.get(i) else { break };
-                let res = lake.get(key).and_then(read_lake_parquet).map(|cols| rows_of(q, meta, &cols));
+                let ck = file_cache_key(q, key);
+                let res = match cache_get(&ck) {
+                    Some(v) => {
+                        progress.cached.fetch_add(1, Ordering::Relaxed);
+                        Ok(v)
+                    }
+                    None => read_projected(lake, key, q.from, q.to).map(|cols| {
+                        let v = Arc::new(rows_of(&q.origin, &q.origin_city, &q.destination, meta, &cols));
+                        cache_put(ck, v.clone());
+                        v
+                    }),
+                };
+                progress.done.fetch_add(1, Ordering::Relaxed);
                 let mut r = results.lock().unwrap();
                 match res {
                     Ok(rows) => r.0.push(rows),
@@ -293,8 +488,10 @@ pub fn run(lake: &dyn Lake, q: &DynamicsQuery) -> Result<Value, String> {
         }
     });
     let (rows, failed) = results.into_inner().unwrap();
-    Ok(assemble(q, rows, failed))
+    Ok(assemble(q, &rows, failed))
 }
+
+// ---------------------------------------------------------------- ручка: фон + кэш
 
 type Cache = Mutex<Vec<(String, Instant, Arc<Value>)>>;
 
@@ -303,33 +500,78 @@ fn cache() -> &'static Cache {
     CACHE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Ответ ручки `/api/dynamics` (с кэшем на 10 минут): `{error}` — понятный текст.
+fn running() -> &'static Mutex<HashMap<String, Arc<Progress>>> {
+    static R: OnceLock<Mutex<HashMap<String, Arc<Progress>>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached(key: &str) -> Option<Arc<Value>> {
+    let mut c = cache().lock().unwrap();
+    c.retain(|(_, t, _)| t.elapsed() < CACHE_TTL);
+    c.iter().find(|(k, _, _)| k == key).map(|(_, _, v)| v.clone())
+}
+
+fn pending(p: &Progress) -> Value {
+    json!({"pending": true, "done": p.done.load(Ordering::Relaxed), "total": p.total.load(Ordering::Relaxed), "cached": p.cached.load(Ordering::Relaxed)})
+}
+
+/// Ответ ручки `/api/dynamics`: результат (из кэша на 10 минут), `{pending, done, total}`
+/// пока считается в фоне, или `{error}` — понятный текст.
 pub fn handle(q: DynamicsQuery) -> Value {
     let key = q.cache_key();
-    {
-        let mut c = cache().lock().unwrap();
-        c.retain(|(_, t, _)| t.elapsed() < CACHE_TTL);
-        if let Some((_, _, v)) = c.iter().find(|(k, _, _)| *k == key) {
-            return (**v).clone();
-        }
+    if let Some(v) = cached(&key) {
+        return (*v).clone();
     }
     let Some(lake) = lake() else {
         return json!({"error": "Озеро билетов не подключено (нет S3_* / LAKE_LOCAL_ROOT) — истории цен нет."});
     };
-    let t0 = Instant::now();
-    match run(lake.as_ref(), &q) {
-        Ok(mut v) => {
-            v["seconds"] = json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
-            println!("[dynamics] {}→{} {}..{}: снимков {}, рейсов {} — {:.1} с", q.origin, q.destination, q.from, q.to, v["files"], v["flights"].as_array().map(|a| a.len()).unwrap_or(0), t0.elapsed().as_secs_f64());
-            let v = Arc::new(v);
-            let mut c = cache().lock().unwrap();
-            c.push((key, Instant::now(), v.clone()));
-            while c.len() > CACHE_SIZE {
-                c.remove(0);
+    let mut run_map = running().lock().unwrap();
+    if let Some(p) = run_map.get(&key) {
+        return pending(p);
+    }
+    // результат мог появиться, пока ждали замок
+    if let Some(v) = cached(&key) {
+        return (*v).clone();
+    }
+    let progress = Arc::new(Progress::default());
+    run_map.insert(key.clone(), progress.clone());
+    drop(run_map);
+    let p2 = progress.clone();
+    std::thread::Builder::new()
+        .name("dynamics".into())
+        .spawn(move || {
+            let t0 = Instant::now();
+            let v = match run(lake.as_ref(), &q, &p2) {
+                Ok(mut v) => {
+                    v["seconds"] = json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
+                    println!("[dynamics] {}→{} {}..{}: снимков {}, файлов {} (из кэша {}), рейсов {} — {:.1} с", q.origin, q.destination, q.from, q.to, v["files"], p2.total.load(Ordering::Relaxed), p2.cached.load(Ordering::Relaxed), v["flights"].as_array().map(|a| a.len()).unwrap_or(0), t0.elapsed().as_secs_f64());
+                    v
+                }
+                Err(e) => json!({"error": e}),
+            };
+            {
+                let mut c = cache().lock().unwrap();
+                // ошибку держим недолго: следующая попытка через минуту
+                let at = if v.get("error").is_some() { Instant::now() - CACHE_TTL + Duration::from_secs(60) } else { Instant::now() };
+                c.push((key.clone(), at, Arc::new(v)));
+                while c.len() > CACHE_SIZE {
+                    c.remove(0);
+                }
             }
-            (*v).clone()
+            running().lock().unwrap().remove(&key);
+        })
+        .expect("dynamics thread");
+    pending(&progress)
+}
+
+/// Синхронно — для тестов и скриптов (ждёт фон).
+pub fn handle_wait(q: DynamicsQuery) -> Value {
+    loop {
+        let v = handle(q.clone());
+        if v.get("pending").is_none() {
+            return v;
         }
-        Err(e) => json!({"error": e}),
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -381,7 +623,7 @@ mod tests {
         write_file(&root, &format!("tickets/fetched={f2}/origin=MOW/MOW-ANY__{other}__10-00-00Z.parquet"), &[ticket("MOW", "EVN", &other, 1.0)]);
 
         let lake = LocalLake::new(&root.to_string_lossy());
-        let v = run(&lake, &q("MOW", "MOW", "EVN", day)).unwrap();
+        let v = run(&lake, &q("MOW", "MOW", "EVN", day), &Progress::default()).unwrap();
         assert_eq!(v["files"], 2, "{v}");
         let snaps = v["snapshots"].as_array().unwrap();
         assert_eq!(snaps[0]["at"], format!("{f1}T08:00:00Z"));
@@ -395,11 +637,87 @@ mod tests {
         assert_eq!(v["obs"], json!([[0, 0, 10000.0, 0], [0, 1, 12000.0, 0], [0, 1, 12500.0, 1], [1, 0, 15000.0, 0]]));
 
         // аэропорт вылета: город берётся из запроса, совпадение — по аэропорту
-        let v = run(&lake, &q("MOWA", "MOW", "EVN", day)).unwrap();
+        let v = run(&lake, &q("MOWA", "MOW", "EVN", day), &Progress::default()).unwrap();
         assert_eq!(v["flights"].as_array().unwrap().len(), 2);
-        let v = run(&lake, &q("SVO", "MOW", "EVN", day)).unwrap();
+        let v = run(&lake, &q("SVO", "MOW", "EVN", day), &Progress::default()).unwrap();
         assert_eq!(v["flights"].as_array().unwrap().len(), 0);
         assert_eq!(v["files"], 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Озеро, считающее скачанные байты.
+    struct Counting(LocalLake, AtomicUsize);
+
+    impl Lake for Counting {
+        fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+            self.0.list(prefix)
+        }
+        fn get(&self, key: &str) -> Result<Bytes, String> {
+            let b = self.0.get(key)?;
+            self.1.fetch_add(b.len(), Ordering::Relaxed);
+            Ok(b)
+        }
+        fn describe(&self) -> String {
+            "counting".into()
+        }
+        fn get_tail(&self, key: &str, n: u64) -> Result<(Bytes, u64), String> {
+            let r = self.0.get_tail(key, n)?;
+            self.1.fetch_add(r.0.len(), Ordering::Relaxed);
+            Ok(r)
+        }
+        fn get_range(&self, key: &str, start: u64, len: u64) -> Result<Bytes, String> {
+            let b = self.0.get_range(key, start, len)?;
+            self.1.fetch_add(b.len(), Ordering::Relaxed);
+            Ok(b)
+        }
+    }
+
+    #[test]
+    fn projected_read_matches_full_read() {
+        let root = std::env::temp_dir().join(format!("dyn-big-{}", uuid::Uuid::new_v4()));
+        let key = "tickets/fetched=2026-10-01/origin=MOW/MOW-ANY__2026-11-01..2026-11-03__08-00-00Z.parquet";
+        // окно на три дня, row group на день (как пишет коллектор), длинные ссылки
+        let path = root.join(key);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut w: Option<ArrowWriter<std::fs::File>> = None;
+        for day in ["2026-11-01", "2026-11-02", "2026-11-03"] {
+            let ts: Vec<_> = (0..1500)
+                .map(|i| {
+                    let mut t = ticket("MOW", if i % 3 == 0 { "EVN" } else { "IST" }, day, 5000.0 + i as f64);
+                    t.link = Some(format!("/search/MOW{day}?t={}", uuid::Uuid::new_v4().simple().to_string().repeat(6)));
+                    t
+                })
+                .collect();
+            let ipc = crate::collector::testing::lake_ipc(&ts);
+            let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc), None).unwrap();
+            let schema = reader.schema();
+            let wr = w.get_or_insert_with(|| ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), schema, None).unwrap());
+            for b in reader {
+                wr.write(&b.unwrap()).unwrap();
+            }
+            wr.flush().unwrap();
+        }
+        w.unwrap().close().unwrap();
+        let size = std::fs::metadata(&path).unwrap().len() as usize;
+        let lake = Counting(LocalLake::new(&root.to_string_lossy()), AtomicUsize::new(0));
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let got = read_projected(&lake, key, d("2026-11-02"), d("2026-11-02")).unwrap();
+        let fetched = lake.1.load(Ordering::Relaxed);
+        assert!(fetched * 3 < size, "скачано {fetched} из {size}");
+        let full = read_lake_parquet(lake.0.get(key).unwrap()).unwrap();
+        let want: Vec<usize> = (0..full.n).filter(|&r| full.dep_day(r) == Some(d("2026-11-02"))).collect();
+        assert_eq!(got.n, want.len());
+        for (i, &r) in want.iter().enumerate() {
+            let (a, b) = (got.ticket(i), full.ticket(r));
+            assert_eq!((a.destination, a.price, a.legs, a.chain, a.departure_at), (b.destination, b.price, b.legs, b.chain, b.departure_at));
+            assert_eq!((got.known[i], got.included[i]), (full.known[r], full.included[r]));
+        }
+        // дни вне окна — ни одной row group
+        assert_eq!(read_projected(&lake, key, d("2026-11-05"), d("2026-11-06")).unwrap().n, 0);
+        // и через всю ручку: рейсы EVN на 2 ноября
+        let q = DynamicsQuery { origin: "MOW".into(), origin_city: "MOW".into(), destination: "EVN".into(), from: d("2026-11-02"), to: d("2026-11-02"), history_days: 180 };
+        let rows = rows_of(&q.origin, &q.origin_city, &q.destination, &parse_file_key(key).unwrap(), &got);
+        assert_eq!(rows.rows.len(), 500);
         std::fs::remove_dir_all(root).unwrap();
     }
 
