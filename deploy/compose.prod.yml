@@ -41,7 +41,7 @@ services:
     environment:
       - TICKETS_PG_URL=postgres://tickets:${TICKETS_PG_PASSWORD}@tickets-db:5432/tickets
       - COLLECTOR_URL=http://collector:8001
-      - TICKETS_SYNC_WORKERS=4
+      - TICKETS_SYNC_WORKERS=12
     depends_on:
       - tickets-db
       - collector

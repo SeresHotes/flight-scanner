@@ -87,6 +87,11 @@ function CombosList({ jobId, query, queryString }: { jobId: string; query: PlanQ
         )}
         <b>{first.totalCount.toLocaleString('ru-RU')}</b> {plural(first.totalCount, 'маршрут', 'маршрута', 'маршрутов')} под
         фильтры {first.truncated ? 'в них' : '(без лимита маршрутов)'}
+        {first.incomplete && (
+          <div className="pl-est-sec">
+            ⚠ Обход наборов остановлен по лимиту шагов — список неполный. Сузьте окна дат или задайте города вместо «любых».
+          </div>
+        )}
       </div>
 
       <div className="pl-combo-sort">

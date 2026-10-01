@@ -29,7 +29,7 @@ use crate::hot::{self, Job};
 use crate::planquery::PlanQuery;
 use crate::search::{build_combo_views, Aborted, ComboRoutes};
 use crate::collect::store_view;
-use crate::stops::{estimate_plan, is_valid_max_results, parse_stops, Estimate, Series, DEFAULT_MAX_RESULTS, MAX_REQUESTS, MAX_RESULTS};
+use crate::stops::{estimate_plan, is_valid_max_results, parse_stops, total_window_days, Estimate, Series, DEFAULT_MAX_RESULTS, MAX_REQUESTS, MAX_RESULTS, MAX_SEARCH_STEPS, MAX_TOTAL_WINDOW_DAYS};
 use crate::tickets::{tickets_url, TicketsClient};
 use crate::worker::{self, CancelSet, ViewResult, FETCH_CACHE_TTL_SECONDS};
 
@@ -178,10 +178,10 @@ fn build_view_task(app: Arc<AppState>, job_id: String, pq: PlanQuery, state: Arc
         let limit = pq.max_results;
         let mut progress = |found: usize, explored: usize| -> Result<(), Aborted> {
             state.lock().unwrap().build = Some(json!({"found": found, "limit": limit, "explored": explored}));
-            Ok(())
+            if explored > MAX_SEARCH_STEPS { Err(Aborted) } else { Ok(()) }
         };
         let on_stage = |key: &str| state.lock().unwrap().stage = key.to_string();
-        worker::build_view(&stops, &table, &pq, &mut progress, &on_stage).map_err(|_| "стыковка прервана".to_string())
+        worker::build_view(&stops, &table, &pq, &mut progress, &on_stage).map_err(|_| worker::STEP_LIMIT_ERROR.to_string())
     })();
     match outcome {
         Ok(result) => app.put_view(&job_id, &pq, result),
@@ -324,6 +324,10 @@ fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery) -> Value {
     if !is_valid_max_results(query.max_results) {
         return json!({"status": "invalid", "message": format!("Лимит маршрутов вне диапазона 1…{MAX_RESULTS}.")});
     }
+    let days = total_window_days(&stops);
+    if days > MAX_TOTAL_WINDOW_DAYS {
+        return json!({"status": "too_wide", "message": format!("Суммарная ширина окон дат — {days} дн., максимум {MAX_TOTAL_WINDOW_DAYS}. Сузьте диапазоны.")});
+    }
     let est = estimate(app, &query);
     if est.requests == 0 {
         return json!({"status": "invalid", "message": "Задайте окна дат для остановок."});
@@ -449,7 +453,7 @@ async fn plan_job_combos(State(app): State<Arc<AppState>>, Path(job_id): Path<St
                 }
             }
         }
-        json!({"status": "ok", "total": combos.len(), "totalCount": overview.total_count, "truncated": overview.truncated, "offset": offset, "limit": limit, "items": page, "cities": cities})
+        json!({"status": "ok", "total": combos.len(), "totalCount": overview.total_count, "truncated": overview.truncated, "incomplete": overview.incomplete, "offset": offset, "limit": limit, "items": page, "cities": cities})
     })
     .await
     .unwrap_or(Value::Null);
@@ -544,6 +548,7 @@ async fn plan_job_status(State(app): State<Arc<AppState>>, Path(job_id): Path<St
                 "combos": entry.result.combos.combos.len(),
                 "totalCount": entry.result.combos.total_count,
                 "truncated": entry.result.combos.truncated,
+                "incomplete": entry.result.combos.incomplete,
             });
             return out;
         }

@@ -26,7 +26,7 @@ use crate::nearby::{Hops, HOP_MIN_GAP_MIN};
 use crate::planquery::{CityFilter, PlanQuery};
 use crate::search::{build_ctx, completion_lb, leg_rows};
 use crate::segments::city_pair;
-use crate::stops::{leg_dates, Stop};
+use crate::stops::{leg_dates, Stop, MAX_COMBO_STEPS};
 
 const BIG_TR: i64 = 1 << 20;
 
@@ -51,6 +51,9 @@ pub struct Overview {
     pub cities: HashMap<String, (String, String)>,
     /// Наборов больше, чем выдано: часть вытеснена из K лучших или отсечена по оценке.
     pub truncated: bool,
+    /// Обход остановлен по лимиту шагов (MAX_COMBO_STEPS): выданы найденные к этому моменту,
+    /// гарантии «ровно K самых дешёвых» нет.
+    pub incomplete: bool,
 }
 
 /// Рейсы плеча в локальных массивах + индекс по коду вылета. Коды — номера словаря
@@ -330,11 +333,24 @@ struct Best {
     k: usize,
     /// Что-то не вошло в K: набор вытеснен из кучи или ветка отсечена по оценке.
     truncated: bool,
+    /// Стыковок групп (extend) сделано; больше max_steps — обход останавливается.
+    steps: usize,
+    max_steps: usize,
 }
 
 impl Best {
     fn cutoff(&self) -> f64 {
         if self.heap.len() >= self.k { self.heap.peek().map(|r| r.0.min_price).unwrap_or(f64::INFINITY) } else { f64::INFINITY }
+    }
+
+    /// Ещё один шаг стыковки; false — лимит исчерпан, дальше не идём.
+    fn step(&mut self) -> bool {
+        self.steps += 1;
+        self.steps <= self.max_steps
+    }
+
+    fn exhausted(&self) -> bool {
+        self.steps > self.max_steps
     }
 
     fn push(&mut self, c: Combo) {
@@ -356,6 +372,11 @@ pub fn build_overview(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
 /// минимальная цена хвоста по городам, `search::completion_lb`) выше цены K-го найденного
 /// набора, не раскрываются; дети обходятся по возрастанию оценки, чтобы порог сжимался раньше.
 pub fn build_overview_top(stops: &[Stop], table: &FlightCols, query: Option<&PlanQuery>, top: usize) -> Overview {
+    build_overview_limited(stops, table, query, top, MAX_COMBO_STEPS)
+}
+
+/// То же с лимитом шагов стыковки (extend): при исчерпании — `incomplete`.
+pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<&PlanQuery>, top: usize, max_steps: usize) -> Overview {
     let last = stops.len().saturating_sub(1);
     if last < 1 || top == 0 {
         return Overview::default();
@@ -387,7 +408,7 @@ pub fn build_overview_top(stops: &[Stop], table: &FlightCols, query: Option<&Pla
     let ctx = build_ctx(stops, table, query);
     let lb = completion_lb(&ctx);
 
-    let mut best = Best { heap: BinaryHeap::new(), k: top, truncated: false };
+    let mut best = Best { heap: BinaryHeap::new(), k: top, truncated: false, steps: 0, max_steps };
 
     struct Env<'a> {
         legs: &'a [Leg],
@@ -540,6 +561,9 @@ pub fn build_overview_top(stops: &[Stop], table: &FlightCols, query: Option<&Pla
                 best.truncated = true;
                 break; // группы по возрастанию оценки — дальше только дороже
             }
+            if !best.step() {
+                return;
+            }
             let hop: Vec<bool> = fis.iter().map(|&fi| !leg.origin_has(fi, city)).collect();
             let new_state = extend(state, prev, p_idx, leg, &fis, env.city_filters.get(&k).copied(), Some(&hop));
             if new_state.total() <= 0.0 {
@@ -586,6 +610,9 @@ pub fn build_overview_top(stops: &[Stop], table: &FlightCols, query: Option<&Pla
     for (bound, start, dest, fis) in first_groups {
         if bound > best.cutoff() {
             best.truncated = true;
+            break;
+        }
+        if best.exhausted() {
             break;
         }
         let ok: Vec<bool> = fis.iter().map(|&fi| leg0.dep_ord[fi] >= start_ord).collect();
@@ -635,13 +662,14 @@ pub fn build_overview_top(stops: &[Stop], table: &FlightCols, query: Option<&Pla
     }
 
     let truncated = best.truncated;
+    let incomplete = best.exhausted();
     let mut combos: Vec<Combo> = best.heap.into_iter().map(|r| r.0).collect();
     combos.sort_by(|a, b| a.min_price.partial_cmp(&b.min_price).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.codes.cmp(&b.codes)));
     let total_count = combos.iter().map(|c| c.count).sum();
     let mut codes: Vec<String> = combos.iter().flat_map(|c| c.codes.iter().cloned()).collect::<HashSet<_>>().into_iter().collect();
     codes.sort();
     let cities = codes.into_iter().map(|c| { let p = city_pair(&c); (c, p) }).collect();
-    Overview { combos, total_count, cities, truncated }
+    Overview { combos, total_count, cities, truncated, incomplete }
 }
 
 #[cfg(test)]
@@ -801,6 +829,22 @@ mod tests {
                 assert_eq!(got.total_count, want.iter().map(|c| c.count).sum::<i64>());
                 assert_eq!(got.cities.keys().cloned().collect::<HashSet<_>>(), got.combos.iter().flat_map(|c| c.codes.clone()).collect::<HashSet<_>>());
             }
+        }
+    }
+
+    /// Лимит шагов: обход останавливается, выдаются найденные, флаг incomplete.
+    #[test]
+    fn step_limit_marks_incomplete() {
+        let stops: Vec<Stop> = stops().into_iter().map(|s| Stop { window: if s.window[0].is_empty() { s.window } else { ["2026-11-01".into(), "2026-11-20".into()] }, ..s }).collect();
+        let table = FlightCols::from_collected(&wide_collected(2));
+        let q = PlanQuery::from_value(&json!({"stops": stops.iter().map(|s| json!({"kind": s.kind, "codes": s.codes, "window": s.window})).collect::<Vec<_>>(), "maxResults": 100000})).unwrap();
+        let full = build_overview_top(&stops, &table, Some(&q), usize::MAX);
+        assert!(!full.incomplete);
+        let cut = build_overview_limited(&stops, &table, Some(&q), usize::MAX, 3);
+        assert!(cut.incomplete);
+        assert!(cut.combos.len() < full.combos.len());
+        for c in &cut.combos {
+            assert!(full.combos.contains(c));
         }
     }
 
