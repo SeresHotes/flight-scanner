@@ -109,6 +109,21 @@ impl StageReporter {
         inner.state["cached"] = json!(n + 1);
     }
 
+    /// Время этапа джобы (секунды) — в stage_json.timings, для замеров.
+    pub fn timing(&self, name: &str, secs: f64) {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.state["timings"].is_object() {
+            inner.state["timings"] = json!({});
+        }
+        inner.state["timings"][name] = json!((secs * 1000.0).round() / 1000.0);
+    }
+
+    /// Записать текущее состояние (тайминги после стыковки).
+    pub fn flush_state(&self) -> Result<(), CollectError> {
+        let mut inner = self.inner.lock().unwrap();
+        self.flush(&mut inner, &[])
+    }
+
     pub fn flights(&self, n: usize) {
         self.inner.lock().unwrap().state["flights"] = json!(n);
     }
@@ -231,6 +246,7 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
     let stops = parse_stops(&pq.stops);
     let total = request_count(&stops);
     let steps: Vec<(String, i64)> = estimate_plan(&stops, None).legs.iter().map(|l| (format!("{} → {}", l.from_label, l.to_label), l.requests)).collect();
+    let t0 = Instant::now();
     let rep_conn = hot::connect(db_path).map_err(CollectError::Failed)?;
     let rep = StageReporter::new(rep_conn, job_id, steps, cancel.clone());
     rep.stage("fetch", &[("status", json!("running")), ("total", json!(total)), ("progress", json!(0))])?;
@@ -243,8 +259,12 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
     let mut airport_city = hot::airport_city_map(conn).map_err(CollectError::Failed)?;
     let collected = collect_plan(&stops, &fetcher, view.as_ref(), &rep, &mut airport_city, workers)?;
     rep.flights(collected.iter().map(|v| v.len()).sum());
+    rep.timing("collect", t0.elapsed().as_secs_f64());
+    let t = Instant::now();
     let table = FlightCols::from_collected(&collected);
     hot::put_plan_flights(conn, db_path, job_id, &table).map_err(CollectError::Failed)?;
+    rep.timing("save", t.elapsed().as_secs_f64());
+    let t = Instant::now();
     rep.stage("build", &[])?;
 
     let limit = pq.max_results;
@@ -269,6 +289,9 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
         return Err(CollectError::Cancelled);
     }
     let count = result.view.count;
+    rep.timing("build", t.elapsed().as_secs_f64());
+    rep.timing("total", t0.elapsed().as_secs_f64());
+    rep.flush_state()?;
     on_view(pq, result);
     hot::update_job(conn, job_id, &[("status", json!("done"))]).map_err(CollectError::Failed)?;
     println!("[worker] plan job {job_id} done: {count} цепочек");

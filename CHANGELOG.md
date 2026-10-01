@@ -15,8 +15,12 @@
   деплое не перечитывает озеро.
 - Удалены: крейт и образ `tickets`, контейнеры `tickets`/`tickets-db`, пуш файлов из коллектора
   (`collector/push.py`, `TICKETS_URL`), `deploy/vm-tickets-env.sh`, `deploy/vm-pg-ssd.sh`.
-  Оставлены до отдельного решения: SSD-диск `/opt/flights/pg` и `random_password.tickets_pg`
-  в Terraform.
+  В Terraform убраны SSD-диск `yandex_compute_disk.pg` (+ `secondary_disk` VM),
+  `random_password.tickets_pg` и `TICKETS_*` в `.env`; удаляются на проде `terraform apply`.
+- Замеры прода: `/api/health` → `process` (RSS, пик), `tickets.sync` (время готовности,
+  последний полный проход, снапшот); у джобы `stage.timings` (сбор, запись, стыковка);
+  `POST /api/plan/run` с `fresh: true` — всегда новая джоба. Workflow `Prod bench`
+  (`scripts/prod_bench.py`) гоняет типовые джобы через публичный API.
 
 ### 🦀 Планировщик переписан на Rust (`planner/`)
 

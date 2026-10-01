@@ -67,12 +67,6 @@ variable "vm_disk_gb" {
   default     = 100
 }
 
-variable "pg_disk_gb" {
-  type        = number
-  description = "Диск под Postgres склада билетов (network-ssd-nonreplicated, кратно 93 ГБ)"
-  default     = 93
-}
-
 variable "ssh_public_key" {
   type        = string
   description = "Публичный SSH-ключ для доступа к VM (пользователь ubuntu)"
