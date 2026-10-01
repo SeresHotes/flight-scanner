@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import type { AirportOption } from '../data/airports'
 import { estimatePlan } from '../planner/estimate'
 import { fetchEstimate, runPlan } from '../planner/api'
@@ -104,7 +104,10 @@ export function PlanPage() {
     <>
       <header className="hero">
         <h1>🧭 Планировщик маршрута</h1>
-        <div className="sub">Города, даты и условия одним списком — бэк соберёт билеты и покажет варианты.</div>
+        <div className="sub">
+          Города, даты и условия одним списком — бэк соберёт билеты и покажет варианты.{' '}
+          <Link to="/dynamics" className="dyn-back">📈 Динамика цены →</Link>
+        </div>
       </header>
 
       <div className="searchform">

@@ -7,6 +7,7 @@ pub mod api;
 pub mod collect;
 pub mod collector;
 pub mod dates;
+pub mod dynamics;
 pub mod flightcols;
 pub mod graphql;
 pub mod hot;
