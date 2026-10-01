@@ -2,6 +2,10 @@
 //! стыковка цепочек (A*), наборы городов, SQLite-джобы и Parquet-рейсы джобы.
 //! Контракт и семантика — docs/PLANNER_V2.md (прежняя реализация — Python `api/` + `core/`).
 
+/// Аллокатор: сбор и разбор билетов — миллионы мелких строк, mimalloc заметно быстрее glibc.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod airports;
 pub mod api;
 pub mod collect;

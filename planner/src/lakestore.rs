@@ -126,6 +126,17 @@ impl LakeCols {
         Ok(LakeCols { n, strs, ints, price: f64_col(b, "price")?, known: bl("baggage_known")?, included: bl("baggage_included")? })
     }
 
+    /// Билеты → колонки тем же путём, что файлы озера (IPC в схеме озера); тесты и стенды.
+    pub fn from_tickets(tickets: &[Ticket]) -> LakeCols {
+        let ipc = crate::collector::testing::lake_ipc(tickets);
+        let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc), None).expect("ipc");
+        let mut out = LakeCols::empty();
+        for b in reader {
+            out.append(LakeCols::from_batch(&b.expect("ipc")).expect("lake cols"));
+        }
+        out
+    }
+
     pub fn empty() -> LakeCols {
         LakeCols { n: 0, strs: vec![Vec::new(); STR_FIELDS.len()], ints: vec![Vec::new(); INT_FIELDS.len()], ..Default::default() }
     }
@@ -186,6 +197,7 @@ impl LakeCols {
             search_date: s(2),
             hidden_city: None,
             layover_minutes: None,
+            src: None,
         }
     }
 }
@@ -293,7 +305,7 @@ fn decode_cold(buf: &[u8], n: usize, sel: &[usize]) -> Result<LakeCols, String> 
         for (r, &l) in lens.iter().enumerate() {
             let bytes = if l > 0 { cur.take(l as usize - 1)? } else { &[][..] };
             if k < sel.len() && sel[k] == r {
-                col.push(if l > 0 { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None });
+                col.push(if l > 0 { Some(std::str::from_utf8(bytes).map(str::to_owned).unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())) } else { None });
                 k += 1;
             }
         }
@@ -335,8 +347,9 @@ pub struct Block {
     pub origin: Vec<u32>,
     pub dest: Vec<u32>,
     pub price: Vec<f64>,
-    /// Холодная часть: все поля билета (`encode_cold`), zstd.
+    /// Холодная часть: все поля билета (`encode_cold`), zstd; raw_len — её размер до сжатия.
     pub cold: Box<[u8]>,
+    pub raw_len: u32,
 }
 
 impl Block {
@@ -356,9 +369,76 @@ impl Block {
         if sel.is_empty() {
             return Ok(LakeCols::empty());
         }
-        let raw = zstd::bulk::decompress(&self.cold, 1 << 30).map_err(|e| format!("блок склада: {e}"))?;
+        let raw = zstd::bulk::decompress(&self.cold, self.raw_len as usize).map_err(|e| format!("блок склада: {e}"))?;
         decode_cold(&raw, self.len(), sel)
     }
+}
+
+/// Ссылка на строку склада: блок (Arc держит его, даже если серию уже заменили) и номер
+/// строки; `hub` — виртуальный рейс hidden-city «выходим на k-й пересадке в городе».
+/// В сравнении билетов не участвует.
+#[derive(Clone)]
+pub struct StoreRow {
+    pub block: Arc<Block>,
+    pub row: u32,
+    pub hub: Option<(u8, Box<str>)>,
+}
+
+impl StoreRow {
+    pub fn with_hub(&self, k: usize, city: &str) -> StoreRow {
+        StoreRow { block: self.block.clone(), row: self.row, hub: Some((k as u8, city.into())) }
+    }
+
+    /// Блоки равны по указателю: строки одного блока разбираются одним разжатием.
+    pub fn same_block(&self, other: &StoreRow) -> bool {
+        Arc::ptr_eq(&self.block, &other.block)
+    }
+}
+
+impl std::fmt::Debug for StoreRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StoreRow({:p}#{}{:?})", Arc::as_ptr(&self.block), self.row, self.hub)
+    }
+}
+
+impl PartialEq for StoreRow {
+    fn eq(&self, _other: &StoreRow) -> bool {
+        true
+    }
+}
+
+/// Билеты строк склада: строки группируются по блоку (одно разжатие на блок), порядок —
+/// как в `rows`; виртуальные (hub) — `virtual_flight` от билета строки.
+pub fn materialize(rows: &[&StoreRow]) -> Result<Vec<Ticket>, String> {
+    let mut out: Vec<Option<Ticket>> = vec![None; rows.len()];
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| (Arc::as_ptr(&rows[i].block) as usize, rows[i].row));
+    let mut k = 0;
+    while k < order.len() {
+        let first = rows[order[k]];
+        let mut end = k;
+        while end < order.len() && rows[order[end]].same_block(first) {
+            end += 1;
+        }
+        let mut sel: Vec<usize> = order[k..end].iter().map(|&i| rows[i].row as usize).collect();
+        sel.dedup();
+        let cols = first.block.rows(&sel)?;
+        for &i in &order[k..end] {
+            let r = rows[i];
+            let pos = sel.binary_search(&(r.row as usize)).map_err(|_| "строка склада вне блока".to_string())?;
+            let mut t = cols.ticket(pos);
+            t.src = Some(StoreRow { block: r.block.clone(), row: r.row, hub: None });
+            if let Some((hk, city)) = &r.hub {
+                let pts = t.transfer_points.as_ref().map(|p| p.len()).unwrap_or(0);
+                if (*hk as usize) < pts && t.legs.len() > *hk as usize {
+                    t = t.virtual_flight(*hk as usize, city);
+                }
+            }
+            out[i] = Some(t);
+        }
+        k = end;
+    }
+    Ok(out.into_iter().map(|t| t.unwrap_or_default()).collect())
 }
 
 /// Словарь кодов городов: горячие колонки хранят номера.
@@ -428,6 +508,8 @@ pub struct LakeStore {
     pub status: Mutex<SyncStatus>,
     /// Изменения после последнего снапшота.
     pub dirty: std::sync::atomic::AtomicBool,
+    /// Аэропорт → город из концов билетов (PKX → BJS): hidden-city и остановки по городу.
+    airports: RwLock<HashMap<String, String>>,
 }
 
 /// Сколько ждать первой загрузки склада в запросе джобы.
@@ -490,6 +572,7 @@ impl LakeStore {
             }
         }
         let mut stats = ApplyStats::default();
+        self.learn_airports(cols);
         let origin_id = self.codes.write().unwrap().id(origin);
         let mut blocks: Vec<((i32, u32), Arc<Block>)> = Vec::new();
         for (day, rows) in by_day {
@@ -509,10 +592,12 @@ impl LakeStore {
                 (o, d)
             };
             let price = rows.iter().map(|&r| cols.price[r].unwrap_or(f64::INFINITY)).collect();
-            let cold = zstd::bulk::compress(&encode_cold(cols, &rows), 3).map_err(|e| format!("zstd: {e}"))?.into_boxed_slice();
+            let raw = encode_cold(cols, &rows);
+            let raw_len = raw.len() as u32;
+            let cold = zstd::bulk::compress(&raw, 3).map_err(|e| format!("zstd: {e}"))?.into_boxed_slice();
             stats.rows += rows.len();
             stats.days += 1;
-            blocks.push((key, Arc::new(Block { fetched, origin: o, dest: d, price, cold })));
+            blocks.push((key, Arc::new(Block { fetched, origin: o, dest: d, price, cold, raw_len })));
         }
         if !blocks.is_empty() {
             let mut series = self.series.write().unwrap();
@@ -529,6 +614,33 @@ impl LakeStore {
             self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(stats)
+    }
+
+    fn learn_airports(&self, cols: &LakeCols) {
+        let mut new: Vec<(String, String)> = Vec::new();
+        {
+            let known = self.airports.read().unwrap();
+            for r in 0..cols.n {
+                for (a, c) in [(5, 3), (6, 4)] {
+                    if let (Some(a), Some(c)) = (cols.s(a, r).filter(|s| !s.is_empty()), cols.s(c, r).filter(|s| !s.is_empty())) {
+                        if a != c && !known.contains_key(&a.to_uppercase()) {
+                            new.push((a.to_uppercase(), c.to_uppercase()));
+                        }
+                    }
+                }
+            }
+        }
+        if !new.is_empty() {
+            let mut known = self.airports.write().unwrap();
+            for (a, c) in new {
+                known.entry(a).or_insert(c);
+            }
+        }
+    }
+
+    /// Карта аэропорт → город из билетов склада.
+    pub fn airport_city(&self) -> HashMap<String, String> {
+        self.airports.read().unwrap().clone()
     }
 
     /// Прошедшие дни вылета — вон (строго раньше `before`). Сколько серий удалено.
@@ -559,12 +671,12 @@ impl LakeStore {
             return Ok(Vec::new());
         }
         // горячий проход: блоки и строки под фильтры городов (без разбора)
-        let mut picked: Vec<(Arc<Block>, Vec<usize>)> = Vec::new();
+        let mut picked: Vec<(i32, Arc<Block>, Vec<usize>)> = Vec::new();
         let mut total = 0usize;
         {
             let series = self.series.read().unwrap();
             let range = series.range((day_num(from), 0)..=(day_num(to), u32::MAX));
-            for (_, b) in range {
+            for ((day, _), b) in range {
                 let sel: Vec<usize> = (0..b.len()).filter(|&r| (o_ids.is_empty() || o_ids.contains(&b.origin[r])) && (d_ids.is_empty() || d_ids.contains(&b.dest[r]))).collect();
                 if sel.is_empty() {
                     continue;
@@ -573,27 +685,43 @@ impl LakeStore {
                 if total >= limit {
                     return Err(format!("больше {limit} строк"));
                 }
-                picked.push((b.clone(), sel));
+                picked.push((*day, b.clone(), sel));
             }
         }
+        // порядок — день, город вылета, цена (как ORDER BY прежнего склада) — по горячим
+        // колонкам до разбора: сортируются номера, а не билеты
+        let rank: FxHashMap<u32, u32> = {
+            let codes = self.codes.read().unwrap();
+            let mut ids: Vec<u32> = picked.iter().flat_map(|(_, b, sel)| sel.iter().map(move |&r| b.origin[r])).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids.sort_by(|a, b| codes.names[*a as usize].cmp(&codes.names[*b as usize]));
+            ids.into_iter().enumerate().map(|(k, id)| (id, k as u32)).collect()
+        };
+        let mut order: Vec<(i32, u32, f64, u32, u32)> = Vec::with_capacity(total);
+        for (k, (day, b, sel)) in picked.iter().enumerate() {
+            for (pos, &r) in sel.iter().enumerate() {
+                order.push((*day, rank[&b.origin[r]], b.price[r], k as u32, pos as u32));
+            }
+        }
+        order.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)));
         let via_up: Vec<String> = via.iter().map(|v| v.to_uppercase()).collect();
-        let mut out: Vec<Ticket> = Vec::with_capacity(total);
-        for (b, sel) in picked {
-            let cols = b.rows(&sel)?;
-            for r in 0..cols.n {
-                let t = cols.ticket(r);
+        let mut decoded: Vec<Vec<Option<Ticket>>> = Vec::with_capacity(picked.len());
+        for (_, b, sel) in &picked {
+            let cols = b.rows(sel)?;
+            decoded.push((0..cols.n).map(|r| {
+                let mut t = cols.ticket(r);
+                t.src = Some(StoreRow { block: b.clone(), row: sel[r] as u32, hub: None });
                 if !via_up.is_empty() {
                     let pts = t.transfer_points.as_deref().unwrap_or(&[]);
                     if !pts.iter().any(|p| [&p.code, &p.to].iter().any(|c| c.as_deref().map(|c| via_up.contains(&c.to_uppercase())).unwrap_or(false))) {
-                        continue;
+                        return None;
                     }
                 }
-                out.push(t);
-            }
+                Some(t)
+            }).collect());
         }
-        let day = |t: &Ticket| t.search_date.as_deref().or(t.departure_at.as_deref()).map(|s| s.get(..10).unwrap_or(s).to_string()).unwrap_or_default();
-        out.sort_by(|a, b| day(a).cmp(&day(b)).then_with(|| a.origin.cmp(&b.origin)).then_with(|| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal)));
-        Ok(out)
+        Ok(order.into_iter().filter_map(|(_, _, _, k, pos)| decoded[k as usize][pos as usize].take()).collect())
     }
 
     /// Серии за дни [from, to]: (город, день) → билетов; пустой список городов — все.
@@ -618,6 +746,8 @@ impl LakeStore {
     }
 
     pub fn health(&self) -> Value {
+        // порядок блокировок везде один: словарь кодов, затем серии
+        let codes = self.codes.read().unwrap().names.len();
         let (mut tickets, mut bytes, mut fetched_max) = (0usize, 0usize, 0i64);
         let series = self.series.read().unwrap();
         for b in series.values() {
@@ -635,7 +765,7 @@ impl LakeStore {
             "day_max": series.keys().next_back().map(|(d, _)| num_day(*d).to_string()),
             "last_fetched_at": DateTime::<Utc>::from_timestamp(fetched_max, 0).filter(|_| fetched_max > 0).map(|d| d.to_rfc3339()),
             "memory_mb": bytes / (1 << 20),
-            "codes": self.codes.read().unwrap().names.len(),
+            "codes": codes,
             "sync": serde_json::to_value(self.status.lock().unwrap().clone()).unwrap_or(Value::Null),
         })
     }
@@ -672,8 +802,17 @@ impl LakeStore {
                 for v in &b.price {
                     w.write_all(&v.to_le_bytes())?;
                 }
+                w.write_all(&b.raw_len.to_le_bytes())?;
                 w.write_all(&(b.cold.len() as u32).to_le_bytes())?;
                 w.write_all(&b.cold)?;
+            }
+            let airports = self.airport_city();
+            w.write_all(&(airports.len() as u32).to_le_bytes())?;
+            for (a, c) in &airports {
+                for s in [a, c] {
+                    w.write_all(&(s.len() as u32).to_le_bytes())?;
+                    w.write_all(s.as_bytes())?;
+                }
             }
             w.flush()?;
             w.get_ref().sync_all()?;
@@ -724,23 +863,36 @@ impl LakeStore {
             let mut buf = vec![0u8; n * 8];
             r.read_exact(&mut buf)?;
             let price: Vec<f64> = buf.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
+            let raw_len = u32_(&mut r)?;
             let mut cold = vec![0u8; u32_(&mut r)? as usize];
             r.read_exact(&mut cold)?;
             if o.iter().chain(&d).chain(std::iter::once(&origin)).any(|&c| c as usize >= codes.names.len()) {
                 return Err(bad("номер кода вне словаря"));
             }
             if day >= cut {
-                series.insert((day, origin), Arc::new(Block { fetched, origin: o, dest: d, price, cold: cold.into_boxed_slice() }));
+                series.insert((day, origin), Arc::new(Block { fetched, origin: o, dest: d, price, cold: cold.into_boxed_slice(), raw_len }));
             }
         }
+        let mut airports = HashMap::new();
+        for _ in 0..u32_(&mut r)? {
+            let mut pair = [String::new(), String::new()];
+            for p in pair.iter_mut() {
+                let mut s = vec![0u8; u32_(&mut r)? as usize];
+                r.read_exact(&mut s)?;
+                *p = String::from_utf8(s).map_err(|_| bad("код не UTF-8"))?;
+            }
+            let [a, c] = pair;
+            airports.insert(a, c);
+        }
         let loaded = series.len();
+        *self.airports.write().unwrap() = airports;
         *self.codes.write().unwrap() = codes;
         *self.series.write().unwrap() = series;
         Ok(loaded)
     }
 }
 
-const SNAP_MAGIC: &[u8; 8] = b"FSTORE01";
+const SNAP_MAGIC: &[u8; 8] = b"FSTORE02";
 
 /// Склад процесса (задаётся на старте, если есть озеро).
 static GLOBAL: OnceLock<Arc<LakeStore>> = OnceLock::new();
@@ -816,18 +968,13 @@ pub mod tests {
             search_date: Some(day.into()),
             hidden_city: None,
             layover_minutes: None,
+            src: None,
         }
     }
 
     /// Билеты → LakeCols через тот же путь, что файлы озера (IPC в схеме озера).
     pub fn cols(tickets: &[Ticket]) -> LakeCols {
-        let ipc = lake_ipc(tickets);
-        let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc), None).unwrap();
-        let mut out = LakeCols::empty();
-        for b in reader {
-            out.append(LakeCols::from_batch(&b.unwrap()).unwrap());
-        }
-        out
+        LakeCols::from_tickets(tickets)
     }
 
     fn meta(key: &str) -> FileMeta {
@@ -903,6 +1050,38 @@ pub mod tests {
         assert_eq!(s.apply(&any, &cols(&[ticket("KZN", "AYT", "2026-10-10", 1.0)]), cutoff).unwrap(), ApplyStats::default());
         assert_eq!(s.retention(d("2026-10-11")), 2);
         assert!(s.select(&[], &["AYT".into()], &[], d("2026-10-10"), d("2026-10-10"), 1000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn job_flights_by_store_rows() {
+        use crate::flightcols::FlightCols;
+        let s = LakeStore::new();
+        let cutoff = d("2026-10-01");
+        s.apply(&meta("tickets/fetched=2026-10-02/origin=MOW/MOW-ANY__2026-10-10__08-00-00Z.parquet"), &cols(&[ticket("MOW", "SEL", "2026-10-10", 300.0), ticket("MOW", "AYT", "2026-10-10", 100.0)]), cutoff).unwrap();
+        let got = s.select(&["MOW".into()], &[], &[], d("2026-10-10"), d("2026-10-10"), 100).unwrap();
+        assert!(got.iter().all(|t| t.src.is_some()));
+        let mut v = got[1].virtual_flight(0, "IST");
+        assert_eq!(v.src.as_ref().unwrap().hub.as_ref().map(|(k, c)| (*k, c.to_string())), Some((0, "IST".to_string())));
+        v.price = Some(300.0);
+        let legs = vec![got.iter().cloned().map(Arc::new).collect::<Vec<_>>(), vec![Arc::new(got[1].virtual_flight(0, "IST"))]];
+        let table = FlightCols::from_collected(&legs);
+        assert_eq!(table.owned_tickets().len(), 0, "из склада — только номера строк");
+        assert_eq!(*table.flight(0), got[0]);
+        assert_eq!(*table.flight(1), got[1]);
+        let virt = table.flight(2);
+        assert_eq!(virt.destination.as_deref(), Some("IST"));
+        assert!(virt.hidden_city.is_some());
+        assert_eq!(*virt, got[1].virtual_flight(0, "IST"));
+        // Parquet: seg тех же рейсов
+        let dir = std::env::temp_dir().join(format!("lakestore-job-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("job.parquet").to_string_lossy().to_string();
+        table.write(&path).unwrap();
+        let back = FlightCols::read(&path).unwrap();
+        assert_eq!(back.len(), 3);
+        assert_eq!(back.flight(2).destination.as_deref(), Some("IST"));
+        assert_eq!(back.flight(0).link, got[0].segment_source().link);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

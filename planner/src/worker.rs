@@ -217,7 +217,7 @@ pub fn build_view(stops: &[Stop], table: &FlightCols, pq: &PlanQuery, on_progres
 /// Джоба = сбор рейсов по остановкам запроса, рейсы — в plan_flights; пока они в
 /// памяти, стыковка под фильтры запроса и вид в `on_view` (кэш API) до выставления
 /// done; котировки — в SQLite уже после done.
-pub fn run_plan_collection(db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>, on_view: &dyn Fn(&PlanQuery, ViewResult)) {
+pub fn run_plan_collection(db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>, on_view: &dyn Fn(&PlanQuery, ViewResult), on_table: &dyn Fn(Arc<FlightCols>)) {
     let conn = match hot::connect(db_path) {
         Ok(c) => c,
         Err(e) => {
@@ -225,7 +225,7 @@ pub fn run_plan_collection(db_path: &str, job_id: &str, pq: &PlanQuery, cancel: 
             return;
         }
     };
-    let outcome = run_inner(&conn, db_path, job_id, pq, cancel.clone(), on_view);
+    let outcome = run_inner(&conn, db_path, job_id, pq, cancel.clone(), on_view, on_table);
     match outcome {
         Ok(()) => {}
         Err(CollectError::Cancelled) => println!("[worker] plan job {job_id} сброшена как зависшая"),
@@ -242,7 +242,7 @@ pub fn run_plan_collection(db_path: &str, job_id: &str, pq: &PlanQuery, cancel: 
     cancel.forget(job_id);
 }
 
-fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>, on_view: &dyn Fn(&PlanQuery, ViewResult)) -> Result<(), CollectError> {
+fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>, on_view: &dyn Fn(&PlanQuery, ViewResult), on_table: &dyn Fn(Arc<FlightCols>)) -> Result<(), CollectError> {
     let stops = parse_stops(&pq.stops);
     let total = request_count(&stops);
     let steps: Vec<(String, i64)> = estimate_plan(&stops, None).legs.iter().map(|l| (format!("{} → {}", l.from_label, l.to_label), l.requests)).collect();
@@ -257,13 +257,16 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
     let store = make_store();
     let view = store_view(store.as_deref(), &stops);
     let mut airport_city = hot::airport_city_map(conn).map_err(CollectError::Failed)?;
+    if let Some(s) = crate::lakestore::global() {
+        for (a, c) in s.airport_city() {
+            airport_city.entry(a).or_insert(c);
+        }
+    }
+    rep.timing("airports", t0.elapsed().as_secs_f64());
     let collected = collect_plan(&stops, &fetcher, view.as_ref(), &rep, &mut airport_city, workers)?;
-    rep.flights(collected.iter().map(|v| v.len()).sum());
+    rep.flights(collected.len());
     rep.timing("collect", t0.elapsed().as_secs_f64());
-    let t = Instant::now();
-    let table = FlightCols::from_collected(&collected);
-    hot::put_plan_flights(conn, db_path, job_id, &table).map_err(CollectError::Failed)?;
-    rep.timing("save", t.elapsed().as_secs_f64());
+    let table = Arc::new(collected);
     let t = Instant::now();
     rep.stage("build", &[])?;
 
@@ -292,13 +295,24 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
     rep.timing("build", t.elapsed().as_secs_f64());
     rep.timing("total", t0.elapsed().as_secs_f64());
     rep.flush_state()?;
+    on_table(table.clone());
     on_view(pq, result);
     hot::update_job(conn, job_id, &[("status", json!("done"))]).map_err(CollectError::Failed)?;
     println!("[worker] plan job {job_id} done: {count} цепочек");
 
+    // Рейсы в Parquet — уже после done: другие фильтры берут таблицу из памяти (кэш API),
+    // файл нужен после вытеснения из кэша и рестарта.
+    let t = Instant::now();
+    if let Err(e) = hot::put_plan_flights(conn, db_path, job_id, &table) {
+        println!("[worker] plan job {job_id}: рейсы не сохранены: {e}");
+    }
+    rep.timing("save", t.elapsed().as_secs_f64());
+    let _ = rep.flush_state();
+
     // Котировки планировщику не нужны, они копят карту аэропорт → город и статистику:
     // пишем после done, сбой тут не портит готовую джобу. Виртуальные рейсы — не котировки.
-    let flights: Vec<_> = collected.iter().flatten().filter(|f| f.hidden_city.is_none()).cloned().collect();
+    // рейсы склада в котировки не пишем: карту аэропортов склад ведёт сам
+    let flights = table.owned_tickets();
     let mut qconn = hot::connect(db_path).map_err(CollectError::Failed)?;
     if let Err(e) = hot::upsert_quotes(&mut qconn, &flights, &crate::dates::now_iso()) {
         println!("[worker] plan job {job_id}: save quotes failed: {e}");

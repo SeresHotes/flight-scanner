@@ -401,7 +401,9 @@ impl SyncConfig {
             sync_every: env_secs("LAKE_SYNC_SECONDS", 120),
             full_every: env_secs("LAKE_FULL_SYNC_SECONDS", 6 * 3600),
             snapshot_every: env_secs("LAKE_SNAPSHOT_SECONDS", 3600),
-            workers: std::env::var("LAKE_SYNC_WORKERS").ok().and_then(|s| s.parse().ok()).unwrap_or(16),
+            // VM — 2 vCPU с долей 20 %: разбор файлов упирается в процессор, лишние потоки
+            // только отнимают его у API
+            workers: std::env::var("LAKE_SYNC_WORKERS").ok().and_then(|s| s.parse().ok()).unwrap_or(4),
         }
     }
 }

@@ -220,6 +220,7 @@ pub fn normalize_ticket(raw: &Value, search_origin: Option<&str>, search_destina
         search_date: Some(search_date.to_string()),
         hidden_city: None,
         layover_minutes: None,
+        src: None,
     })
 }
 

@@ -60,13 +60,196 @@ pub struct FlightCols {
     pub arr_ts: Vec<f64>,
     pub dep_ord: Vec<i64>,
     pub arr_ord: Vec<i64>,
-    /// Рейсы целиком (из сбора) или JSON `seg` (из файла), разбираемый лениво.
+    /// Источники рейсов (из сбора) или JSON `seg` (из файла), разбираемый лениво.
     raw: Mutex<Raw>,
     parsed: Mutex<HashMap<usize, Arc<Ticket>>>,
 }
 
+/// Откуда полный рейс строки джобы: строка склада (номер строки блока, у hidden-city —
+/// и выход на пересадке; билет разбирается только для результата) или сам билет (серии
+/// коллектора/GraphQL, тесты).
+#[derive(Clone, Debug)]
+pub enum FlightSrc {
+    Store(crate::lakestore::StoreRow),
+    Owned(Arc<Ticket>),
+}
+
+
+/// Строка рейса до раскладки по колонкам (построитель джобы).
+struct Row {
+    leg: i16,
+    orig_city: u32,
+    orig_airport: u32,
+    dest: u32,
+    dest_airport: u32,
+    price: f64,
+    transfers: i64,
+    duration: i64,
+    hidden: bool,
+    bag_incl: bool,
+    pts_min: Option<i64>,
+    layover: Option<i64>,
+    dep_ts: f64,
+    arr_ts: f64,
+    dep_ord: i64,
+    arr_ord: i64,
+    dep_iso: Option<String>,
+    arr_iso: Option<String>,
+    src: FlightSrc,
+}
+
+fn row_of(codes: &mut Vec<String>, ix: &mut FxHashMap<String, u32>, leg: i16, f: &Ticket, src: FlightSrc) -> Row {
+    let dep = f.departure_at.clone().filter(|s| !s.is_empty());
+    let arr = if dep.is_some() { f.arrival() } else { None };
+    let dep_dt = dep.as_deref().and_then(parse_naive);
+    let arr_dt = arr.as_deref().and_then(parse_naive);
+    Row {
+        leg,
+        orig_city: intern(codes, ix, &f.origin_city().map(|s| s.to_uppercase()).unwrap_or_default()),
+        orig_airport: intern(codes, ix, &upper(&f.origin_airport)),
+        dest: intern(codes, ix, &f.dest_city().map(|s| s.to_uppercase()).unwrap_or_default()),
+        dest_airport: intern(codes, ix, &upper(&f.destination_airport)),
+        price: f.price(),
+        transfers: f.transfers,
+        duration: f.duration.unwrap_or(0),
+        hidden: f.hidden_city.is_some(),
+        bag_incl: f.baggage.as_ref().map(|b| b.included).unwrap_or(false),
+        pts_min: f.min_transfer_minutes(),
+        layover: f.layover_minutes,
+        dep_ts: dep_dt.map(naive_seconds).unwrap_or(f64::NAN),
+        arr_ts: arr_dt.map(naive_seconds).unwrap_or(f64::NAN),
+        dep_ord: dep_dt.map(|d| ordinal(d.date())).unwrap_or(-1),
+        arr_ord: arr_dt.map(|d| ordinal(d.date())).unwrap_or(-1),
+        dep_iso: dep,
+        arr_iso: arr,
+        src,
+    }
+}
+
+/// Рейсы джобы по плечам до колонок: сбор кладёт плечо сразу, как собрал, и полные билеты
+/// дальше не держит (из склада остаётся номер строки). Плечи — в любом порядке, колонки
+/// в `finish` — по порядку плеч.
+pub struct FlightColsBuilder {
+    codes: Vec<String>,
+    code_ix: FxHashMap<String, u32>,
+    legs: Vec<Vec<Row>>,
+}
+
+impl FlightColsBuilder {
+    pub fn new(legs: usize) -> FlightColsBuilder {
+        FlightColsBuilder { codes: Vec::new(), code_ix: FxHashMap::default(), legs: (0..legs).map(|_| Vec::new()).collect() }
+    }
+
+    pub fn push_leg(&mut self, leg: usize, flights: Vec<Ticket>) {
+        if self.legs.len() <= leg {
+            self.legs.resize_with(leg + 1, Vec::new);
+        }
+        let out = &mut self.legs[leg];
+        out.reserve(flights.len());
+        static EMPTY: OnceLock<Arc<Ticket>> = OnceLock::new();
+        for f in flights {
+            let src = match &f.src {
+                Some(s) => FlightSrc::Store(s.clone()),
+                None => FlightSrc::Owned(EMPTY.get_or_init(Default::default).clone()),
+            };
+            let mut row = row_of(&mut self.codes, &mut self.code_ix, leg as i16, &f, src);
+            if let FlightSrc::Owned(_) = row.src {
+                row.src = FlightSrc::Owned(Arc::new(f));
+            }
+            out.push(row);
+        }
+    }
+
+    fn push_arcs(&mut self, leg: usize, flights: &[Arc<Ticket>]) {
+        if self.legs.len() <= leg {
+            self.legs.resize_with(leg + 1, Vec::new);
+        }
+        for f in flights {
+            let src = match &f.src {
+                Some(s) => FlightSrc::Store(s.clone()),
+                None => FlightSrc::Owned(f.clone()),
+            };
+            let row = row_of(&mut self.codes, &mut self.code_ix, leg as i16, f, src);
+            self.legs[leg].push(row);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.legs.iter().map(|l| l.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn leg_len(&self, leg: usize) -> usize {
+        self.legs.get(leg).map(|l| l.len()).unwrap_or(0)
+    }
+
+    fn code(&self, id: u32) -> Option<&str> {
+        (id != NO_CODE).then(|| self.codes[id as usize].as_str()).filter(|s| !s.is_empty())
+    }
+
+    /// Города прилёта рейсов плеча (UPPER, без повторов, по порядку появления).
+    pub fn dest_cities(&self, leg: usize) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        self.legs.get(leg).map(|l| l.as_slice()).unwrap_or(&[]).iter().filter(|r| seen.insert(r.dest)).filter_map(|r| self.code(r.dest).map(String::from)).collect()
+    }
+
+    /// Коды вылета рейсов плеча — город и аэропорт (UPPER, без повторов).
+    pub fn origin_codes(&self, leg: usize) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for r in self.legs.get(leg).map(|l| l.as_slice()).unwrap_or(&[]) {
+            for id in [r.orig_city, r.orig_airport] {
+                if seen.insert(id) {
+                    if let Some(c) = self.code(id) {
+                        out.push(c.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn finish(self) -> FlightCols {
+        let n = self.len();
+        let mut c = FlightCols::with_capacity(n);
+        c.codes = self.codes;
+        c.code_ix = self.code_ix;
+        let (mut dep_iso, mut arr_iso, mut srcs) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        for leg in self.legs {
+            for r in leg {
+                c.leg.push(r.leg);
+                c.orig_city_id.push(r.orig_city);
+                c.orig_airport_id.push(r.orig_airport);
+                c.dest_id.push(r.dest);
+                c.dest_airport_id.push(r.dest_airport);
+                c.price.push(r.price);
+                c.transfers.push(r.transfers);
+                c.duration.push(r.duration);
+                c.hidden.push(r.hidden);
+                c.bag_incl.push(r.bag_incl);
+                c.pts_min.push(r.pts_min);
+                c.layover.push(r.layover);
+                c.dep_ts.push(r.dep_ts);
+                c.arr_ts.push(r.arr_ts);
+                c.dep_ord.push(r.dep_ord);
+                c.arr_ord.push(r.arr_ord);
+                dep_iso.push(r.dep_iso);
+                arr_iso.push(r.arr_iso);
+                srcs.push(r.src);
+            }
+        }
+        c.n = c.leg.len();
+        c.raw = Mutex::new(Raw::Srcs(srcs));
+        let _ = c.iso.set((dep_iso, arr_iso));
+        c
+    }
+}
+
 enum Raw {
-    Tickets(Vec<Arc<Ticket>>),
+    Srcs(Vec<FlightSrc>),
     /// Путь Parquet: нужные строки колонки seg дочитываются выборкой (prefetch / flight).
     Lazy(String),
 }
@@ -98,24 +281,24 @@ impl FlightCols {
         self.n == 0
     }
 
-    /// Из собранных рейсов по плечам.
+    /// Из собранных рейсов по плечам (билеты из склада — номерами строк).
     pub fn from_collected(collected: &[Vec<Arc<Ticket>>]) -> FlightCols {
-        let n: usize = collected.iter().map(|v| v.len()).sum();
-        let mut c = FlightCols::with_capacity(n);
-        let mut raw = Vec::with_capacity(n);
-        let (mut dep_iso, mut arr_iso) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        let mut b = FlightColsBuilder::new(collected.len());
         for (leg, flights) in collected.iter().enumerate() {
-            for f in flights {
-                let (dep, arr) = c.push(leg as i16, f);
-                dep_iso.push(dep);
-                arr_iso.push(arr);
-                raw.push(f.clone());
-            }
+            b.push_arcs(leg, flights);
         }
-        c.n = c.leg.len();
-        c.raw = Mutex::new(Raw::Tickets(raw));
-        let _ = c.iso.set((dep_iso, arr_iso));
-        c
+        b.finish()
+    }
+
+    /// Билеты не из склада (серии коллектора/GraphQL), без виртуальных — для котировок.
+    pub fn owned_tickets(&self) -> Vec<Arc<Ticket>> {
+        match &*self.raw.lock().unwrap() {
+            Raw::Srcs(v) => v.iter().filter_map(|s| match s {
+                FlightSrc::Owned(t) if t.hidden_city.is_none() => Some(t.clone()),
+                _ => None,
+            }).collect(),
+            Raw::Lazy(_) => Vec::new(),
+        }
     }
 
     /// Номер кода (None — такого кода в рейсах нет).
@@ -145,35 +328,9 @@ impl FlightCols {
             arr_ts: Vec::with_capacity(n),
             dep_ord: Vec::with_capacity(n),
             arr_ord: Vec::with_capacity(n),
-            raw: Mutex::new(Raw::Tickets(Vec::new())),
+            raw: Mutex::new(Raw::Srcs(Vec::new())),
             parsed: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Строка рейса f; возвращает (вылет, прилёт) строками — для колонок ISO.
-    fn push(&mut self, leg: i16, f: &Ticket) -> (Option<String>, Option<String>) {
-        let dep = f.departure_at.clone().filter(|s| !s.is_empty());
-        let arr = if dep.is_some() { f.arrival() } else { None };
-        let dep_dt = dep.as_deref().and_then(parse_naive);
-        let arr_dt = arr.as_deref().and_then(parse_naive);
-        self.leg.push(leg);
-        let (codes, ix) = (&mut self.codes, &mut self.code_ix);
-        self.orig_city_id.push(intern(codes, ix, &f.origin_city().map(|s| s.to_uppercase()).unwrap_or_default()));
-        self.orig_airport_id.push(intern(codes, ix, &upper(&f.origin_airport)));
-        self.dest_id.push(intern(codes, ix, &f.dest_city().map(|s| s.to_uppercase()).unwrap_or_default()));
-        self.dest_airport_id.push(intern(codes, ix, &upper(&f.destination_airport)));
-        self.price.push(f.price());
-        self.transfers.push(f.transfers);
-        self.duration.push(f.duration.unwrap_or(0));
-        self.hidden.push(f.hidden_city.is_some());
-        self.bag_incl.push(f.baggage.as_ref().map(|b| b.included).unwrap_or(false));
-        self.pts_min.push(f.min_transfer_minutes());
-        self.layover.push(f.layover_minutes);
-        self.dep_ts.push(dep_dt.map(naive_seconds).unwrap_or(f64::NAN));
-        self.arr_ts.push(arr_dt.map(naive_seconds).unwrap_or(f64::NAN));
-        self.dep_ord.push(dep_dt.map(|d| ordinal(d.date())).unwrap_or(-1));
-        self.arr_ord.push(arr_dt.map(|d| ordinal(d.date())).unwrap_or(-1));
-        (dep, arr)
     }
 
     /// Код по номеру ('' — NO_CODE).
@@ -201,7 +358,7 @@ impl FlightCols {
         self.iso.get_or_init(|| {
             let path = match &*self.raw.lock().unwrap() {
                 Raw::Lazy(p) => Some(p.clone()),
-                Raw::Tickets(_) => None,
+                Raw::Srcs(_) => None,
             };
             path.and_then(|p| read_iso(&p).map_err(|e| eprintln!("[flightcols] {p}: dep_iso/arr_iso не прочитаны: {e}")).ok())
                 .unwrap_or_else(|| (vec![None; self.n], vec![None; self.n]))
@@ -223,8 +380,10 @@ impl FlightCols {
     pub fn flight(&self, i: usize) -> Arc<Ticket> {
         {
             let raw = self.raw.lock().unwrap();
-            if let Raw::Tickets(v) = &*raw {
-                return v[i].clone();
+            if let Raw::Srcs(v) = &*raw {
+                if let FlightSrc::Owned(t) = &v[i] {
+                    return t.clone();
+                }
             }
         }
         if let Some(got) = self.parsed.lock().unwrap().get(&i) {
@@ -238,10 +397,6 @@ impl FlightCols {
     /// (RowSelection) — читается и копируется только нужное, а при индексе страниц
     /// ненужные страницы колонки seg не распаковываются вовсе.
     pub fn prefetch(&self, rows: &[usize]) {
-        let path = match &*self.raw.lock().unwrap() {
-            Raw::Lazy(p) => p.clone(),
-            Raw::Tickets(_) => return,
-        };
         let mut need: Vec<usize> = {
             let parsed = self.parsed.lock().unwrap();
             rows.iter().copied().filter(|r| *r < self.n && !parsed.contains_key(r)).collect()
@@ -251,15 +406,54 @@ impl FlightCols {
         if need.is_empty() {
             return;
         }
-        let jsons = read_seg_rows(&path, &need).unwrap_or_else(|e| {
-            eprintln!("[flightcols] {path}: колонка seg не прочитана: {e}");
-            vec![None; need.len()]
-        });
+        let got = self.materialize(&need);
         let mut parsed = self.parsed.lock().unwrap();
-        for (r, json) in need.into_iter().zip(jsons) {
-            let ticket: Ticket = json.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
-            parsed.insert(r, Arc::new(ticket));
+        for (r, t) in need.into_iter().zip(got) {
+            parsed.insert(r, t);
         }
+    }
+
+    /// Полные рейсы строк (по возрастанию) без кэша: билеты как есть, строки склада —
+    /// разжатием их блоков, из файла — выборкой колонки seg.
+    fn materialize(&self, rows: &[usize]) -> Vec<Arc<Ticket>> {
+        let raw = self.raw.lock().unwrap();
+        match &*raw {
+            Raw::Srcs(srcs) => {
+                let store: Vec<(usize, &crate::lakestore::StoreRow)> = rows.iter().enumerate().filter_map(|(k, &r)| match &srcs[r] {
+                    FlightSrc::Store(s) => Some((k, s)),
+                    FlightSrc::Owned(_) => None,
+                }).collect();
+                let refs: Vec<&crate::lakestore::StoreRow> = store.iter().map(|(_, s)| *s).collect();
+                let mut decoded = crate::lakestore::materialize(&refs).unwrap_or_else(|e| {
+                    eprintln!("[flightcols] строки склада не разобраны: {e}");
+                    vec![Ticket::default(); refs.len()]
+                }).into_iter();
+                let mut out: Vec<Arc<Ticket>> = Vec::with_capacity(rows.len());
+                for &r in rows {
+                    out.push(match &srcs[r] {
+                        FlightSrc::Owned(t) => t.clone(),
+                        FlightSrc::Store(_) => Arc::new(decoded.next().unwrap_or_default()),
+                    });
+                }
+                out
+            }
+            Raw::Lazy(path) => {
+                let path = path.clone();
+                drop(raw);
+                let jsons = read_seg_rows(&path, rows).unwrap_or_else(|e| {
+                    eprintln!("[flightcols] {path}: колонка seg не прочитана: {e}");
+                    vec![None; rows.len()]
+                });
+                jsons.into_iter().map(|json| Arc::new(json.as_deref().and_then(|s| serde_json::from_str::<Ticket>(s).ok()).unwrap_or_default())).collect()
+            }
+        }
+    }
+
+    /// Полные рейсы плеча (по порядку строк).
+    pub fn leg_flights(&self, leg: usize) -> Vec<Arc<Ticket>> {
+        let rows = self.rows(leg);
+        self.prefetch(&rows);
+        rows.into_iter().map(|r| self.flight(r)).collect()
     }
 
     pub fn rows(&self, leg: usize) -> Vec<usize> {
@@ -330,45 +524,81 @@ impl FlightCols {
         Arc::new(Schema::new(fields))
     }
 
-    fn to_batch(&self) -> Result<RecordBatch, String> {
-        self.prefetch(&(0..self.n).collect::<Vec<_>>());
-        let seg: Vec<Option<String>> = (0..self.n)
-            .map(|i| serde_json::to_string(&self.flight(i).segment_source()).ok())
-            .collect();
-        let codes = |ids: &Vec<u32>| -> ArrayRef { Arc::new(StringArray::from(ids.iter().map(|&id| Some(self.code(id))).collect::<Vec<_>>())) };
+    /// JSON сегмента (колонка seg) всех строк. Строки склада разбираются в порядке их
+    /// блоков кусками по ~SEG_CHUNK строк — каждый блок разжимается один раз.
+    fn seg_all(&self) -> Vec<Option<String>> {
+        const SEG_CHUNK: usize = 32_768;
+        let mut order: Vec<usize> = (0..self.n).collect();
+        {
+            let raw = self.raw.lock().unwrap();
+            if let Raw::Srcs(srcs) = &*raw {
+                let key = |r: usize| match &srcs[r] {
+                    FlightSrc::Store(s) => (Arc::as_ptr(&s.block) as usize, s.row as usize),
+                    FlightSrc::Owned(_) => (0, r),
+                };
+                order.sort_by_key(|&r| key(r));
+            }
+        }
+        let mut out: Vec<Option<String>> = vec![None; self.n];
+        for chunk in order.chunks(SEG_CHUNK) {
+            let mut rows = chunk.to_vec();
+            rows.sort_unstable();
+            for (r, t) in rows.iter().zip(self.materialize(&rows)) {
+                out[*r] = serde_json::to_string(&t.segment_source()).ok();
+            }
+        }
+        out
+    }
+
+    /// Строки [from, to) батчем Parquet (seg — готовые JSON этих строк).
+    fn to_batch(&self, from: usize, to: usize, seg: &[Option<String>]) -> Result<RecordBatch, String> {
+        let r = from..to;
+        let codes = |ids: &[u32]| -> ArrayRef { Arc::new(StringArray::from(ids.iter().map(|&id| Some(self.code(id))).collect::<Vec<_>>())) };
+        let opt = |v: &[Option<i64>]| -> ArrayRef { Arc::new(Float64Array::from(v.iter().map(|v| v.map(|x| x as f64).unwrap_or(f64::NAN)).collect::<Vec<_>>())) };
         let cols: Vec<ArrayRef> = vec![
-            codes(&self.orig_city_id),
-            codes(&self.orig_airport_id),
-            codes(&self.dest_id),
-            codes(&self.dest_airport_id),
-            Arc::new(StringArray::from(self.dep_iso().iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
-            Arc::new(StringArray::from(self.arr_iso().iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
-            Arc::new(Int16Array::from(self.leg.clone())),
-            Arc::new(Float64Array::from(self.price.clone())),
-            Arc::new(Int32Array::from(self.transfers.iter().map(|t| *t as i32).collect::<Vec<_>>())),
-            Arc::new(Int64Array::from(self.duration.clone())),
-            Arc::new(BooleanArray::from(self.hidden.clone())),
-            Arc::new(BooleanArray::from(self.bag_incl.clone())),
-            Arc::new(Float64Array::from(self.pts_min.iter().map(|v| v.map(|x| x as f64).unwrap_or(f64::NAN)).collect::<Vec<_>>())),
-            Arc::new(Float64Array::from(self.layover.iter().map(|v| v.map(|x| x as f64).unwrap_or(f64::NAN)).collect::<Vec<_>>())),
-            Arc::new(Float64Array::from(self.dep_ts.clone())),
-            Arc::new(Float64Array::from(self.arr_ts.clone())),
-            Arc::new(Int64Array::from(self.dep_ord.clone())),
-            Arc::new(Int64Array::from(self.arr_ord.clone())),
+            codes(&self.orig_city_id[r.clone()]),
+            codes(&self.orig_airport_id[r.clone()]),
+            codes(&self.dest_id[r.clone()]),
+            codes(&self.dest_airport_id[r.clone()]),
+            Arc::new(StringArray::from(self.dep_iso()[r.clone()].iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(self.arr_iso()[r.clone()].iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+            Arc::new(Int16Array::from(self.leg[r.clone()].to_vec())),
+            Arc::new(Float64Array::from(self.price[r.clone()].to_vec())),
+            Arc::new(Int32Array::from(self.transfers[r.clone()].iter().map(|t| *t as i32).collect::<Vec<_>>())),
+            Arc::new(Int64Array::from(self.duration[r.clone()].to_vec())),
+            Arc::new(BooleanArray::from(self.hidden[r.clone()].to_vec())),
+            Arc::new(BooleanArray::from(self.bag_incl[r.clone()].to_vec())),
+            opt(&self.pts_min[r.clone()]),
+            opt(&self.layover[r.clone()]),
+            Arc::new(Float64Array::from(self.dep_ts[r.clone()].to_vec())),
+            Arc::new(Float64Array::from(self.arr_ts[r.clone()].to_vec())),
+            Arc::new(Int64Array::from(self.dep_ord[r.clone()].to_vec())),
+            Arc::new(Int64Array::from(self.arr_ord[r].to_vec())),
             Arc::new(StringArray::from(seg.iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
         ];
         RecordBatch::try_new(Self::schema(), cols).map_err(|e| e.to_string())
     }
 
+    /// Рейсы джобы в Parquet кусками по WRITE_CHUNK строк; JSON сегментов (seg) — заранее,
+    /// в порядке блоков склада.
     pub fn write(&self, path: &str) -> Result<(), String> {
-        let batch = self.to_batch()?;
+        const WRITE_CHUNK: usize = 32_768;
         let file = File::create(path).map_err(|e| e.to_string())?;
         let props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_column_compression("seg".into(), Compression::LZ4_RAW)
             .build();
-        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props)).map_err(|e| e.to_string())?;
-        writer.write(&batch).map_err(|e| e.to_string())?;
+        let mut writer = ArrowWriter::try_new(file, Self::schema(), Some(props)).map_err(|e| e.to_string())?;
+        let seg = self.seg_all();
+        let mut from = 0;
+        while from < self.n || from == 0 {
+            let to = (from + WRITE_CHUNK).min(self.n);
+            writer.write(&self.to_batch(from, to, &seg[from..to])?).map_err(|e| e.to_string())?;
+            if to >= self.n {
+                break;
+            }
+            from = to;
+        }
         writer.close().map_err(|e| e.to_string())?;
         Ok(())
     }
