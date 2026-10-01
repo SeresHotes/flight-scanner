@@ -320,22 +320,34 @@ pub fn collect_plan(
             collected[i] = Some(collect_leg(&stops, i, fetch, store, progress, airport_city, workers)?);
         }
     }
-    // 2. «любой → любой»: слева направо, города вылета — прилёты предыдущего плеча,
-    //    города прилёта — вылеты следующего (если оно уже собрано)
-    for i in 0..legs {
-        if collected[i].is_some() {
-            continue;
-        }
+    // 2. «любой → любой»: от концов к середине — каждый раз берём плечо, у которого больше
+    //    собранных соседей (сначала те, что примыкают к плечам с городами, последним — среднее,
+    //    ограниченное с обеих сторон); города вылета — прилёты предыдущего плеча, города
+    //    прилёта — вылеты следующего (что из них уже собрано).
+    loop {
+        let Some(i) = (0..legs)
+            .filter(|&i| collected[i].is_none())
+            .max_by_key(|&i| {
+                let prev = i > 0 && collected[i - 1].is_some();
+                let next = collected.get(i + 1).map(|c| c.is_some()).unwrap_or(false);
+                (prev as u8 + next as u8, std::cmp::Reverse(i))
+            })
+        else {
+            break;
+        };
         progress.leg(i)?;
         let Some(view) = store else {
             return Err(CollectError::Failed("плечо «любой → любой» требует склад билетов (TICKETS_URL)".into()));
         };
-        let prev = collected.get(i.wrapping_sub(1)).and_then(|c| c.as_ref()).ok_or_else(|| CollectError::Failed("плечо «любой → любой» без собранного предыдущего плеча".into()))?;
         let mut origins: Vec<String> = Vec::new();
-        for t in prev.iter() {
-            if let Some(c) = t.dest_city().map(|s| s.to_uppercase()) {
-                if !origins.contains(&c) {
-                    origins.push(c);
+        if i > 0 {
+            if let Some(prev) = &collected[i - 1] {
+                for t in prev.iter() {
+                    if let Some(c) = t.dest_city().map(|s| s.to_uppercase()) {
+                        if !origins.contains(&c) {
+                            origins.push(c);
+                        }
+                    }
                 }
             }
         }
@@ -519,19 +531,20 @@ fn collect_leg(stops: &[Stop], i: usize, fetch: &dyn SeriesFetcher, store: Optio
     Ok(acc.finish())
 }
 
-/// Плечо «любой → любой» из склада: вылеты из городов прилёта предыдущего плеча, прилёты —
-/// в города вылета следующего (если задано). hidden-city — как у X→ANY, хабы — из dests.
+/// Плечо «любой → любой» из склада: вылеты из городов прилёта предыдущего плеча (если оно
+/// собрано), прилёты — в города вылета следующего (если собрано); хотя бы одна сторона задана.
+/// hidden-city — как у X→ANY, хабы — из dests.
 fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String], dests: &[String], progress: &dyn CollectProgress, airport_city: &mut HashMap<String, String>) -> Result<Vec<Arc<Ticket>>, CollectError> {
     let dates = leg_dates(stops, i);
     let (d0, d1) = (dates[0].clone(), dates[dates.len() - 1].clone());
     let mut acc = LegAcc::new();
-    if origins.is_empty() {
-        tick_n(progress, dates.len() as i64 * PAGES_ANY)?;
-        return Ok(acc.finish());
+    if origins.is_empty() && dests.is_empty() {
+        return Err(CollectError::Failed(format!("плечо {} «любой → любой» не ограничено ни одной стороной", i + 1)));
     }
-    // Срез по городам прилёта делает склад; hidden-city через хаб из dests требует всех
-    // билетов из origins — поэтому при заданных dests берём X→ANY целиком и режем сами.
-    let got = view.store.tickets(origins, &[], &[], &d0, &d1)?;
+    // Известны города вылета: берём их X→ANY целиком и режем по dests сами (hidden-city через
+    // хаб из dests требует всех билетов из origins). Известны только города прилёта: срез
+    // склада по ним.
+    let got = if origins.is_empty() { view.store.tickets(&[], dests, &[], &d0, &d1)? } else { view.store.tickets(origins, &[], &[], &d0, &d1)? };
     let allow: Option<HashSet<String>> = if dests.is_empty() { None } else { Some(dests.iter().cloned().collect()) };
     let mut day_flights: Vec<(String, Vec<Ticket>)> = Vec::new();
     for t in got {

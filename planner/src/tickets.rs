@@ -12,7 +12,11 @@ use crate::collect::CollectError;
 use crate::collector::tickets_from_ipc;
 use crate::ticket::Ticket;
 
-pub const DEFAULT_TIMEOUT: f64 = 120.0;
+/// Плечи «любой → любой» тянут сотни тысяч строк — ждём долго.
+pub const DEFAULT_TIMEOUT: f64 = 900.0;
+/// Потолок строк одного запроса к складу: больше — запрос слишком широкий, джоба падает с
+/// понятной ошибкой (вместо молчаливого усечения).
+pub const STORE_MAX_ROWS: usize = 1_000_000;
 
 pub fn tickets_url() -> Option<String> {
     std::env::var("TICKETS_URL").ok().filter(|s| !s.is_empty())
@@ -68,7 +72,13 @@ impl TicketStore for TicketsClient {
         if !via.is_empty() {
             params.push(("via", via.join(",")));
         }
+        params.push(("limit", STORE_MAX_ROWS.to_string()));
         let r = self.get("/v1/tickets", &params)?;
+        let count: usize = r.headers().get("x-tickets-count").and_then(|v| v.to_str().ok()).and_then(|s| s.parse().ok()).unwrap_or(0);
+        if count >= STORE_MAX_ROWS {
+            let side = if !origins.is_empty() { format!("из {} городов", origins.len()) } else { format!("в {} городов", dests.len()) };
+            return Err(CollectError::Failed(format!("Слишком широкий запрос: плечо {side} за {from}..{to} даёт больше {STORE_MAX_ROWS} рейсов. Сузьте окна дат или задайте города вместо «любых».")));
+        }
         let bytes = r.bytes().map_err(|e| CollectError::Failed(format!("склад билетов tickets: {e}")))?;
         tickets_from_ipc(&bytes)
     }

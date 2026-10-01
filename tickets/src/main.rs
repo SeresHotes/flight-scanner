@@ -4,7 +4,7 @@
 //!   PORT                     — порт HTTP (8002)
 //!   TICKETS_SYNC_SECONDS     — интервал сверки (300)
 //!   TICKETS_SYNC_WORKERS     — параллельных загрузок файлов при сверке (4)
-//!   TICKETS_MAX_ROWS         — потолок строк одного ответа /v1/tickets (500000)
+//!   TICKETS_MAX_ROWS         — потолок строк одного ответа /v1/tickets (2000000)
 //!   TICKETS_RETENTION_HOURS  — как часто удалять прошедшие дни (1)
 
 use std::sync::Arc;
@@ -24,7 +24,7 @@ async fn main() {
     let port: u16 = env_or("PORT", "8002").parse().expect("PORT");
     let sync_secs: u64 = env_or("TICKETS_SYNC_SECONDS", "300").parse().expect("TICKETS_SYNC_SECONDS");
     let workers: usize = env_or("TICKETS_SYNC_WORKERS", "4").parse().expect("TICKETS_SYNC_WORKERS");
-    let max_rows: i64 = env_or("TICKETS_MAX_ROWS", "500000").parse().expect("TICKETS_MAX_ROWS");
+    let max_rows: i64 = env_or("TICKETS_MAX_ROWS", "2000000").parse().expect("TICKETS_MAX_ROWS");
     let retention_hours: u64 = env_or("TICKETS_RETENTION_HOURS", "1").parse().expect("TICKETS_RETENTION_HOURS");
 
     let store = Store::connect(&url, workers + 8).expect("postgres");
