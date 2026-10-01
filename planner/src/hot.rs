@@ -175,6 +175,27 @@ pub fn airport_city_map(conn: &Connection) -> DbResult<HashMap<String, String>> 
     Ok(out)
 }
 
+/// Карта аэропорт → город на процесс: полный проход по `quotes` дорог (секунды на большой
+/// таблице), а карта почти не меняется — держим 6 часов. Своё соединение, чтобы не
+/// занимать общее соединение API.
+pub fn airport_city_map_cached(db_path: &str) -> std::sync::Arc<HashMap<String, String>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<Mutex<Option<(Instant, Arc<HashMap<String, String>>)>>> = OnceLock::new();
+    const TTL: Duration = Duration::from_secs(6 * 3600);
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut g = cell.lock().unwrap();
+    if let Some((t, m)) = g.as_ref() {
+        if t.elapsed() < TTL {
+            return m.clone();
+        }
+    }
+    let map = connect(db_path).and_then(|c| airport_city_map(&c)).unwrap_or_default();
+    let map = Arc::new(map);
+    *g = Some((Instant::now(), map.clone()));
+    map
+}
+
 // ----------------------------- plan_flights ----------------------------------
 
 /// Джоба живёт сутки — файлы старше двух суток удаляем.
