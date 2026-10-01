@@ -1,0 +1,17 @@
+name: Dynamics bench
+
+# Замер страницы «Динамика цены» на проде (scripts/dynamics_bench.py): /api/dynamics на
+# 1 день / неделю / месяц вылета — время, файлы, снимки, объём ответа, повтор из кэша.
+# Запуск руками (Actions → Dynamics bench) или workflow_dispatch через API.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bench
+        run: python3 scripts/dynamics_bench.py
