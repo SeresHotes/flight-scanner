@@ -13,6 +13,12 @@
 Город, у которого одни ошибки (неизвестный источнику код), — в карантине: проверяется
 одна дата раз в интервал повтора, остальные не тратят запросы.
 
+Сбор не останавливается, когда весь горизонт свежий: свежие пары старше `refresh_floor_hours`
+(24 ч — младше коллектор всё равно отдаст из кэша) идут вторым эшелоном («refresh») по
+убыванию срочности, то есть самые старые относительно своей цели первыми; у ближних дат
+цель меньше, поэтому они обновляются чаще. Очередь коллектора всегда полна, лимит ручки
+расходуется целиком (запросы приложения — вне очереди, с приоритетом).
+
 Окна дат: источник отдаёт диапазон дат одним запросом (те же билеты, что посуточно),
 а платим минимум страницу за запрос — поэтому подряд идущие «пора» дни города
 склеиваются в окно. Длина окна = бюджет билетов / плотность города (p90 билетов в день
@@ -113,11 +119,14 @@ def merge_cities(seeds: Sequence[str], known: Iterable[Dict[str, Any]]) -> List[
 def plan(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: date,
          horizon_days: int, targets: Targets, now: Optional[datetime] = None,
          exclude: Iterable[Tuple[str, str]] = (), limit: Optional[int] = None,
-         window_tickets: Optional[int] = None, unknown_window_days: int = 30
+         window_tickets: Optional[int] = None, unknown_window_days: int = 30,
+         refresh_floor_hours: Optional[float] = 24.0
          ) -> Tuple[List[Item], Dict[str, Any]]:
     """coverage — строки /v1/coverage: [origin, day, fetched_at, pages, tickets, exhausted, error].
     exclude — пары (origin, day), уже стоящие в очереди коллектора.
     window_tickets — бюджет билетов на окно дат (None — по одному дню на серию).
+    refresh_floor_hours — свежие пары старше этого возраста идут вторым эшелоном
+    («refresh», срочность < 1), чтобы сбор не останавливался; None — свежие пропускаются.
     Возвращает (серии по убыванию срочности, сводка покрытия для метрик)."""
     now = now or datetime.now(timezone.utc)
     cov: Dict[Tuple[str, str], Tuple[float, bool, bool]] = {}
@@ -137,7 +146,7 @@ def plan(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: dat
     excluded = set(exclude)
     items: List[Item] = []
     summary = {"cities": len(cities), "pairs": 0, "fresh": 0, "stale": 0, "missing": 0,
-               "errors": 0, "truncated": 0, "quarantined_cities": 0, "oldest_h": 0.0,
+               "errors": 0, "truncated": 0, "refresh": 0, "quarantined_cities": 0, "oldest_h": 0.0,
                "queued_excluded": 0}
     for city in cities:
         quarantined = errors_by_city.get(city, 0) >= QUARANTINE_ERRORS and not ok_by_city.get(city)
@@ -165,9 +174,12 @@ def plan(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: dat
                         score, reason = age_h / targets.error_retry_hours, "truncated"
                     if score < 1:
                         summary["fresh"] += 1
+                        if refresh_floor_hours is not None and age_h >= refresh_floor_hours:
+                            reason = "refresh"  # второй эшелон: обновляем, самые старые первыми
+                            summary["refresh"] += 1
                     else:
                         summary[reason] += 1
-                if score < 1:
+                if score < 1 and reason != "refresh":
                     continue
             if (city, day) in excluded:
                 summary["queued_excluded"] += 1
@@ -182,6 +194,7 @@ def plan(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: dat
             items.extend(_windows(due, targets, _window_days(
                 p90(known), window_tickets, unknown_window_days, horizon_days), mean(known)))
     rank = {c: i for i, c in enumerate(cities)}
+    # «пора» (срочность ≥ 1) всегда раньше второго эшелона (< 1); внутри — по убыванию срочности
     items.sort(key=lambda it: (-it.score, it.offset, rank[it.origin]))
     summary["oldest_h"] = round(summary["oldest_h"], 1)
     summary["pass_progress"] = round(1 - summary["missing"] / summary["pairs"], 4) if summary["pairs"] else 1.0
@@ -212,9 +225,12 @@ def _windows(due: List[Item], targets: Targets, max_days: int,
                             est_pages=estimate_pages(density, len(cur))))
             cur.clear()
 
+    # дни «пора» и дни второго эшелона не смешиваем в одном окне: иначе обновление свежих
+    # дней шло бы с приоритетом устаревших соседей
     for it in sorted(due, key=lambda it: it.offset):
         if cur and (it.offset != cur[-1].offset + 1 or len(cur) >= max_days
-                    or targets.hours(it.offset) != targets.hours(cur[0].offset)):
+                    or targets.hours(it.offset) != targets.hours(cur[0].offset)
+                    or (it.score >= 1) != (cur[0].score >= 1)):
             flush()
         cur.append(it)
     flush()

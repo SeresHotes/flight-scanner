@@ -51,3 +51,7 @@ class Settings:
     far_hours: float = field(default_factory=lambda: _float("CRAWL_FRESH_FAR_HOURS", 168))
     # Серия с ошибкой источника повторяется не раньше чем через столько часов.
     error_retry_hours: float = field(default_factory=lambda: _float("CRAWL_ERROR_RETRY_HOURS", 24))
+    # Сбор не останавливается: свежие пары старше этого возраста обновляются вторым эшелоном
+    # (самые старые относительно цели первыми). 24 ч = TTL кэша коллектора (младше — no-op).
+    # CRAWL_REFRESH_FLOOR_HOURS=0 — выключить (как раньше: свежие не трогаем).
+    refresh_floor_hours: float = field(default_factory=lambda: _float("CRAWL_REFRESH_FLOOR_HOURS", 24))

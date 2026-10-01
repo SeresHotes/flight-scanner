@@ -44,7 +44,8 @@ def tick(client: CollectorClient, settings: Settings, *, today: Optional[date] =
                           targets=targets, now=now, exclude=queued_keys,
                           limit=max(0, settings.queue_target - queued),
                           window_tickets=settings.window_tickets or None,
-                          unknown_window_days=settings.unknown_window_days)
+                          unknown_window_days=settings.unknown_window_days,
+                          refresh_floor_hours=settings.refresh_floor_hours or None)
     batch, pages = [], queued_pages
     for it in items:
         if pages >= settings.queue_pages:
@@ -75,7 +76,7 @@ def run(settings: Optional[Settings] = None) -> None:
         started = time.monotonic()
         try:
             s = tick(client, settings)
-            print(f"[crawler] городов {s['cities']}, пар {s['pairs']}: свежих {s['fresh']}, "
+            print(f"[crawler] городов {s['cities']}, пар {s['pairs']}: свежих {s['fresh']} (к обновлению {s['refresh']}), "
                   f"устарело {s['stale']}, нет {s['missing']}, ошибок {s['errors']}; "
                   f"в очереди {s['queued_crawl']} (~{s['queued_pages_est']} стр.), подано {s['submitted']} (~{s['submitted_pages_est']} стр.), "
                   f"окон {s['windows']}, проход {s['pass_progress'] * 100:.1f} %")
