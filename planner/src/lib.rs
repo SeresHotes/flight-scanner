@@ -10,6 +10,8 @@ pub mod dates;
 pub mod flightcols;
 pub mod graphql;
 pub mod hot;
+pub mod lakestore;
+pub mod lakesync;
 pub mod nearby;
 pub mod overview;
 pub mod planquery;

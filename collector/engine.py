@@ -22,7 +22,6 @@ import requests
 
 from collector.index import Index, series_key, utcnow
 from collector.lake import LakeWriter, TICKETS_PREFIX, series_table
-from collector.push import TicketsPusher
 from collector.ratelimit import RateLimiter
 from core import graphql_api
 
@@ -167,8 +166,7 @@ class Engine:
         self.settings = settings
         self.store = store
         self.index = index
-        self.pusher = TicketsPusher(settings.tickets_url) if getattr(settings, "tickets_url", None) else None
-        self.writer = LakeWriter(store, index, pusher=self.pusher)
+        self.writer = LakeWriter(store, index)
         self.limiter = limiter or RateLimiter(settings.rate_per_minute, clock=clock, sleep=sleep)
         self._session = requests.Session()
         self._page_fn = page_fn or self._query_page
@@ -194,8 +192,6 @@ class Engine:
     def start(self) -> None:
         self.reconcile_files()
         self._stop.clear()
-        if self.pusher is not None:
-            self.pusher.start()
         for name, target in (("collector-worker", self._worker), ("collector-housekeeping", self._housekeeping)):
             t = threading.Thread(target=target, name=name, daemon=True)
             t.start()
@@ -208,8 +204,6 @@ class Engine:
         for t in self._threads:
             t.join(timeout=timeout)
         self._threads = []
-        if self.pusher is not None:
-            self.pusher.stop()
 
     def reconcile_files(self) -> int:
         """Файлы озера, неизвестные индексу (потерянный индекс), — в учёт объёма."""
@@ -572,6 +566,5 @@ class Engine:
             "cities": len(self.index.cities()),
             "started_at": self.started_at.isoformat(timespec="seconds"),
             "crawler": self.crawler_stats,
-            "tickets_push": self.pusher.stats() if self.pusher else None,
         })
         return st

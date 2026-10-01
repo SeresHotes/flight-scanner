@@ -10,8 +10,8 @@
 - GET  /v1/cities                        — известные города
 - GET  /v1/queue                         — серии в очереди/в работе (сборщик не подаёт их повторно)
 - GET  /v1/stats, POST /v1/stats/crawler — счётчики / сводка сборщика (метрики)
-- GET  /v1/lake/files?since=             — файлы озера по индексу (сверка склада билетов)
-- GET  /v1/lake/file?key=                — байты файла озера (Parquet) для склада билетов
+- GET  /v1/lake/files?since=             — файлы озера по индексу (отладка; склад планировщика читает S3 сам)
+- GET  /v1/lake/file?key=                — байты файла озера (Parquet)
 
 Запуск: uvicorn collector.main:app --host 0.0.0.0 --port 8001
 """
@@ -192,8 +192,7 @@ def create_app(engine: Optional[Engine] = None, settings: Optional[Settings] = N
 
     @app.get("/v1/lake/files")
     def lake_files(since: Optional[str] = None) -> Dict[str, Any]:
-        """Файлы озера по индексу: склад билетов сверяет с ними свой журнал и забирает
-        недостающие через /v1/lake/file. created_at — момент загрузки (ISO)."""
+        """Файлы озера по индексу (байты — /v1/lake/file). created_at — момент загрузки (ISO)."""
         files = eng().index.files_since(since)
         return {"files": files, "count": len(files)}
 

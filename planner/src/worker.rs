@@ -12,7 +12,8 @@ use serde_json::{json, Value};
 
 use crate::collect::{collect_plan, store_view, CollectError, CollectProgress, SeriesFetcher, SeriesResult};
 use crate::collector::{collector_url, CollectorClient};
-use crate::tickets::{tickets_url, TicketStore, TicketsClient};
+use crate::lakestore::{self, SharedStore};
+use crate::tickets::TicketStore;
 use crate::flightcols::FlightCols;
 use crate::graphql::DirectFetcher;
 use crate::hot;
@@ -172,9 +173,9 @@ pub fn make_fetcher(db_path: &str) -> (Box<dyn SeriesFetcher>, usize) {
     }
 }
 
-/// Склад билетов (TICKETS_URL): основной источник рейсов джобы; None — всё сериями.
+/// Склад билетов в памяти (озеро в S3): основной источник рейсов джобы; None — всё сериями.
 pub fn make_store() -> Option<Box<dyn TicketStore>> {
-    tickets_url().map(|u| Box::new(TicketsClient::new(&u)) as Box<dyn TicketStore>)
+    lakestore::global().map(|s| Box::new(SharedStore(s)) as Box<dyn TicketStore>)
 }
 
 /// Результат джобы под фильтры («вид»): компактные цепочки + наборы городов.
