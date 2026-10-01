@@ -1,6 +1,8 @@
-//! Сквозной тест: мок коллектора (Arrow IPC в схеме озера) + приложение планировщика.
-//! Запуск джобы → статус до done → наборы городов → маршруты → маршруты набора →
-//! другой фильтр (стыковка в фоне) → повторный запуск переиспользует джобу.
+//! Сквозной тест: мок коллектора и мок склада билетов (оба — Arrow IPC в схеме озера) +
+//! приложение планировщика. Запуск джобы → статус до done → наборы городов → маршруты →
+//! маршруты набора → другой фильтр (стыковка в фоне) → повторный запуск переиспользует джобу.
+//! Склад покрывает часть дней (MOW 01–02.11, IST 02–03.11), остальное джоба берёт сериями
+//! у коллектора — итог тот же, что был сериями целиком.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,6 +58,50 @@ type Series = HashMap<(String, String, String), Vec<Ticket>>;
 
 struct Mock {
     series: Series,
+    /// Склад билетов: (город, день) → билеты X→ANY.
+    store: HashMap<(String, String), Vec<Ticket>>,
+    store_calls: std::sync::Mutex<Vec<String>>,
+}
+
+async fn store_tickets(State(m): State<Arc<Mock>>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let list = |k: &str| -> Vec<String> { q.get(k).map(|v| v.split(',').filter(|s| !s.is_empty()).map(|s| s.to_uppercase()).collect()).unwrap_or_default() };
+    let (origins, dests) = (list("origin"), list("destination"));
+    let (from, to) = (q["from"].clone(), q.get("to").cloned().unwrap_or(q["from"].clone()));
+    m.store_calls.lock().unwrap().push(format!("o={} d={} {from}..{to}", origins.join(","), dests.join(",")));
+    let mut out = Vec::new();
+    for ((o, day), tickets) in &m.store {
+        if *day < from || *day > to || (!origins.is_empty() && !origins.contains(o)) {
+            continue;
+        }
+        for t in tickets {
+            if dests.is_empty() || t.side_codes(true).iter().any(|c| dests.contains(c)) {
+                out.push(t.clone());
+            }
+        }
+    }
+    ([(header::CONTENT_TYPE, "application/vnd.apache.arrow.stream".to_string()), (header::HeaderName::from_static("x-tickets-count"), out.len().to_string())], lake_ipc(&out))
+}
+
+async fn store_coverage(State(m): State<Arc<Mock>>, Query(q): Query<HashMap<String, String>>) -> Json<Value> {
+    let origins: Vec<String> = q.get("origin").map(|v| v.split(',').map(|s| s.to_uppercase()).collect()).unwrap_or_default();
+    let (from, to) = (q["from"].clone(), q.get("to").cloned().unwrap_or(q["from"].clone()));
+    let series: Vec<Value> = m.store.iter().filter(|((o, d), _)| *d >= from && *d <= to && (origins.is_empty() || origins.contains(o))).map(|((o, d), t)| json!({"origin": o, "day": d, "fetched_at": "2026-09-30T00:00:00Z", "tickets": t.len()})).collect();
+    Json(json!({"series": series, "count": series.len()}))
+}
+
+async fn store_days(State(m): State<Arc<Mock>>, Query(q): Query<HashMap<String, String>>) -> Json<Value> {
+    let (from, to) = (q["from"].clone(), q.get("to").cloned().unwrap_or(q["from"].clone()));
+    let mut days: HashMap<String, i64> = HashMap::new();
+    for (_, d) in m.store.keys() {
+        if *d >= from && *d <= to {
+            *days.entry(d.clone()).or_default() += 1;
+        }
+    }
+    Json(json!({"days": days.iter().map(|(d, n)| json!({"day": d, "series": n, "tickets": 0})).collect::<Vec<_>>()}))
+}
+
+async fn store_health() -> Json<Value> {
+    Json(json!({"status": "ok", "series": 4}))
 }
 
 async fn mock_health() -> Json<Value> {
@@ -94,14 +140,39 @@ async fn mock_exists(State(m): State<Arc<Mock>>, Query(q): Query<HashMap<String,
     Json(json!({"exists": m.series.contains_key(&key)}))
 }
 
-fn mock_router(series: Series) -> Router {
+/// Один мок на оба сервиса: коллектор (/v1/fetch…) и склад билетов (/v1/tickets…).
+fn mock_router(series: Series, store: HashMap<(String, String), Vec<Ticket>>) -> Router {
     Router::new()
         .route("/v1/health", get(mock_health))
         .route("/v1/fetch", post(mock_fetch))
         .route("/v1/requests/{id}", get(mock_status))
         .route("/v1/requests/{id}/result", get(mock_result))
         .route("/v1/series/exists", get(mock_exists))
-        .with_state(Arc::new(Mock { series }))
+        .route("/store/v1/health", get(store_health))
+        .route("/store/v1/tickets", get(store_tickets))
+        .route("/store/v1/coverage", get(store_coverage))
+        .route("/store/v1/coverage/days", get(store_days))
+        .with_state(Arc::new(Mock { series, store, store_calls: std::sync::Mutex::new(Vec::new()) }))
+}
+
+/// Склад: X→ANY города за день — все билеты из города (прямые A→B входят в A→ANY).
+fn store(series: &Series) -> HashMap<(String, String), Vec<Ticket>> {
+    let mut out: HashMap<(String, String), Vec<Ticket>> = HashMap::new();
+    for (o, day) in [("MOW", "2026-11-01"), ("MOW", "2026-11-02"), ("IST", "2026-11-02"), ("IST", "2026-11-03")] {
+        let mut tickets: Vec<Ticket> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for ((so, _sd, sday), ts) in series {
+            if so == o && sday == day {
+                for t in ts {
+                    if seen.insert(t.flight_key()) {
+                        tickets.push(t.clone());
+                    }
+                }
+            }
+        }
+        out.insert((o.to_string(), day.to_string()), tickets);
+    }
+    out
 }
 
 fn series() -> Series {
@@ -149,10 +220,12 @@ async fn wait_done(client: &reqwest::Client, url: &str) -> Value {
 async fn plan_job_end_to_end() {
     let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_addr = mock_listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(mock_listener, mock_router(series())).await.unwrap() });
+    let all = series();
+    tokio::spawn(async move { axum::serve(mock_listener, mock_router(all.clone(), store(&all))).await.unwrap() });
     // SAFETY: переменные читаются позже из рабочих потоков; здесь их ещё нет.
     unsafe {
         std::env::set_var("COLLECTOR_URL", format!("http://{mock_addr}"));
+        std::env::set_var("TICKETS_URL", format!("http://{mock_addr}/store"));
         std::env::set_var("AIRPORT_NETWORK_PATH", "/nonexistent/airport_network.json");
         std::env::set_var("GEO_PATH", "../core/geo.json");
         std::env::set_var("CITY_NAMES_PATH", "../core/city_names.json");
@@ -170,6 +243,7 @@ async fn plan_job_end_to_end() {
     let health = get_json(&client, &format!("{base}/api/health")).await;
     assert_eq!(health["status"], "ok");
     assert_eq!(health["collector"]["status"], "ok");
+    assert_eq!(health["tickets"]["status"], "ok");
 
     let airports = get_json(&client, &format!("{base}/api/airports?q=mos")).await;
     assert_eq!(airports["airports"][0]["code"], "MOW");
@@ -186,8 +260,9 @@ async fn plan_job_end_to_end() {
     });
     let est: Value = client.post(format!("{base}/api/plan/estimate")).json(&query).send().await.unwrap().json().await.unwrap();
     assert_eq!(est["requests"], 3 * 13 + 3 * 13);
-    assert_eq!(est["cached"], est["requests"], "все серии есть у мока: {est}");
+    assert_eq!(est["cached"], est["requests"], "всё либо в складе, либо в кэше серий мока: {est}");
     assert_eq!(est["cold"], 0);
+    assert_eq!(est["source"], "tickets");
 
     let run: Value = client.post(format!("{base}/api/plan/run")).json(&query).send().await.unwrap().json().await.unwrap();
     assert_eq!(run["status"], "collecting", "{run}");
@@ -197,7 +272,8 @@ async fn plan_job_end_to_end() {
     let st = wait_done(&client, &format!("{base}/api/plan/jobs/{job_id}")).await;
     assert_eq!(st["status"], "done", "{st}");
     assert_eq!(st["progress"], st["total"]);
-    assert_eq!(st["stage"]["cached"], 12, "серий из кэша: {st}");
+    // из склада: MOW 01–02 и IST 02–03 (4 единицы), сериями из кэша коллектора: MOW 03 и IST 01 (по 2 серии)
+    assert_eq!(st["stage"]["cached"], 8, "из склада и кэша: {st}");
     // цепочки: прилетевшие в IST 01.11 (прямой + виртуальный) × 4 обратных (02 и 03.11) +
     // прилетевшие 02.11 (два обычных) × 2 обратных 03.11 = 12; тот же день не стыкуется
     assert_eq!(st["summary"]["count"], 12, "{st}");

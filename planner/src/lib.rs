@@ -17,4 +17,5 @@ pub mod search;
 pub mod segments;
 pub mod stops;
 pub mod ticket;
+pub mod tickets;
 pub mod worker;
