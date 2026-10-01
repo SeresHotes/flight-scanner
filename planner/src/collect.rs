@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::stops::{collect_view, leg_dates, Stop, PAGES_ANY, PAGES_CITY};
+use crate::stops::{collect_view, leg_dates, Stop, MAX_JOB_FLIGHTS, PAGES_ANY, PAGES_CITY};
 use crate::ticket::Ticket;
 use crate::tickets::{coverage_for, Coverage, TicketStore};
 
@@ -318,6 +318,7 @@ pub fn collect_plan(
         if stops[i].is_cities() || stops[i + 1].is_cities() {
             progress.leg(i)?;
             collected[i] = Some(collect_leg(&stops, i, fetch, store, progress, airport_city, workers)?);
+            check_total(&collected)?;
         }
     }
     // 2. «любой → любой»: от концов к середине — каждый раз берём плечо, у которого больше
@@ -364,8 +365,18 @@ pub fn collect_plan(
             dests.sort();
         }
         collected[i] = Some(collect_any_any(&stops, i, view, &origins, &dests, progress, airport_city)?);
+        check_total(&collected)?;
     }
     Ok(collected.into_iter().map(|c| c.unwrap_or_default()).collect())
+}
+
+/// Рейсов по всем плечам не больше MAX_JOB_FLIGHTS — иначе планировщику не хватит памяти.
+fn check_total(collected: &[Option<Vec<Arc<Ticket>>>]) -> Result<(), CollectError> {
+    let total: usize = collected.iter().flatten().map(|c| c.len()).sum();
+    if total > MAX_JOB_FLIGHTS {
+        return Err(CollectError::Failed(format!("Слишком широкий запрос: уже {total} рейсов (потолок {MAX_JOB_FLIGHTS}). Сузьте окна дат или задайте города вместо «любых».")));
+    }
+    Ok(())
 }
 
 /// Разбор рейсов плеча: дедуп по flight_key, фильтр стороны прилёта, карта аэропортов.

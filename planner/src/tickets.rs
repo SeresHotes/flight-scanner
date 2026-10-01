@@ -16,7 +16,7 @@ use crate::ticket::Ticket;
 pub const DEFAULT_TIMEOUT: f64 = 900.0;
 /// Потолок строк одного запроса к складу: больше — запрос слишком широкий, джоба падает с
 /// понятной ошибкой (вместо молчаливого усечения).
-pub const STORE_MAX_ROWS: usize = 1_000_000;
+pub const STORE_MAX_ROWS: usize = 600_000;
 
 pub fn tickets_url() -> Option<String> {
     std::env::var("TICKETS_URL").ok().filter(|s| !s.is_empty())
