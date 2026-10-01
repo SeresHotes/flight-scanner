@@ -162,7 +162,8 @@ def test_windows_break_on_gaps_and_unknown_city_uses_default():
 def test_truncated_series_is_refetched_after_retry_interval():
     cov = [_row("MOW", 0, 30, 4800, exhausted=False), _row("MOW", 1, 30, 4800)]
     items, s = plan(["MOW"], cov, today=TODAY, horizon_days=1, targets=T, now=NOW)
-    assert [(i.offset, i.reason) for i in items] == [(0, "truncated")] and s["truncated"] == 1
+    # обрезанная — «пора»; свежая соседка старше суток — вторым эшелоном (refresh), отдельным окном
+    assert [(i.offset, i.reason) for i in items] == [(0, "truncated"), (1, "refresh")] and s["truncated"] == 1
 
 
 def test_tick_submits_windows_and_collector_splits_them(tmp_path):

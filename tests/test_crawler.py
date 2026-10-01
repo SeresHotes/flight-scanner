@@ -55,9 +55,30 @@ def test_stale_near_beats_missing_far_only_after_double_target():
 
 def test_fresh_pairs_are_skipped_and_far_target_is_a_week():
     cov = [_row("MOW", o, age_h=100) for o in range(0, 181)]  # 100 ч: ближние/средние устарели, дальние свежие
-    items, s = plan(["MOW"], cov, today=TODAY, horizon_days=180, targets=T, now=NOW)
+    items, s = plan(["MOW"], cov, today=TODAY, horizon_days=180, targets=T, now=NOW, refresh_floor_hours=None)
     assert s["missing"] == 0 and s["stale"] == 61 and s["fresh"] == 120
     assert max(i.offset for i in items) == 60 and min(i.score for i in items) > 1
+
+
+def test_fresh_pairs_refresh_oldest_first_after_due():
+    # Весь горизонт свежий, но старше суток: сбор не останавливается — второй эшелон по убыванию
+    # срочности (возраст / цель): ближние даты (цель 24 ч) раньше дальних (168 ч); младше суток — нет.
+    cov = [_row("MOW", o, age_h=(10 if o == 1 else 20 if o <= 14 else 60 if o <= 60 else 150)) for o in range(0, 181)]
+    cov.append(_row("MOW", 0, age_h=30))  # сегодня — пора (30/24 > 1); перепишет строку для offset 0
+    items, s = plan(["MOW"], cov[1:] + [cov[-1]], today=TODAY, horizon_days=180, targets=T, now=NOW,
+                    window_tickets=None)
+    # ближние (1..14, 20 ч) младше суток — коллектор отдал бы из кэша, их нет; остальные 166 — к обновлению
+    assert s["stale"] == 1 and s["refresh"] == 166 and s["fresh"] == 180
+    assert items[0].offset == 0 and items[0].reason == "stale"
+    assert all(i.reason == "refresh" and i.score < 1 for i in items[1:])
+    assert not {i.offset for i in items} & set(range(1, 15))
+    scores = [i.score for i in items[1:]]
+    assert scores == sorted(scores, reverse=True)
+    # самые старые относительно цели первыми: дальние 150/168 = 0.89 раньше средних 60/72 = 0.83
+    assert [i.offset for i in items[1:4]] == [61, 62, 63]
+    # по умолчанию (без параметра) порог тоже 24 ч
+    items2, _ = plan(["MOW"], cov[1:] + [cov[-1]], today=TODAY, horizon_days=180, targets=T, now=NOW)
+    assert len(items2) == len(items)
 
 
 def test_error_rows_retry_after_interval_and_quarantine_city():
