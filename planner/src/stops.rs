@@ -192,10 +192,13 @@ pub fn plan_series(stops: &[Stop]) -> Vec<Series> {
                 for a in &from.codes {
                     out.push(Series { leg: i, origin: Some(a.clone()), dest: None, day: day.clone(), pages: PAGES_ANY });
                 }
-            } else {
+            } else if to.is_cities() {
                 for b in &to.codes {
                     out.push(Series { leg: i, origin: None, dest: Some(b.clone()), day: day.clone(), pages: PAGES_ANY });
                 }
+            } else {
+                // любой → любой: только склад билетов, одна «серия» на день (PAGES_ANY в оценке)
+                out.push(Series { leg: i, origin: None, dest: None, day: day.clone(), pages: PAGES_ANY });
             }
         }
     }
@@ -218,10 +221,13 @@ pub struct EstimateLeg {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Estimate {
     pub requests: i64,
+    /// Страниц, которые не пойдут в источник: серии уже в складе билетов или в кэше серий.
     pub cached: i64,
     pub cold: i64,
     pub seconds: i64,
     pub legs: Vec<EstimateLeg>,
+    /// Откуда берутся рейсы: "tickets" (склад) или "collector" (серии через коллектор/GraphQL).
+    pub source: String,
 }
 
 /// Оценка объёма сбора: всего страниц, сколько уже в кэше серий (`is_cached`),
@@ -252,7 +258,7 @@ pub fn estimate_plan(stops: &[Stop], is_cached: Option<&dyn Fn(&Series) -> bool>
         cached += cached_by_leg[i];
     }
     let cold = (requests - cached).max(0);
-    Estimate { requests, cached, cold, seconds: (cold as f64 * SECONDS_PER_REQUEST).round() as i64, legs }
+    Estimate { requests, cached, cold, seconds: (cold as f64 * SECONDS_PER_REQUEST).round() as i64, legs, source: "collector".into() }
 }
 
 pub fn request_count(stops: &[Stop]) -> i64 {

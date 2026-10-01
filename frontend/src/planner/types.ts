@@ -30,10 +30,11 @@ export interface EstimateLeg {
 
 export interface PlannerEstimate {
   requests: number // всего страниц по потолку серий
-  cached?: number // из них в кэше (POST /api/plan/estimate)
+  cached?: number // из них уже в складе билетов или в кэше серий (POST /api/plan/estimate)
   cold?: number // пойдут в источник
   seconds: number // по холодным
   legs: EstimateLeg[]
+  source?: 'tickets' | 'collector' // откуда рейсы: склад билетов (секунды) или серии через коллектор
 }
 
 // --- Результат: построенная цепочка (GET /api/plan/jobs/{id}/routes) ---

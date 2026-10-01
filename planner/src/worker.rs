@@ -10,8 +10,9 @@ use std::time::Instant;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
-use crate::collect::{collect_plan, CollectError, CollectProgress, SeriesFetcher, SeriesResult};
+use crate::collect::{collect_plan, store_view, CollectError, CollectProgress, SeriesFetcher, SeriesResult};
 use crate::collector::{collector_url, CollectorClient};
+use crate::tickets::{tickets_url, TicketStore, TicketsClient};
 use crate::flightcols::FlightCols;
 use crate::graphql::DirectFetcher;
 use crate::hot;
@@ -136,6 +137,12 @@ impl CollectProgress for StageReporter {
     fn leg(&self, i: usize) -> Result<(), CollectError> {
         self.step(i)
     }
+
+    fn store_hit(&self, n: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        let have = inner.state["cached"].as_i64().unwrap_or(0);
+        inner.state["cached"] = json!(have + n as i64);
+    }
 }
 
 /// Обёртка источника: считает попадания в кэш (серии с cached=true).
@@ -161,6 +168,11 @@ pub fn make_fetcher(db_path: &str) -> (Box<dyn SeriesFetcher>, usize) {
         Some(url) => (Box::new(CollectorClient::new(&url).with_ttl(FETCH_CACHE_TTL_SECONDS)), COLLECTOR_FETCH_WORKERS),
         None => (Box::new(DirectFetcher::new(db_path, FETCH_CACHE_TTL_SECONDS)), 1),
     }
+}
+
+/// Склад билетов (TICKETS_URL): основной источник рейсов джобы; None — всё сериями.
+pub fn make_store() -> Option<Box<dyn TicketStore>> {
+    tickets_url().map(|u| Box::new(TicketsClient::new(&u)) as Box<dyn TicketStore>)
 }
 
 /// Результат джобы под фильтры («вид»): компактные цепочки + наборы городов.
@@ -223,8 +235,10 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
     let (inner, workers) = make_fetcher(db_path);
     let on_hit = || rep.cache_hit();
     let fetcher = CountingFetcher { inner, on_hit: &on_hit };
+    let store = make_store();
+    let view = store_view(store.as_deref(), &stops);
     let mut airport_city = hot::airport_city_map(conn).map_err(CollectError::Failed)?;
-    let collected = collect_plan(&stops, &fetcher, &rep, &mut airport_city, workers)?;
+    let collected = collect_plan(&stops, &fetcher, view.as_ref(), &rep, &mut airport_city, workers)?;
     rep.flights(collected.iter().map(|v| v.len()).sum());
     let table = FlightCols::from_collected(&collected);
     hot::put_plan_flights(conn, db_path, job_id, &table).map_err(CollectError::Failed)?;
