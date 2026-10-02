@@ -7,7 +7,7 @@ import { addDaysISO, daysBetweenISO, todayISO } from '../lib/dates'
 import { durFmt, plural } from '../lib/format'
 import { RangeSlider } from '../planner/components/RangeSlider'
 import { FORMATS, PriceChart, type ChartFormat, type ChartUnit } from '../dynamics/PriceChart'
-import { CalendarView, GridView, HeatmapView, ProfileView, SingleView, WeekView } from '../dynamics/Views'
+import { CalendarView, GridView, HeatmapView, ProfileView, SingleView, TableView, WeekView } from '../dynamics/Views'
 import {
   DEFAULT_FILTERS,
   PALETTE,
@@ -21,6 +21,7 @@ import {
   hoursLabel,
   minSeries,
   money,
+  orderedColor,
   passes,
   snapLabel,
   snapTime,
@@ -37,7 +38,16 @@ import {
 // или все сразу; формат графика и шкала (₽ / %) — отдельно. Состояние — в URL.
 
 const MAX_DAYS = 31
-const MAX_PICK = 8
+// рейсов на графике разом: до 8 — свои цвета, больше — одна шкала по времени вылета
+const MAX_PICK = 60
+type FlightSort = 'now' | 'min' | 'dep' | 'drop' | 'rise'
+const FLIGHT_SORTS: [FlightSort, string][] = [
+  ['now', 'дешевле сейчас'],
+  ['min', 'дешевле за всю историю'],
+  ['dep', 'по времени вылета'],
+  ['drop', 'сильнее подешевели'],
+  ['rise', 'сильнее подорожали'],
+]
 const HISTORY = [14, 30, 60, 90, 180]
 const SPANS: [number, string][] = [
   [1, '1 день'],
@@ -48,7 +58,7 @@ const SPANS: [number, string][] = [
 const placeholder = (code: string): AirportOption => ({ code, city: code, label: code })
 
 type Mode = 'min' | 'flight'
-type View = 'overlay' | 'grid' | 'week' | 'calendar' | 'heatmap' | 'profile' | 'single' | 'all'
+type View = 'overlay' | 'grid' | 'week' | 'calendar' | 'heatmap' | 'table' | 'profile' | 'single' | 'all'
 
 const VIEWS: [View, string, string][] = [
   ['overlay', 'Один график', 'все дни вылета на одном графике'],
@@ -56,11 +66,12 @@ const VIEWS: [View, string, string][] = [
   ['week', 'Неделя', 'дни одной недели и их график'],
   ['calendar', 'Календарь', 'месяц: в клетке цена и её линия'],
   ['heatmap', 'Тепловая карта', 'день вылета × день наблюдения'],
+  ['table', 'Таблица', 'цены по дням наблюдения и их изменение'],
   ['profile', 'По дням вылета', 'как сдвигался весь профиль цен'],
   ['single', 'Один день', 'крупно один день вылета'],
   ['all', 'Все сразу', 'все виды друг под другом'],
 ]
-const FLIGHT_VIEWS: View[] = ['overlay', 'grid']
+const FLIGHT_VIEWS: View[] = ['overlay', 'grid', 'table']
 const isView = (v: string | null): v is View => VIEWS.some(([k]) => k === v)
 const isFormat = (v: string | null): v is ChartFormat => FORMATS.some(([k]) => k === v)
 
@@ -352,33 +363,54 @@ function Result({
     [data, prices],
   )
 
-  // список рейсов можно сузить до одного дня вылета
+  // список рейсов можно сузить до одного дня вылета и отсортировать
   const [listDay, setListDay] = useState('')
-  const list = useMemo(
-    () =>
-      data.flights
-        .map((_, fi) => fi)
-        .filter((fi) => ok[fi] && flightStats[fi] && (!listDay || data.flights[fi].day === listDay))
-        .sort((a, b) => Number(flightStats[b]!.live) - Number(flightStats[a]!.live) || flightStats[a]!.last - flightStats[b]!.last),
-    [data, ok, flightStats, listDay],
-  )
+  const [sort, setSort] = useState<FlightSort>('now')
+  const list = useMemo(() => {
+    const st = (fi: number) => flightStats[fi]!
+    const cmp: Record<FlightSort, (a: number, b: number) => number> = {
+      // продающиеся сейчас — выше, среди них дешевле
+      now: (a, b) => Number(st(b).live) - Number(st(a).live) || st(a).last - st(b).last,
+      min: (a, b) => st(a).min - st(b).min,
+      dep: (a, b) => data.flights[a].departure_at.localeCompare(data.flights[b].departure_at) || st(a).last - st(b).last,
+      drop: (a, b) => (st(a).last - st(a).first) / st(a).first - (st(b).last - st(b).first) / st(b).first,
+      rise: (a, b) => (st(b).last - st(b).first) / st(b).first - (st(a).last - st(a).first) / st(a).first,
+    }
+    return data.flights
+      .map((_, fi) => fi)
+      .filter((fi) => ok[fi] && flightStats[fi] && (!listDay || data.flights[fi].day === listDay))
+      .sort(cmp[sort])
+  }, [data, ok, flightStats, listDay, sort])
+  const cheapestLive = useMemo(() => {
+    const live = data.flights.map((_, fi) => fi).filter((fi) => ok[fi] && flightStats[fi]?.live && (!listDay || data.flights[fi].day === listDay))
+    return live.sort((a, b) => flightStats[a]!.last - flightStats[b]!.last)[0] ?? list[0]
+  }, [data, ok, flightStats, listDay, list])
 
   // В режиме рейсов без выбора — самый дешёвый из продающихся.
   const effectivePicked = useMemo(() => {
     const m = new Map([...picked].filter(([fi]) => ok[fi] && flightStats[fi]))
-    if (!m.size && list.length) m.set(list[0], 0)
+    if (!m.size && cheapestLive !== undefined) m.set(cheapestLive, 0)
     return m
-  }, [picked, ok, flightStats, list])
+  }, [picked, ok, flightStats, cheapestLive])
+  // цвет рейса: до 8 выбранных — свой цвет по слоту; больше — шкала по времени вылета
+  const colorOf = useMemo(() => {
+    const keys = [...effectivePicked.keys()]
+    if (keys.length <= PALETTE.length) return (fi: number) => PALETTE[effectivePicked.get(fi)! % PALETTE.length]
+    const byDep = [...keys].sort((a, b) => data.flights[a].departure_at.localeCompare(data.flights[b].departure_at))
+    return (fi: number) => orderedColor(byDep.indexOf(fi), byDep.length)
+  }, [effectivePicked, data])
 
   const daySeries: Series[] = useMemo(() => minSeries(data, ok, prices, days), [data, ok, prices, days])
   const series: Series[] = useMemo(
     () =>
       mode === 'min'
         ? daySeries
-        : flightSeries(data, [...effectivePicked.keys()], prices, (fi) => PALETTE[effectivePicked.get(fi)! % PALETTE.length]),
-    [mode, data, daySeries, prices, effectivePicked],
+        : flightSeries(data, [...effectivePicked.keys()], prices, colorOf),
+    [mode, data, daySeries, prices, effectivePicked, colorOf],
   )
   const effView: View = mode === 'flight' && !FLIGHT_VIEWS.includes(view) ? 'overlay' : view
+  // виды без графика: формат и подпись про точки не нужны
+  const chartless = effView === 'table' || effView === 'heatmap'
 
   function toggle(fi: number) {
     const m = new Map(effectivePicked)
@@ -390,6 +422,13 @@ function Result({
       while (used.has(slot)) slot++
       m.set(fi, slot)
     }
+    setPicked(m)
+  }
+
+  // выбрать все рейсы списка (с учётом дня и фильтров) — до MAX_PICK
+  function pickAll() {
+    const m = new Map<number, number>()
+    list.slice(0, MAX_PICK).forEach((fi, i) => m.set(fi, i))
     setPicked(m)
   }
 
@@ -537,6 +576,7 @@ function Result({
                 })}
               </div>
             </div>
+            {!chartless && (
             <div className="dyn-vb-group wide">
               <span className="dyn-vb-l">Формат графика</span>
               <div className="dyn-views">
@@ -547,6 +587,7 @@ function Result({
                 ))}
               </div>
             </div>
+            )}
           </div>
 
           <Stats series={series} />
@@ -554,6 +595,8 @@ function Result({
           {mode === 'flight' ? (
             effView === 'grid' ? (
               <GridView series={series} format={format} unit={unit} />
+            ) : effView === 'table' ? (
+              <TableView series={series} snapshots={data.snapshots} />
             ) : (
               <PriceChart series={unit === 'pct' ? toPct(series) : series} format={format} unit={unit} emptyText="Выберите рейс в списке ниже." />
             )
@@ -566,23 +609,37 @@ function Result({
               unit={unit}
               focusDay={focusDay}
               setFocusDay={setFocusDay}
+              flightLabel={(fi) => `${clock(data.flights[fi].departure_at)} · ${data.flights[fi].flights.join(' + ')}`}
             />
           )}
-          <div className="dyn-note">
+          {!chartless && <div className="dyn-note">
             Точка — снимок: когда коллектор смотрел цены. Разрыв линии — в этом снимке подходящих билетов не было (распроданы
             или не продавались). {filters.baggage ? 'Цена — тарифы с багажом.' : 'Цена — самый дешёвый тариф (багаж любой).'}
             {format === 'band' && mode === 'min' && ' Коридор — от самой низкой цены до медианы подходящих рейсов в снимке.'}
             {format === 'step' && ' Ступеньки: цена держится до следующего снимка.'}
-          </div>
+          </div>}
 
-          {mode === 'min' ? (
-            (effView === 'overlay' || effView === 'single' || effView === 'all') && <MinTable data={data} series={series} />
-          ) : (
+          {mode === 'flight' && (
             <div className="dyn-flights">
               <div className="count dyn-flights-h">
                 <span>
-                  Рейсы под фильтры: <b>{list.length}</b> · отметьте до {MAX_PICK}, чтобы сравнить на графике
+                  Рейсы под фильтры: <b>{list.length}</b> · на графике <b>{effectivePicked.size}</b> — кликните рейс, чтобы
+                  добавить или убрать
                 </span>
+                <span className="dyn-flights-tools">
+                  <button className="btn-ghost" onClick={pickAll} disabled={!list.length}>
+                    {list.length > MAX_PICK ? `Выбрать первые ${MAX_PICK}` : 'Выбрать все'}
+                  </button>
+                  <button className="btn-ghost" onClick={() => setPicked(new Map())} disabled={effectivePicked.size <= 1}>
+                    Сбросить
+                  </button>
+                  <select value={sort} onChange={(e) => setSort(e.target.value as FlightSort)} title="Сортировка">
+                    {FLIGHT_SORTS.map(([k, l]) => (
+                      <option key={k} value={k}>
+                        {l}
+                      </option>
+                    ))}
+                  </select>
                 {days.length > 1 && (
                   <select value={listDay} onChange={(e) => setListDay(e.target.value)}>
                     <option value="">все дни вылета</option>
@@ -593,20 +650,22 @@ function Result({
                     ))}
                   </select>
                 )}
+                </span>
               </div>
               {visible.map((fi) => {
                 const f = data.flights[fi]
                 const st = flightStats[fi]!
-                const slot = effectivePicked.get(fi)
+                const on = effectivePicked.has(fi)
+                const col = on ? colorOf(fi) : undefined
                 const diff = st.last - st.first
                 const shift = dayShift(f.departure_at, f.arrival_at)
                 return (
                   <div
                     key={fi}
-                    className={`dyn-flight ${slot !== undefined ? 'on' : ''} ${st.live ? '' : 'gone'}`}
+                    className={`dyn-flight ${on ? 'on' : ''} ${st.live ? '' : 'gone'}`}
                     onClick={() => toggle(fi)}
                   >
-                    <span className="dyn-swatch" style={slot !== undefined ? { background: PALETTE[slot % PALETTE.length], borderColor: PALETTE[slot % PALETTE.length] } : undefined} />
+                    <span className="dyn-swatch" style={col ? { background: col, borderColor: col } : undefined} />
                     <div className="dyn-f-main">
                       <div className="dyn-f-time">
                         {days.length > 1 && <span className="dyn-f-day">{dayLabel(f.day)}</span>}
@@ -626,7 +685,7 @@ function Result({
                         {diff === 0 ? 'без изменений' : `${diff > 0 ? '▲' : '▼'} ${money(Math.abs(diff))}`}
                       </span>
                       <small>
-                        {money(st.min)} – {money(st.max)} · {st.n} {plural(st.n, 'снимок', 'снимка', 'снимков')}
+                        мин {money(st.min)} · макс {money(st.max)} · {st.n} {plural(st.n, 'снимок', 'снимка', 'снимков')}
                       </small>
                     </div>
                     {f.link && (
@@ -659,10 +718,12 @@ function MinViews({
   unit,
   focusDay,
   setFocusDay,
+  flightLabel,
 }: {
   view: View
   series: Series[]
   snapshots: DynResponse['snapshots']
+  flightLabel: (fi: number) => string
   format: ChartFormat
   unit: ChartUnit
   focusDay: string | null
@@ -685,6 +746,8 @@ function MinViews({
         )
       case 'heatmap':
         return <HeatmapView series={series} snapshots={snapshots} />
+      case 'table':
+        return <TableView series={series} snapshots={snapshots} flightLabel={flightLabel} />
       case 'profile':
         return <ProfileView series={series} snapshots={snapshots} format={format} unit={unit} />
       case 'single':
@@ -762,48 +825,5 @@ function Stats({ series }: { series: Series[] }) {
         </div>
       </div>
     </div>
-  )
-}
-
-// Таблица режима «самая низкая цена»: снимок × день вылета, какой рейс дал минимум.
-function MinTable({ data, series }: { data: DynResponse; series: Series[] }) {
-  const rows = [...data.snapshots.keys()].reverse()
-  return (
-    <details className="dyn-table" open={series.length === 1}>
-      <summary>Таблица по снимкам</summary>
-      <div className="coll-table-wrap">
-        <table className="coll-table">
-          <thead>
-            <tr>
-              <th>Смотрели</th>
-              {series.map((s) => (
-                <th key={s.id}>{s.label}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((si) => (
-              <tr key={si}>
-                <td>{snapLabel(snapTime(data.snapshots[si]))}</td>
-                {series.map((s) => {
-                  const p = s.points.find((p) => p.si === si)
-                  const f = p?.fi !== undefined ? data.flights[p.fi] : null
-                  return (
-                    <td key={s.id} className="num">
-                      {!p ? '—' : p.v === null ? 'нет билетов' : (
-                        <>
-                          <b>{money(p.v)}</b>
-                          {f && <div className="dyn-cell-sub">{clock(f.departure_at)} · {f.flights.join(' + ')}</div>}
-                        </>
-                      )}
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </details>
   )
 }

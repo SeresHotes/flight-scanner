@@ -260,26 +260,44 @@ export function toPct(series: Series[]): Series[] {
   })
 }
 
-// Тепловая карта: строки — дни вылета, колонки — дни наблюдения (UTC); в клетке —
-// последняя цена на конец дня наблюдения; `seen` — был ли снимок в этот день.
+// По дням наблюдения (местные дни, как подписи графика): на конец каждого дня —
+// последняя известная цена линии. `seen` — был ли в этот день снимок этой линии;
+// иначе цена перенесена с прошлого снимка. Общая основа тепловой карты и таблицы.
 export interface HeatCell {
   v: number | null
   seen: boolean
+  fi?: number // рейс, давший цену
 }
 
+export function localDay(t: number): string {
+  const d = new Date(t)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function localDayEnd(day: string): number {
+  const [y, m, d] = day.split('-').map(Number)
+  return new Date(y, m - 1, d + 1).getTime() - 1
+}
+
+// Местные дни наблюдения от первого до последнего снимка.
+export function obsDays(snapshots: DynSnapshot[]): string[] {
+  if (!snapshots.length) return []
+  const out: string[] = []
+  const last = localDay(snapTime(snapshots[snapshots.length - 1]))
+  for (let d = localDay(snapTime(snapshots[0])); d <= last; d = addDays(d, 1)) out.push(d)
+  return out
+}
+
+// rows[линия][день наблюдения]
 export function heatMatrix(daySeries: Series[], snapshots: DynSnapshot[]): { cols: string[]; rows: HeatCell[][] } {
-  if (!snapshots.length) return { cols: [], rows: [] }
-  const first = snapshots[0].at.slice(0, 10)
-  const last = snapshots[snapshots.length - 1].at.slice(0, 10)
-  const cols = dayRange(first, last)
-  const rows = daySeries.map((s) =>
-    cols.map((c) => {
-      const end = dayTime(c) + 86400e3 - 1
-      const p = asOf(s, end)
-      const seen = s.points.some((q) => q.t >= dayTime(c) && q.t <= end)
-      return { v: p ? p.v : null, seen }
-    }),
-  )
+  const cols = obsDays(snapshots)
+  const rows = daySeries.map((s) => {
+    const seenDays = new Set(s.points.map((p) => localDay(p.t)))
+    return cols.map((c) => {
+      const p = asOf(s, localDayEnd(c))
+      return { v: p ? p.v : null, seen: seenDays.has(c), fi: p?.fi }
+    })
+  })
   return { cols, rows }
 }
 

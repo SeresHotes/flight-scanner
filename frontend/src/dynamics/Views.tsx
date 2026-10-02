@@ -289,3 +289,78 @@ export function SingleView({ series, format, unit, day, setDay }: ViewProps & { 
     </div>
   )
 }
+
+// ---------------------------------------------------------------- таблица
+
+// Таблица «день наблюдения × день вылета»: на конец каждого дня — последняя известная
+// цена (бледная — в этот день снимка не было, перенесена) и изменение к прошлой строке.
+// Сверху вниз — от старых наблюдений к новым, как на графике слева направо.
+export function TableView({ series, snapshots, flightLabel }: { series: Series[]; snapshots: DynSnapshot[]; flightLabel?: (fi: number) => string }) {
+  const { cols, rows } = useMemo(() => heatMatrix(series, snapshots), [series, snapshots])
+  const [newestFirst, setNewestFirst] = useState(false)
+  if (!cols.length) return <div className="dyn-chart-empty">Нет данных под фильтры.</div>
+  // строки — только дни, когда хоть одна линия что-то видела
+  const idx = cols.map((_, ci) => ci).filter((ci) => rows.some((r) => r[ci].seen))
+  const order = newestFirst ? [...idx].reverse() : idx
+  const prevOf = (ci: number) => {
+    const k = idx.indexOf(ci)
+    return k > 0 ? idx[k - 1] : null
+  }
+  const one = series.length === 1
+  return (
+    <div className="dyn-table-view">
+      <div className="dyn-cal-legend">
+        Строка — день, когда смотрели цену; в клетке — последняя цена на конец этого дня и изменение к предыдущей строке.
+        Бледная — в этот день снимка дня вылета не было, цена с прошлого снимка.
+        <span className="segbtns dyn-heat-mode">
+          <button className={!newestFirst ? 'active' : ''} onClick={() => setNewestFirst(false)}>сначала старые</button>
+          <button className={newestFirst ? 'active' : ''} onClick={() => setNewestFirst(true)}>сначала новые</button>
+        </span>
+      </div>
+      <div className="dyn-heat-wrap">
+        <table className="dyn-ptable">
+          <thead>
+            <tr>
+              <th className="corner">смотрели</th>
+              {series.map((s) => (
+                <th key={s.id}>{one ? 'цена' : s.label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {order.map((ci) => {
+              const prev = prevOf(ci)
+              return (
+                <tr key={ci}>
+                  <th className="rowh">{dayLabel(cols[ci])}</th>
+                  {rows.map((r, si) => {
+                    const c = r[ci]
+                    const pv = prev === null ? null : r[prev].v
+                    const d = c.v !== null && pv !== null && pv !== undefined ? c.v - pv : null
+                    return (
+                      <td key={si} className={`${c.seen ? '' : 'carry'}`}>
+                        {c.v === null ? (
+                          <span className="dyn-muted">—</span>
+                        ) : (
+                          <>
+                            <b>{money(c.v)}</b>
+                            {d !== null && d !== 0 && (
+                              <span className={`dyn-delta ${d > 0 ? 'up' : 'down'}`}>
+                                {d > 0 ? '▲' : '▼'} {money(Math.abs(d))}
+                              </span>
+                            )}
+                            {one && c.fi !== undefined && flightLabel && <div className="dyn-cell-sub">{flightLabel(c.fi)}</div>}
+                          </>
+                        )}
+                      </td>
+                    )
+                  })}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
