@@ -28,9 +28,9 @@ use crate::collector::{collector_url, CollectorClient};
 use crate::flightcols::FlightCols;
 use crate::hot::{self, Job};
 use crate::planquery::PlanQuery;
-use crate::search::{build_combo_views, Aborted, ComboRoutes};
+use crate::search::{build_combo_views, Aborted, Routes};
 use crate::collect::store_view;
-use crate::stops::{estimate_plan, is_valid_max_results, parse_stops, total_window_days, Estimate, Series, DEFAULT_MAX_RESULTS, MAX_REQUESTS, MAX_RESULTS, MAX_SEARCH_STEPS, MAX_TOTAL_WINDOW_DAYS};
+use crate::stops::{estimate_plan, is_valid_max_results, parse_stops, skip_error, total_window_days, Estimate, Series, DEFAULT_MAX_RESULTS, MAX_REQUESTS, MAX_RESULTS, MAX_SEARCH_STEPS, MAX_TOTAL_WINDOW_DAYS};
 use crate::worker::{self, CancelSet, ViewResult, FETCH_CACHE_TTL_SECONDS};
 
 /// Сколько джоба в running может молчать, прежде чем /jobs/rescue сочтёт её зависшей.
@@ -70,7 +70,7 @@ impl Executor {
 pub struct ViewEntry {
     pub result: ViewResult,
     pub query: PlanQuery,
-    pub combo_routes: Mutex<Vec<(String, Arc<ComboRoutes>)>>,
+    pub combo_routes: Mutex<Vec<(String, Arc<Routes>)>>,
 }
 
 /// Строящийся вид: этап, прогресс стыковки, ошибка.
@@ -392,6 +392,9 @@ fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery, fresh: bool) -> Val
     if !is_valid_max_results(query.max_results) {
         return json!({"status": "invalid", "message": format!("Лимит маршрутов вне диапазона 1…{MAX_RESULTS}.")});
     }
+    if let Some(msg) = skip_error(&stops) {
+        return json!({"status": "invalid", "message": msg});
+    }
     let days = total_window_days(&stops);
     if days > MAX_TOTAL_WINDOW_DAYS {
         return json!({"status": "too_wide", "message": format!("Суммарная ширина окон дат — {days} дн., максимум {MAX_TOTAL_WINDOW_DAYS}. Сузьте диапазоны.")});
@@ -537,7 +540,7 @@ fn default_routes_limit() -> i64 {
 
 /// Маршруты выбранных наборов — по требованию из сохранённых рейсов джобы с фильтрами
 /// вида, кэш по набору ключей в записи вида.
-fn combo_routes(app: &AppState, job_id: &str, entry: &ViewEntry, wanted: &[String]) -> Option<Arc<ComboRoutes>> {
+fn combo_routes(app: &AppState, job_id: &str, entry: &ViewEntry, wanted: &[String]) -> Option<Arc<Routes>> {
     let mut keys: Vec<String> = wanted.to_vec();
     keys.sort();
     keys.dedup();
@@ -547,8 +550,7 @@ fn combo_routes(app: &AppState, job_id: &str, entry: &ViewEntry, wanted: &[Strin
     }
     let table = app.table(job_id).ok().flatten()?;
     let stops = parse_stops(&entry.query.stops);
-    let combos: Vec<Vec<String>> = keys.iter().map(|c| c.split('-').map(|s| s.to_string()).collect()).collect();
-    let items = Arc::new(build_combo_views(&stops, &table, &combos, Some(&entry.query)));
+    let items = Arc::new(build_combo_views(&stops, &table, &keys, Some(&entry.query)));
     let mut cache = entry.combo_routes.lock().unwrap();
     if cache.len() >= 8 {
         cache.remove(0);
@@ -566,7 +568,7 @@ async fn plan_job_routes(State(app): State<Arc<AppState>>, Path(job_id): Path<St
         if wanted.is_empty() {
             let mut page = entry.result.view.routes_page(offset, limit);
             page["status"] = json!("ok");
-            page["count"] = json!(entry.result.view.count);
+            page["count"] = json!(entry.result.view.len());
             return page;
         }
         let Some(items) = combo_routes(&app, &job_id, &entry, &wanted) else { return json!({"status": "not_ready"}) };
@@ -602,7 +604,7 @@ async fn plan_job_status(State(app): State<Arc<AppState>>, Path(job_id): Path<St
         let (entry, state) = app.view(&job, &pq);
         if let Some(entry) = entry {
             out["summary"] = json!({
-                "count": entry.result.view.count,
+                "count": entry.result.view.len(),
                 "combos": entry.result.combos.combos.len(),
                 "totalCount": entry.result.combos.total_count,
                 "truncated": entry.result.combos.truncated,

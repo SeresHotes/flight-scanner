@@ -193,7 +193,8 @@ function StayBar({ stop, endpoint = false }: { stop: ItineraryStop; endpoint?: b
   )
 }
 
-export function ItineraryCard({ it }: { it: Itinerary }) {
+// skipped — названия пропущенных остановок запроса (маршрут в обход).
+export function ItineraryCard({ it, skipped }: { it: Itinerary; skipped?: string[] }) {
   const codes = it.stops.map((s) => (s.departFrom ? `${s.code}⇢${s.departFrom.code}` : s.code))
   return (
     <div className="card">
@@ -216,6 +217,11 @@ export function ItineraryCard({ it }: { it: Itinerary }) {
         <span className="mchip tr">
           🔁 пересадок: <b>{it.total_transfers}</b>
         </span>
+        {skipped?.length ? (
+          <span className="mchip pl-skiptag" title="Остановка пропущена: перелёт в обход">
+            ⤼ без <b>{skipped.join(', ')}</b>
+          </span>
+        ) : null}
       </div>
       <div className="legs">
         <StayBar stop={it.stops[0]} endpoint />

@@ -106,9 +106,9 @@ use serde_json::{json, Value};
 use crate::dates::{date_ordinal, date_only, naive_seconds, parse_naive, shift_date, stay_days_secs, weekend_covered, ordinal};
 use crate::flightcols::{FlightCols, NO_CODE};
 use crate::nearby::{distance_km, Hops, HOP_MIN_GAP_MIN};
-use crate::planquery::{trip_length_ok, CityFilter, PlanQuery};
+use crate::planquery::{trip_length_ok, CityFilter, PlanQuery, Variant};
 use crate::segments::{city_pair, make_segment, Segment};
-use crate::stops::{leg_dates, Stop, COMBO_MAX_RESULTS, FINAL_STAY_DAYS};
+use crate::stops::{bypass_leg, leg_dates, leg_specs, spec_dates, Stop, COMBO_MAX_RESULTS, FINAL_STAY_DAYS};
 
 #[derive(Debug)]
 pub struct Aborted;
@@ -178,11 +178,68 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// Плечо сбора (номер в рейсах джобы) для плеча i перебора: у варианта с пропусками — по
+/// его карте плеч, иначе то же i.
+pub fn table_leg(query: Option<&PlanQuery>, i: usize) -> usize {
+    query.and_then(|q| q.variant.as_ref()).and_then(|v| v.table_legs.get(i).copied()).unwrap_or(i)
+}
+
+/// Первый день окна старта: у варианта — свой (плечо в обход шире), иначе — первого плеча.
+pub fn chain_start(stops: &[Stop], query: Option<&PlanQuery>) -> String {
+    if let Some(v) = query.and_then(|q| q.variant.as_ref()) {
+        return v.chain_start.clone();
+    }
+    leg_dates(stops, 0).into_iter().next().unwrap_or_else(|| crate::stops::DEFAULT_START.to_string())
+}
+
+/// Варианты маршрута: без пропускаемых остановок — один, сам запрос; иначе — по варианту на
+/// каждое подмножество пропускаемых остановок (включая пустое): остановки варианта и запрос
+/// под него — фильтры городов пропущенных остановок выкинуты, плечо в обход остановки i
+/// берёт её фильтр `bypass` и рейсы плеча сбора «в обход i».
+pub fn variants(stops: &[Stop], pq: &PlanQuery) -> Vec<(Vec<Stop>, PlanQuery)> {
+    let skippable: Vec<usize> = (1..stops.len().saturating_sub(1)).filter(|&i| stops[i].skip).collect();
+    if skippable.is_empty() {
+        return vec![(stops.to_vec(), pq.clone())];
+    }
+    let specs = leg_specs(stops);
+    let mut out = Vec::new();
+    for mask in 0u32..(1 << skippable.len()) {
+        let skipped: Vec<usize> = skippable.iter().enumerate().filter(|(b, _)| mask >> b & 1 == 1).map(|(_, &i)| i).collect();
+        if skipped.windows(2).any(|w| w[1] == w[0] + 1) {
+            continue; // две подряд — плеча в обход нет (skip_error не пускает такие запросы)
+        }
+        let keep: Vec<usize> = (0..stops.len()).filter(|i| !skipped.contains(i)).collect();
+        let mut legs = Vec::new();
+        let mut table_legs = Vec::new();
+        for w in keep.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if b == a + 1 {
+                legs.push(pq.legs.get(a).cloned().unwrap_or_default());
+                table_legs.push(a);
+            } else {
+                legs.push(pq.cities.get(a + 1).and_then(|c| c.bypass.clone()).unwrap_or_default());
+                table_legs.push(bypass_leg(stops, a + 1).expect("плечо в обход пропускаемой остановки"));
+            }
+        }
+        let start = spec_dates(stops, specs[table_legs[0]]).into_iter().next().unwrap_or_else(|| crate::stops::DEFAULT_START.to_string());
+        let vq = PlanQuery {
+            stops: keep.iter().map(|&i| pq.stops[i].clone()).collect(),
+            cities: keep.iter().map(|&i| pq.cities.get(i).cloned().unwrap_or_default()).collect(),
+            legs,
+            trip_length: pq.trip_length,
+            max_results: pq.max_results,
+            variant: Some(Variant { table_legs, chain_start: start, skipped }),
+        };
+        out.push((keep.iter().map(|&i| stops[i].clone()).collect(), vq));
+    }
+    out
+}
+
 /// Строки рейсов каждого плеча, прошедшие фильтр плеча (до перебора).
 pub fn leg_rows(table: &FlightCols, legs: usize, query: Option<&PlanQuery>) -> Vec<Vec<usize>> {
     (0..legs)
         .map(|i| {
-            let rows = table.rows(i);
+            let rows = table.rows(table_leg(query, i));
             match query.and_then(|q| q.legs.get(i)) {
                 Some(lf) if !lf.is_open() => rows
                     .into_iter()
@@ -198,7 +255,7 @@ pub fn build_ctx<'a>(stops: &'a [Stop], table: &'a FlightCols, query: Option<&Pl
     let legs = stops.len().saturating_sub(1);
     let rows = leg_rows(table, legs, query);
     let legs_by_origin = rows.iter().map(|r| table.by_origin_ids(r)).collect();
-    let chain_start = leg_dates(stops, 0).into_iter().next().unwrap_or_else(|| crate::stops::DEFAULT_START.to_string());
+    let chain_start = chain_start(stops, query);
     let hops = Hops::new(stops);
     let n_codes = table.codes.len();
     let allow = (0..stops.len())
@@ -426,11 +483,11 @@ fn stay_ok(cf: &CityFilter, cover: Option<Option<(i64, i64)>>, arrive_ts: f64, a
 
 /// Города старта цепочек: города первой остановки, а у «любой» первой остановки — все
 /// города вылета рейсов первого плеча (иначе стартов нет и маршрутов ноль).
-pub fn start_codes(stops: &[Stop], table: &FlightCols) -> Vec<String> {
+pub fn start_codes(stops: &[Stop], table: &FlightCols, query: Option<&PlanQuery>) -> Vec<String> {
     if stops.first().map(|s| s.is_cities() && !s.codes.is_empty()).unwrap_or(false) {
         return stops[0].codes.clone();
     }
-    let mut ids: Vec<u32> = table.rows(0).into_iter().map(|r| table.orig_city_id[r]).filter(|&id| id != crate::flightcols::NO_CODE).collect();
+    let mut ids: Vec<u32> = table.rows(table_leg(query, 0)).into_iter().map(|r| table.orig_city_id[r]).filter(|&id| id != crate::flightcols::NO_CODE).collect();
     ids.sort_unstable();
     ids.dedup();
     let mut out: Vec<String> = ids.into_iter().map(|id| table.code(id).to_string()).filter(|c| !c.is_empty()).collect();
@@ -516,7 +573,7 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>,
         }
     };
 
-    for start in &start_codes(ctx.stops, t) {
+    for start in &start_codes(ctx.stops, t, query) {
         let sid = ctx.code_id(start);
         if !lb[0].contains_key(&sid) {
             continue;
@@ -580,6 +637,8 @@ pub struct View {
     pub chain_start: String,
     pub final_stay_days: i64,
     pub any_stops: Vec<bool>,
+    /// Пропущенные остановки варианта (номера в запросе), пусто — без пропусков.
+    pub skipped: Vec<usize>,
     pub cities: HashMap<String, (String, String)>,
     pub segments: Vec<Segment>,
     pub chains: Vec<u32>,
@@ -676,7 +735,7 @@ fn trip_days_num(t: &FlightCols, chain: &[usize]) -> i64 {
     }
 }
 
-pub fn pack_compact(ctx: &Ctx, chains: &[Vec<usize>]) -> View {
+pub fn pack_compact(ctx: &Ctx, chains: &[Vec<usize>], query: Option<&PlanQuery>) -> View {
     let legs = ctx.last;
     let mut seg_of: HashMap<usize, u32> = HashMap::new();
     let mut segments: Vec<Segment> = Vec::new();
@@ -722,6 +781,7 @@ pub fn pack_compact(ctx: &Ctx, chains: &[Vec<usize>]) -> View {
         chain_start: start_iso,
         final_stay_days: FINAL_STAY_DAYS,
         any_stops: ctx.stops.iter().map(|s| s.kind == "any").collect(),
+        skipped: query.and_then(|q| q.variant.as_ref()).map(|v| v.skipped.clone()).unwrap_or_default(),
         cities,
         segments,
         chains: out_chains,
@@ -735,7 +795,7 @@ pub fn pack_compact(ctx: &Ctx, chains: &[Vec<usize>]) -> View {
 pub fn build_itineraries_compact(stops: &[Stop], table: &FlightCols, max_results: usize, query: Option<&PlanQuery>, check: &mut StepCheck) -> Result<View, Aborted> {
     let ctx = build_ctx(stops, table, query);
     let chains = search_cheapest(&ctx, max_results, query, check)?;
-    Ok(pack_compact(&ctx, &chains))
+    Ok(pack_compact(&ctx, &chains, query))
 }
 
 fn depart_from(code: &str, seg: Option<&Segment>, names: &dyn Fn(&str) -> (String, String)) -> Option<Value> {
@@ -795,6 +855,7 @@ impl View {
         }
         json!({
             "id": n + 1,
+            "skipped": self.skipped,
             "stops": stops,
             "segments": segments,
             "total_price": segments.iter().map(|s| s.price).sum::<f64>(),
@@ -811,22 +872,64 @@ impl View {
         let items: Vec<Value> = (offset.min(end)..end).map(|n| self.materialize(n)).collect();
         json!({"total": total, "offset": offset, "limit": limit, "items": items})
     }
+
+    /// Цена цепочки n — сумма цен сегментов в порядке плеч (как total_price в materialize).
+    pub fn price(&self, n: usize) -> f64 {
+        (0..self.legs).map(|k| self.segments[self.chains[n * self.legs + k] as usize].price).sum()
+    }
 }
 
-pub fn combo_key(codes: &[String]) -> String {
-    codes.join("-")
+/// Ключ набора городов: коды через «-», у варианта с пропусками — «~» и номера пропущенных
+/// остановок через «.» (MOW-TBS~1: Москва → Тбилиси без остановки 1).
+pub fn combo_key(codes: &[String], skipped: &[usize]) -> String {
+    let mut key = codes.join("-");
+    if !skipped.is_empty() {
+        key.push('~');
+        key.push_str(&skipped.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("."));
+    }
+    key
 }
 
-/// Маршруты выбранных наборов: компактные виды наборов + общий порядок по цене.
-/// JSON маршрута собирается только для запрошенной страницы (page) — API отдаёт по
-/// 50, а наборы дают тысячи маршрутов.
-pub struct ComboRoutes {
+/// Ключ набора → (коды, пропущенные остановки); None — ключ не разобрался.
+pub fn parse_combo_key(key: &str) -> Option<(Vec<String>, Vec<usize>)> {
+    let (codes, skipped) = match key.split_once('~') {
+        Some((c, s)) => (c, s.split('.').map(|x| x.parse::<usize>().ok()).collect::<Option<Vec<_>>>()?),
+        None => (key, Vec::new()),
+    };
+    Some((codes.split('-').map(|s| s.to_string()).collect(), skipped))
+}
+
+/// Маршруты из нескольких компактных видов (варианты с пропусками, выбранные наборы) +
+/// общий порядок по цене. JSON маршрута собирается только для запрошенной страницы
+/// (page) — API отдаёт по 50, а видов могут быть тысячи маршрутов.
+pub struct Routes {
+    /// (ключ набора — пусто у вида всей джобы, вид).
     views: Vec<(String, View)>,
     /// (вид, номер цепочки) по возрастанию цены — как прежняя сортировка готовых JSON.
     order: Vec<(usize, usize)>,
 }
 
-impl ComboRoutes {
+impl Routes {
+    /// Общий порядок по цене (устойчивая сортировка: при равной цене — по порядку видов),
+    /// не больше limit.
+    pub fn merge(views: Vec<(String, View)>, limit: usize) -> Routes {
+        let mut priced: Vec<(f64, usize, usize)> = Vec::new();
+        for (v, (_, view)) in views.iter().enumerate() {
+            for n in 0..view.count {
+                priced.push((view.price(n), v, n));
+            }
+        }
+        priced.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        priced.truncate(limit);
+        Routes { views, order: priced.into_iter().map(|(_, v, n)| (v, n)).collect() }
+    }
+
+    /// Один вид как есть (без пропусков): его порядок уже по цене.
+    pub fn single(view: View) -> Routes {
+        let order = (0..view.count).map(|n| (0, n)).collect();
+        Routes { views: vec![(String::new(), view)], order }
+    }
+
     pub fn len(&self) -> usize {
         self.order.len()
     }
@@ -835,7 +938,7 @@ impl ComboRoutes {
         self.order.is_empty()
     }
 
-    /// Itinerary позиций offset..offset+limit (id — позиция + 1, combo — ключ набора).
+    /// Itinerary позиций offset..offset+limit (id — позиция + 1, combo — ключ набора, если есть).
     pub fn page(&self, offset: usize, limit: usize) -> Vec<Value> {
         let end = self.order.len().min(offset.saturating_add(limit));
         (offset.min(end)..end)
@@ -843,45 +946,64 @@ impl ComboRoutes {
                 let (v, n) = self.order[pos];
                 let (key, view) = &self.views[v];
                 let mut it = view.materialize(n);
-                it["combo"] = Value::String(key.clone());
+                if !key.is_empty() {
+                    it["combo"] = Value::String(key.clone());
+                }
                 it["id"] = json!(pos + 1);
                 it
             })
             .collect()
     }
+
+    /// Страница маршрутов по возрастанию цены.
+    pub fn routes_page(&self, offset: usize, limit: usize) -> Value {
+        json!({"total": self.len(), "offset": offset, "limit": limit, "items": self.page(offset, limit)})
+    }
+}
+
+/// Стыковка под фильтры query по всем вариантам маршрута (с пропусками — по каждому
+/// подмножеству пропущенных остановок): N самых дешёвых цепочек из всех вариантов.
+pub fn build_routes(stops: &[Stop], table: &FlightCols, max_results: usize, query: &PlanQuery, check: &mut StepCheck) -> Result<Routes, Aborted> {
+    let vars = variants(stops, query);
+    if vars.len() == 1 && vars[0].1.variant.is_none() {
+        return Ok(Routes::single(build_itineraries_compact(stops, table, max_results, Some(query), check)?));
+    }
+    let mut views = Vec::with_capacity(vars.len());
+    for (vstops, vq) in &vars {
+        views.push((String::new(), build_itineraries_compact(vstops, table, max_results, Some(vq), check)?));
+    }
+    Ok(Routes::merge(views, max_results))
 }
 
 /// Маршруты выбранных наборов городов: на каждый набор — тот же A* по сохранённым
 /// рейсам, но остановки зафиксированы кодами набора.
-pub fn build_combo_views(stops: &[Stop], table: &FlightCols, combos: &[Vec<String>], query: Option<&PlanQuery>) -> ComboRoutes {
+/// combos — ключи наборов (`combo_key`): коды городов варианта и пропущенные остановки.
+pub fn build_combo_views(stops: &[Stop], table: &FlightCols, combos: &[String], query: Option<&PlanQuery>) -> Routes {
+    let open = PlanQuery::from_value(&json!({})).expect("пустой запрос");
+    let base = query.unwrap_or(&open);
+    let vars = variants(stops, base);
     let mut views: Vec<(String, View)> = Vec::new();
-    for codes in combos {
-        if codes.len() != stops.len() {
+    for key in combos {
+        let Some((codes, skipped)) = parse_combo_key(key) else { continue };
+        let Some((vstops, vq)) = vars.iter().find(|(_, q)| q.variant.as_ref().map(|v| v.skipped.as_slice()).unwrap_or(&[]) == skipped.as_slice()) else { continue };
+        if codes.len() != vstops.len() {
             continue;
         }
         let fixed: Vec<Stop> = codes
             .iter()
-            .zip(stops)
-            .map(|(code, stop)| Stop { kind: "cities".into(), codes: vec![code.clone()], window: stop.window.clone(), radius_km: stop.radius_km, exact: true })
+            .zip(vstops)
+            .map(|(code, stop)| Stop { kind: "cities".into(), codes: vec![code.clone()], window: stop.window.clone(), radius_km: stop.radius_km, exact: true, skip: false })
             .collect();
         let mut check = |_: usize| Ok(());
-        let Ok(view) = build_itineraries_compact(&fixed, table, COMBO_MAX_RESULTS as usize, query, &mut check) else { continue };
-        views.push((combo_key(codes), view));
+        let vq = if query.is_some() || vq.variant.is_some() { Some(vq) } else { None };
+        let Ok(view) = build_itineraries_compact(&fixed, table, COMBO_MAX_RESULTS as usize, vq, &mut check) else { continue };
+        views.push((combo_key(&codes, &skipped), view));
     }
-    // цена маршрута — сумма цен сегментов в порядке плеч (как total_price в materialize)
-    let mut priced: Vec<(f64, usize, usize)> = Vec::new();
-    for (v, (_, view)) in views.iter().enumerate() {
-        for n in 0..view.count {
-            let price: f64 = (0..view.legs).map(|k| view.segments[view.chains[n * view.legs + k] as usize].price).sum();
-            priced.push((price, v, n));
-        }
-    }
-    priced.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal)); // устойчивая, как прежде
-    ComboRoutes { views, order: priced.into_iter().map(|(_, v, n)| (v, n)).collect() }
+    Routes::merge(views, usize::MAX)
 }
 
 /// Все маршруты выбранных наборов готовыми Itinerary (по возрастанию цены, с combo и id).
-pub fn build_combo_routes(stops: &[Stop], table: &FlightCols, combos: &[Vec<String>], query: Option<&PlanQuery>) -> Vec<Value> {
+pub fn build_combo_routes(stops: &[Stop], table: &FlightCols, combos: &[String], query: Option<&PlanQuery>) -> Vec<Value> {
     let routes = build_combo_views(stops, table, combos, query);
     routes.page(0, routes.len())
 }
@@ -996,7 +1118,7 @@ pub mod tests {
             }
         }
         let start_dt = parse_naive(&format!("{}T00:00:00", ctx.chain_start)).unwrap();
-        for start in &start_codes(stops, t) {
+        for start in &start_codes(stops, t, None) {
             dfs(&ctx, t, 0, start, ordinal(start_dt.date()), naive_seconds(start_dt), &mut Vec::new(), &mut vec![start.clone()], 0.0, &mut out);
         }
         out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -1166,9 +1288,9 @@ pub mod tests {
         assert_eq!(prices, sorted);
         // маршруты набора: тот же A* с зафиксированными городами
         let codes = view.chain_codes(0);
-        let routes = build_combo_routes(&stops, &table, &[codes.clone()], None);
+        let routes = build_combo_routes(&stops, &table, &[combo_key(&codes, &[])], None);
         assert!(!routes.is_empty());
-        assert_eq!(routes[0]["combo"], combo_key(&codes));
+        assert_eq!(routes[0]["combo"], combo_key(&codes, &[]));
         assert_eq!(routes[0]["total_price"], it["total_price"]);
     }
 
@@ -1208,5 +1330,79 @@ pub mod tests {
             .collect();
         let prices: Vec<f64> = got.iter().map(|c| c.iter().map(|&fi| table.price[fi]).sum()).collect();
         assert_eq!(prices, want);
+    }
+
+    /// Пропуск остановки: плечо в обход собирается отдельным плечом, маршруты с пропуском и
+    /// без — общим списком по цене, у плеча в обход свой фильтр, наборы помечены пропуском.
+    #[test]
+    fn skippable_stop_variants() {
+        use crate::collect::tests::{ticket, MapFetcher};
+        use crate::collect::{collect_plan, NoProgress};
+        let (d1, d2) = ("2026-11-01", "2026-11-02");
+        let mow_ist = ticket(&["SVO", "IST"], "MOW", "IST", d1, 5000.0);
+        let ist_tbs = ticket(&["IST", "TBS"], "IST", "TBS", d2, 4000.0);
+        let mow_tbs = ticket(&["SVO", "TBS"], "MOW", "TBS", d1, 12000.0);
+        let mow_evn_tbs = ticket(&["SVO", "EVN", "TBS"], "MOW", "TBS", d2, 7000.0);
+        let f = MapFetcher::new();
+        f.put(Some("MOW"), Some("IST"), d1, vec![mow_ist.clone()]);
+        f.put(Some("MOW"), None, d1, vec![mow_ist.clone(), mow_tbs.clone()]);
+        f.put(Some("MOW"), None, d2, vec![mow_evn_tbs.clone()]);
+        f.put(Some("MOW"), Some("TBS"), d1, vec![mow_tbs.clone()]);
+        f.put(Some("MOW"), Some("TBS"), d2, vec![mow_evn_tbs.clone()]);
+        f.put(Some("IST"), Some("TBS"), d2, vec![ist_tbs.clone()]);
+        f.put(Some("IST"), None, d2, vec![ist_tbs.clone()]);
+        let q = |extra: Value| {
+            let mut v = json!({
+                "stops": [{"kind": "cities", "codes": ["MOW"], "window": ["", ""]},
+                          {"kind": "cities", "codes": ["IST"], "window": [d1, d2], "skip": true},
+                          {"kind": "cities", "codes": ["TBS"], "window": ["", ""]}],
+                "maxResults": 100,
+            });
+            if let Some(c) = extra.get("cities") {
+                v["cities"] = c.clone();
+            }
+            PlanQuery::from_value(&v).unwrap()
+        };
+        let pq = q(json!({}));
+        let stops = crate::stops::parse_stops(&pq.stops);
+        assert!(stops[1].skip);
+        let table = collect_plan(&stops, &f, None, &NoProgress, &mut HashMap::new(), 1).unwrap();
+        // плечо 2 — в обход IST: оба рейса MOW→TBS
+        assert_eq!(table.rows(2).len(), 2);
+        assert!(table.rows(0).iter().all(|&r| table.dest(r) == "IST"));
+
+        let mut check = |_: usize| Ok(());
+        let routes = build_routes(&stops, &table, 100, &pq, &mut check).unwrap();
+        let page = routes.page(0, 10);
+        let prices: Vec<f64> = page.iter().map(|it| it["total_price"].as_f64().unwrap()).collect();
+        assert_eq!(prices, vec![7000.0, 9000.0, 12000.0]);
+        assert_eq!(page[0]["skipped"], json!([1]));
+        assert_eq!(page[0]["stops"].as_array().unwrap().len(), 2);
+        assert_eq!(page[1]["skipped"], json!([]));
+        assert_eq!(page[1]["stops"].as_array().unwrap().len(), 3);
+        assert_eq!(page.iter().map(|it| it["id"].as_i64().unwrap()).collect::<Vec<_>>(), vec![1, 2, 3]);
+
+        // фильтр плеча в обход: только прямые
+        let direct = q(json!({"cities": [{}, {"bypass": {"maxTransfers": 0}}, {}]}));
+        assert_eq!(direct.cities[1].bypass.as_ref().map(|b| b.max_transfers), Some(0));
+        let routes = build_routes(&stops, &table, 100, &direct, &mut check).unwrap();
+        let prices: Vec<f64> = routes.page(0, 10).iter().map(|it| it["total_price"].as_f64().unwrap()).collect();
+        assert_eq!(prices, vec![9000.0, 12000.0]);
+        // фильтр обычных плеч обход не трогает
+        let direct_leg = crate::planquery::LegFilter { max_transfers: 0, ..Default::default() };
+        let legs_direct = PlanQuery { legs: vec![direct_leg.clone(), direct_leg], ..pq.clone() };
+        let routes = build_routes(&stops, &table, 100, &legs_direct, &mut check).unwrap();
+        assert_eq!(routes.len(), 3);
+
+        // наборы городов: вариант без IST — отдельный набор с пометкой пропуска
+        let ov = crate::overview::build_overview(&stops, &table, Some(&pq));
+        let keys: Vec<String> = ov.combos.iter().map(|c| combo_key(&c.codes, &c.skipped)).collect();
+        assert_eq!(keys, vec!["MOW-TBS~1", "MOW-IST-TBS"]);
+        assert_eq!(ov.combos[0].count, 2);
+        assert_eq!(ov.total_count, 3);
+        let picked = build_combo_views(&stops, &table, &["MOW-TBS~1".to_string()], Some(&pq));
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked.page(0, 1)[0]["combo"], json!("MOW-TBS~1"));
+        assert_eq!(parse_combo_key("MOW-TBS~1"), Some((vec!["MOW".to_string(), "TBS".to_string()], vec![1])));
     }
 }

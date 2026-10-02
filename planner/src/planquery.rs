@@ -30,6 +30,8 @@ pub struct StopSpec {
     pub codes: Vec<String>,
     pub window: [String; 2],
     pub radius_km: i64,
+    /// Остановку можно пропустить: сбор добавляет плечо в обход (часть ключа сбора).
+    pub skip: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -38,6 +40,8 @@ pub struct CityFilter {
     pub max_stay: Option<i64>,
     pub must_cover: Option<[String; 2]>,
     pub require_weekend: bool,
+    /// Фильтр плеча в обход этой остановки (если её пропускаем): None — открытый.
+    pub bypass: Option<LegFilter>,
 }
 
 impl CityFilter {
@@ -53,25 +57,39 @@ impl CityFilter {
             }
             None
         });
+        let bypass = match d.get("bypass") {
+            Some(v) if v.is_object() => Some(LegFilter::from_value(Some(v))?).filter(|f| !f.is_open()),
+            _ => None,
+        };
         Ok(CityFilter {
             min_stay: int_of(d.get("minStay"))?.unwrap_or(0),
             max_stay: int_of(d.get("maxStay"))?,
             must_cover: cover,
             require_weekend: bool_of(d.get("requireWeekend")),
+            bypass,
         })
     }
 
     pub fn is_open(&self) -> bool {
+        self.stay_open() && self.bypass.is_none()
+    }
+
+    /// Фильтр пребывания (без фильтра плеча в обход) не задан.
+    pub fn stay_open(&self) -> bool {
         self.min_stay <= 0 && self.max_stay.is_none() && self.must_cover.is_none() && !self.require_weekend
     }
 
     pub fn as_value(&self) -> Value {
-        json!({
+        let mut v = json!({
             "minStay": self.min_stay,
             "maxStay": self.max_stay,
             "mustCover": self.must_cover.as_ref().map(|c| json!([c[0], c[1]])),
             "requireWeekend": self.require_weekend,
-        })
+        });
+        if let Some(b) = &self.bypass {
+            v["bypass"] = b.as_value(); // без обхода — ключ вида как раньше
+        }
+        v
     }
 }
 
@@ -191,6 +209,17 @@ pub struct PlanQuery {
     pub legs: Vec<LegFilter>,
     pub trip_length: (i64, Option<i64>),
     pub max_results: Option<i64>,
+    /// Вариант маршрута с пропущенными остановками (`search::variants`): не сериализуется.
+    pub variant: Option<Variant>,
+}
+
+/// Вариант маршрута: остановки `skipped` (номера в исходном запросе) пропущены. Плечо k
+/// варианта — плечо сбора `table_legs[k]` джобы; `chain_start` — первый день окна старта.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variant {
+    pub table_legs: Vec<usize>,
+    pub chain_start: String,
+    pub skipped: Vec<usize>,
 }
 
 /// Окно времени суток `[lo, hi]` в минутах: null/нет → края суток, значения зажаты в [0, DAY_MIN].
@@ -264,7 +293,8 @@ impl PlanQuery {
                 win.get(1).map(str_of).unwrap_or_default(),
             ];
             let radius_km = clamp_radius(s.get("radiusKm"));
-            stops.push(StopSpec { kind, codes, window, radius_km });
+            let skip = bool_of(s.get("skip"));
+            stops.push(StopSpec { kind, codes, window, radius_km, skip });
         }
         let n = stops.len();
         let cities_raw = d.get("cities").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -282,7 +312,7 @@ impl PlanQuery {
         let trip_hi = trip.get(1).map(|v| int_of(Some(v))).transpose()?.flatten();
         // maxCost (бюджет поездки) удалён 01.10.2026: в старых запросах/URL поле игнорируется.
         let max_results = int_of(d.get("maxResults").or(d.get("max_results")))?;
-        Ok(PlanQuery { stops, cities, legs, trip_length: (trip_lo, trip_hi), max_results })
+        Ok(PlanQuery { stops, cities, legs, trip_length: (trip_lo, trip_hi), max_results, variant: None })
     }
 
     pub fn stops_value(&self) -> Value {
@@ -296,6 +326,9 @@ impl PlanQuery {
                     m.insert("window".into(), json!([s.window[0], s.window[1]]));
                     if s.radius_km > 0 {
                         m.insert("radiusKm".into(), json!(s.radius_km));
+                    }
+                    if s.skip {
+                        m.insert("skip".into(), json!(true));
                     }
                     Value::Object(m)
                 })
@@ -327,7 +360,11 @@ impl PlanQuery {
             .map(|s| {
                 let mut codes = s.codes.clone();
                 codes.sort();
-                json!({"kind": s.kind, "codes": codes, "window": [s.window[0], s.window[1]], "radiusKm": s.radius_km})
+                let mut v = json!({"kind": s.kind, "codes": codes, "window": [s.window[0], s.window[1]], "radiusKm": s.radius_km});
+                if s.skip {
+                    v["skip"] = json!(true); // без пропуска — ключ как раньше
+                }
+                v
             })
             .collect();
         hash_value(&Value::Array(items))
@@ -365,8 +402,9 @@ impl PlanQuery {
         }
     }
 
+    /// Фильтр пребывания в остановке i (None — открыт).
     pub fn city_filter(&self, i: usize) -> Option<&CityFilter> {
-        self.cities.get(i).filter(|c| !c.is_open())
+        self.cities.get(i).filter(|c| !c.stay_open())
     }
 }
 

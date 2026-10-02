@@ -5,7 +5,7 @@ import type { AirportOption } from '../../data/airports'
 import { dayW } from '../../lib/format'
 import type { PlannerStop } from '../types'
 import type { CityQuery, LegQuery, PlanQuery } from '../query'
-import { STAY_MAX, fitFilters } from '../query'
+import { STAY_MAX, defaultBypass, fitFilters } from '../query'
 import { pointLabel, type Validation } from '../validation'
 import { RangeSlider } from './RangeSlider'
 import { TransitionFilterCard } from './TransitionFilterCard'
@@ -39,6 +39,18 @@ export function QueryEditor({
     onChange({ ...query, cities: query.cities.map((c, k) => (k === i ? { ...c, ...patch } : c)) })
   const patchLeg = (i: number, patch: Partial<LegQuery>) =>
     onChange({ ...query, legs: query.legs.map((l, k) => (k === i ? { ...l, ...patch } : l)) })
+  // Пропуск остановки: при включении условия обхода — из двух заменяемых плеч.
+  const setSkip = (i: number, skip: boolean) =>
+    onChange({
+      ...query,
+      stops: stops.map((s, k) => (k === i ? { ...s, skip } : s)),
+      cities: query.cities.map((c, k) => (k === i && skip && !c.bypass ? { ...c, bypass: defaultBypass(query, i) } : c)),
+    })
+  const patchBypass = (i: number, patch: Partial<LegQuery>) =>
+    onChange({
+      ...query,
+      cities: query.cities.map((c, k) => (k === i ? { ...c, bypass: { ...(c.bypass ?? defaultBypass(query, i)), ...patch } } : c)),
+    })
 
   return (
     <div className="pl-editor">
@@ -60,6 +72,16 @@ export function QueryEditor({
                 <NearbyRow stop={s} index={i} last={stops.length - 1} onChange={(radiusKm) => updateStop(i, { radiusKm })} />
               )}
               {!endpoint && <StayRow filter={query.cities[i]} onChange={(patch) => patchCity(i, patch)} />}
+              {!endpoint && <SkipRow index={i} skip={!!s.skip} onChange={(skip) => setSkip(i, skip)} />}
+              {!endpoint && s.skip && (
+                <div className="pl-bypass">
+                  <TransitionFilterCard
+                    title={`Если без ${pointLabel(i)}: ${pointLabel(i - 1)} → ${pointLabel(i + 1)}`}
+                    filter={query.cities[i].bypass ?? defaultBypass(query, i)}
+                    onChange={(patch) => patchBypass(i, patch)}
+                  />
+                </div>
+              )}
             </div>
             {i < stops.length - 1 && (
               <TransitionFilterCard
@@ -198,6 +220,28 @@ function NearbyRow({
         </div>
       </div>
       <div className="pl-fcell pl-nearby-hint">{hint}</div>
+    </div>
+  )
+}
+
+// Можно ли пропустить остановку: тогда маршруты без неё (перелёт в обход со своими
+// условиями) идут в выдачу вместе с остальными.
+function SkipRow({ index: i, skip, onChange }: { index: number; skip: boolean; onChange: (skip: boolean) => void }) {
+  return (
+    <div className="pl-stayrow pl-skiprow">
+      <div className="pl-ficon">⤼</div>
+      <div className="pl-fname">Пропуск</div>
+      <div className="pl-fcell">
+        <label className="pl-check">
+          <input type="checkbox" checked={skip} onChange={(e) => onChange(e.target.checked)} />
+          Можно пропустить {pointLabel(i)}
+        </label>
+      </div>
+      <div className="pl-fcell pl-nearby-hint">
+        {skip
+          ? `Ищем и маршруты без ${pointLabel(i)}: перелёт ${pointLabel(i - 1)} → ${pointLabel(i + 1)} со своими условиями ниже`
+          : 'Если без этого города выйдет дешевле или удобнее — покажем и такие маршруты'}
+      </div>
     </div>
   )
 }

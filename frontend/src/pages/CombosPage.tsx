@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { makeMoney, plural } from '../lib/format'
 import { fetchCombos, type CityCombo, type CombosPage as CombosPayload } from '../planner/api'
-import { encodeQuery, type PlanQuery } from '../planner/query'
+import { encodeQuery, stopName, type PlanQuery } from '../planner/query'
 import { usePlanJob } from '../planner/usePlanJob'
 import { useQueryFromUrl } from '../planner/useQueryState'
 import { JobShell } from '../planner/components/JobShell'
@@ -10,7 +10,8 @@ import { JobShell } from '../planner/components/JobShell'
 const money = makeMoney('RUB')
 const PAGE = 100
 type SortKey = 'price' | 'count' | 'transfers'
-const comboKey = (c: CityCombo) => c.codes.join('-')
+// Ключ набора — как у бэка (search::combo_key): коды через «-», пропуски — после «~».
+const comboKey = (c: CityCombo) => c.codes.join('-') + (c.skipped?.length ? `~${c.skipped.join('.')}` : '')
 
 // Режим городов: все наборы под запрос (считает бэк). Отмечаем несколько и
 // переходим к маршрутам выбранных наборов вместе.
@@ -132,6 +133,11 @@ function CombosList({ jobId, query, queryString }: { jobId: string; query: PlanQ
               <label className="pl-combo-check">
                 <input type="checkbox" checked={on} onChange={() => toggle(key)} />
                 <span className="pl-combo-route">{c.codes.map(cityLabel).join(' → ')}</span>
+                {c.skipped?.length ? (
+                  <span className="pl-skiptag" title="Остановка пропущена: перелёт в обход">
+                    ⤼ без {c.skipped.map((i) => stopName(query, i)).join(', ')}
+                  </span>
+                ) : null}
               </label>
               <div className="pl-combo-stats">
                 <span className="p">от {money(c.minPrice)}</span>
