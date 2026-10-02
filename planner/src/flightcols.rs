@@ -23,7 +23,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
-use crate::dates::{naive_seconds, ordinal, parse_naive};
+use crate::dates::{naive_seconds, parse_naive};
 use crate::ticket::Ticket;
 
 pub const STR_COLS: [&str; 6] = ["orig_city", "orig_airport", "dest", "dest_airport", "dep_iso", "arr_iso"];
@@ -75,102 +75,191 @@ pub enum FlightSrc {
 }
 
 
-/// Строка рейса до раскладки по колонкам (построитель джобы).
-struct Row {
-    leg: i16,
-    orig_city: u32,
-    orig_airport: u32,
-    dest: u32,
-    dest_airport: u32,
-    price: f64,
-    transfers: i64,
-    duration: i64,
-    hidden: bool,
-    bag_incl: bool,
-    pts_min: Option<i64>,
-    layover: Option<i64>,
-    dep_ts: f64,
-    arr_ts: f64,
-    dep_ord: i64,
-    arr_ord: i64,
-    dep_iso: Option<String>,
-    arr_iso: Option<String>,
-    src: FlightSrc,
+/// Словарь кодов джобы (города, аэропорты). Коды склада заносятся первыми в том же
+/// порядке — номер кода склада и есть номер в джобе (строки склада копируются без
+/// перевода); остальные (серии коллектора, хабы) дописываются. Пустой код — NO_CODE.
+pub struct JobCodes {
+    inner: Mutex<(Vec<String>, FxHashMap<String, u32>)>,
+    /// Сколько кодов склада занесено при создании; номер склада ≥ base — дописан позже.
+    base: usize,
+    /// Номер пустого кода склада (он в джобе — NO_CODE).
+    store_empty: Option<u32>,
+    /// Словарь начат с кодов склада (номера колонок склада годятся как есть).
+    pub store_based: bool,
 }
 
-fn row_of(codes: &mut Vec<String>, ix: &mut FxHashMap<String, u32>, leg: i16, f: &Ticket, src: FlightSrc) -> Row {
-    let dep = f.departure_at.clone().filter(|s| !s.is_empty());
-    let arr = if dep.is_some() { f.arrival() } else { None };
-    let dep_dt = dep.as_deref().and_then(parse_naive);
-    let arr_dt = arr.as_deref().and_then(parse_naive);
-    Row {
-        leg,
-        orig_city: intern(codes, ix, &f.origin_city().map(|s| s.to_uppercase()).unwrap_or_default()),
-        orig_airport: intern(codes, ix, &upper(&f.origin_airport)),
-        dest: intern(codes, ix, &f.dest_city().map(|s| s.to_uppercase()).unwrap_or_default()),
-        dest_airport: intern(codes, ix, &upper(&f.destination_airport)),
-        price: f.price(),
-        transfers: f.transfers,
-        duration: f.duration.unwrap_or(0),
-        hidden: f.hidden_city.is_some(),
-        bag_incl: f.baggage.as_ref().map(|b| b.included).unwrap_or(false),
-        pts_min: f.min_transfer_minutes(),
-        layover: f.layover_minutes,
-        dep_ts: dep_dt.map(naive_seconds).unwrap_or(f64::NAN),
-        arr_ts: arr_dt.map(naive_seconds).unwrap_or(f64::NAN),
-        dep_ord: dep_dt.map(|d| ordinal(d.date())).unwrap_or(-1),
-        arr_ord: arr_dt.map(|d| ordinal(d.date())).unwrap_or(-1),
-        dep_iso: dep,
-        arr_iso: arr,
-        src,
+impl JobCodes {
+    pub fn new(store_names: &[String]) -> JobCodes {
+        let names: Vec<String> = store_names.to_vec();
+        let ix: FxHashMap<String, u32> = names.iter().enumerate().filter(|(_, n)| !n.is_empty()).map(|(i, n)| (n.clone(), i as u32)).collect();
+        let store_empty = names.iter().position(|n| n.is_empty()).map(|i| i as u32);
+        JobCodes { base: names.len(), store_based: !names.is_empty(), inner: Mutex::new((names, ix)), store_empty }
+    }
+
+    /// Номер кода (пустой — NO_CODE); новые дописываются.
+    pub fn id(&self, code: &str) -> u32 {
+        if code.is_empty() {
+            return NO_CODE;
+        }
+        let mut g = self.inner.lock().unwrap();
+        let (codes, ix) = &mut *g;
+        intern(codes, ix, code)
+    }
+
+    /// Номер без занесения (None — такого кода нет).
+    pub fn lookup(&self, code: &str) -> Option<u32> {
+        self.inner.lock().unwrap().1.get(code).copied()
+    }
+
+    /// Номер кода склада в джобе: тот же, кроме пустого и дописанных в склад после
+    /// создания словаря (`name` — их имя).
+    pub fn from_store(&self, id: u32, name: &dyn Fn(u32) -> String) -> u32 {
+        if Some(id) == self.store_empty {
+            return NO_CODE;
+        }
+        if (id as usize) < self.base {
+            return id;
+        }
+        self.id(&name(id))
+    }
+
+    pub fn name(&self, id: u32) -> String {
+        if id == NO_CODE {
+            return String::new();
+        }
+        self.inner.lock().unwrap().0.get(id as usize).cloned().unwrap_or_default()
+    }
+
+    fn snapshot(&self) -> (Vec<String>, FxHashMap<String, u32>) {
+        let g = self.inner.lock().unwrap();
+        (g.0.clone(), g.1.clone())
     }
 }
 
-/// Рейсы джобы по плечам до колонок: сбор кладёт плечо сразу, как собрал, и полные билеты
-/// дальше не держит (из склада остаётся номер строки). Плечи — в любом порядке, колонки
-/// в `finish` — по порядку плеч.
+/// Пересадка рейса для hidden-city: аэропорт (номер кода джобы), прилёт в него (секунды
+/// наивного времени), длительность до него, мин. стыковка до него, хэш ключа виртуального
+/// рейса «выходим здесь».
+pub struct Tp {
+    pub ap: u32,
+    pub arr: Option<i64>,
+    pub dur: i64,
+    pub pmin: Option<i64>,
+    pub key: u64,
+}
+
+/// Рейс сбора — компактная строка: всё для стыковки числами (коды — номера `JobCodes`)
+/// плюс источник полного рейса. Строка склада копируется в неё без разбора билета;
+/// билет серии коллектора — переводится (`from_ticket`).
+#[derive(Clone, Debug)]
+pub struct Fl {
+    pub leg: i16,
+    pub orig_city: u32,
+    pub orig_airport: u32,
+    pub dest: u32,
+    pub dest_airport: u32,
+    pub price: f64,
+    pub transfers: i64,
+    pub duration: i64,
+    pub hidden: bool,
+    pub bag_incl: bool,
+    pub pts_min: Option<i64>,
+    pub layover: Option<i64>,
+    pub dep_ts: f64,
+    pub arr_ts: f64,
+    pub dep_ord: i64,
+    pub arr_ord: i64,
+    /// Хэш ключа рейса (`Ticket::flight_key`) — дедуп.
+    pub key: u64,
+    /// День вылета серии (`lakestore::day_num`) и город серии (запроса X→ANY).
+    pub day: i32,
+    pub series: u32,
+    pub src: FlightSrc,
+}
+
+/// Секунды «наивного» времени → (ts, номер дня) колонок джобы; None → (NaN, −1).
+pub fn ts_ord(secs: Option<i64>) -> (f64, i64) {
+    match secs {
+        Some(s) => (s as f64, s.div_euclid(86_400) + 719_163),
+        None => (f64::NAN, -1),
+    }
+}
+
+impl Fl {
+    /// Из полного билета (серии коллектора, тесты): те же поля, что даёт строка склада.
+    pub fn from_ticket(f: Ticket, codes: &JobCodes) -> Fl {
+        let dep = f.departure_at.clone().filter(|s| !s.is_empty());
+        let arr = if dep.is_some() { f.arrival() } else { None };
+        let secs = |iso: Option<&str>| iso.and_then(parse_naive).map(|dt| naive_seconds(dt) as i64);
+        let (dep_ts, dep_ord) = ts_ord(secs(dep.as_deref()));
+        let (arr_ts, arr_ord) = ts_ord(secs(arr.as_deref()));
+        let day = f.search_date.as_deref().filter(|s| s.len() >= 10).or(f.departure_at.as_deref().filter(|s| s.len() >= 10)).and_then(|s| chrono::NaiveDate::parse_from_str(&s[..10], "%Y-%m-%d").ok()).map(crate::lakestore::day_num).unwrap_or(i32::MIN);
+        let series = codes.id(&f.search_origin.as_deref().filter(|s| !s.is_empty()).or(f.origin_city()).unwrap_or("").to_uppercase());
+        let src = match &f.src {
+            Some(s) => FlightSrc::Store(s.clone()),
+            None => FlightSrc::Owned(Arc::new(Ticket::default())),
+        };
+        let mut fl = Fl {
+            leg: 0,
+            orig_city: codes.id(&f.origin_city().map(|s| s.to_uppercase()).unwrap_or_default()),
+            orig_airport: codes.id(&upper(&f.origin_airport)),
+            dest: codes.id(&f.dest_city().map(|s| s.to_uppercase()).unwrap_or_default()),
+            dest_airport: codes.id(&upper(&f.destination_airport)),
+            price: f.price(),
+            transfers: f.transfers,
+            duration: f.duration.unwrap_or(0),
+            hidden: f.hidden_city.is_some(),
+            bag_incl: f.baggage.as_ref().map(|b| b.included).unwrap_or(false),
+            pts_min: f.min_transfer_minutes(),
+            layover: f.layover_minutes,
+            dep_ts,
+            arr_ts,
+            dep_ord,
+            arr_ord,
+            key: crate::lakestore::key_hash(&f.flight_key()),
+            day,
+            series,
+            src,
+        };
+        if let FlightSrc::Owned(_) = fl.src {
+            fl.src = FlightSrc::Owned(Arc::new(f));
+        }
+        fl
+    }
+
+    /// Полный билет, если рейс не из склада (серии коллектора).
+    pub fn owned(&self) -> Option<&Arc<Ticket>> {
+        match &self.src {
+            FlightSrc::Owned(t) => Some(t),
+            FlightSrc::Store(_) => None,
+        }
+    }
+}
+
+/// Рейсы джобы по плечам до колонок: сбор кладёт плечо сразу, как собрал (плечо «любой →
+/// любой» — по дням). Плечи — в любом порядке, колонки в `finish` — по порядку плеч.
 pub struct FlightColsBuilder {
-    codes: Vec<String>,
-    code_ix: FxHashMap<String, u32>,
-    legs: Vec<Vec<Row>>,
+    codes: Arc<JobCodes>,
+    legs: Vec<Vec<Fl>>,
 }
 
 impl FlightColsBuilder {
-    pub fn new(legs: usize) -> FlightColsBuilder {
-        FlightColsBuilder { codes: Vec::new(), code_ix: FxHashMap::default(), legs: (0..legs).map(|_| Vec::new()).collect() }
+    pub fn new(legs: usize, codes: Arc<JobCodes>) -> FlightColsBuilder {
+        FlightColsBuilder { codes, legs: (0..legs).map(|_| Vec::new()).collect() }
     }
 
-    pub fn push_leg(&mut self, leg: usize, flights: Vec<Ticket>) {
+    pub fn codes(&self) -> &Arc<JobCodes> {
+        &self.codes
+    }
+
+    pub fn push_leg(&mut self, leg: usize, flights: Vec<Fl>) {
         if self.legs.len() <= leg {
             self.legs.resize_with(leg + 1, Vec::new);
         }
         let out = &mut self.legs[leg];
         out.reserve(flights.len());
-        static EMPTY: OnceLock<Arc<Ticket>> = OnceLock::new();
-        for f in flights {
-            let src = match &f.src {
-                Some(s) => FlightSrc::Store(s.clone()),
-                None => FlightSrc::Owned(EMPTY.get_or_init(Default::default).clone()),
-            };
-            let mut row = row_of(&mut self.codes, &mut self.code_ix, leg as i16, &f, src);
-            if let FlightSrc::Owned(_) = row.src {
-                row.src = FlightSrc::Owned(Arc::new(f));
-            }
-            out.push(row);
-        }
-    }
-
-    fn push_arcs(&mut self, leg: usize, flights: &[Arc<Ticket>]) {
-        if self.legs.len() <= leg {
-            self.legs.resize_with(leg + 1, Vec::new);
-        }
-        for f in flights {
-            let src = match &f.src {
-                Some(s) => FlightSrc::Store(s.clone()),
-                None => FlightSrc::Owned(f.clone()),
-            };
-            let row = row_of(&mut self.codes, &mut self.code_ix, leg as i16, f, src);
-            self.legs[leg].push(row);
+        for mut f in flights {
+            f.leg = leg as i16;
+            out.push(f);
         }
     }
 
@@ -186,14 +275,10 @@ impl FlightColsBuilder {
         self.legs.get(leg).map(|l| l.len()).unwrap_or(0)
     }
 
-    fn code(&self, id: u32) -> Option<&str> {
-        (id != NO_CODE).then(|| self.codes[id as usize].as_str()).filter(|s| !s.is_empty())
-    }
-
     /// Города прилёта рейсов плеча (UPPER, без повторов, по порядку появления).
     pub fn dest_cities(&self, leg: usize) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
-        self.legs.get(leg).map(|l| l.as_slice()).unwrap_or(&[]).iter().filter(|r| seen.insert(r.dest)).filter_map(|r| self.code(r.dest).map(String::from)).collect()
+        self.legs.get(leg).map(|l| l.as_slice()).unwrap_or(&[]).iter().filter(|r| r.dest != NO_CODE && seen.insert(r.dest)).map(|r| self.codes.name(r.dest)).collect()
     }
 
     /// Коды вылета рейсов плеча — город и аэропорт (UPPER, без повторов).
@@ -202,10 +287,8 @@ impl FlightColsBuilder {
         let mut out = Vec::new();
         for r in self.legs.get(leg).map(|l| l.as_slice()).unwrap_or(&[]) {
             for id in [r.orig_city, r.orig_airport] {
-                if seen.insert(id) {
-                    if let Some(c) = self.code(id) {
-                        out.push(c.to_string());
-                    }
+                if id != NO_CODE && seen.insert(id) {
+                    out.push(self.codes.name(id));
                 }
             }
         }
@@ -215,9 +298,10 @@ impl FlightColsBuilder {
     pub fn finish(self) -> FlightCols {
         let n = self.len();
         let mut c = FlightCols::with_capacity(n);
-        c.codes = self.codes;
-        c.code_ix = self.code_ix;
-        let (mut dep_iso, mut arr_iso, mut srcs) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        let (codes, ix) = self.codes.snapshot();
+        c.codes = codes;
+        c.code_ix = ix;
+        let mut srcs = Vec::with_capacity(n);
         for leg in self.legs {
             for r in leg {
                 c.leg.push(r.leg);
@@ -236,14 +320,11 @@ impl FlightColsBuilder {
                 c.arr_ts.push(r.arr_ts);
                 c.dep_ord.push(r.dep_ord);
                 c.arr_ord.push(r.arr_ord);
-                dep_iso.push(r.dep_iso);
-                arr_iso.push(r.arr_iso);
                 srcs.push(r.src);
             }
         }
         c.n = c.leg.len();
         c.raw = Mutex::new(Raw::Srcs(srcs));
-        let _ = c.iso.set((dep_iso, arr_iso));
         c
     }
 }
@@ -283,9 +364,10 @@ impl FlightCols {
 
     /// Из собранных рейсов по плечам (билеты из склада — номерами строк).
     pub fn from_collected(collected: &[Vec<Arc<Ticket>>]) -> FlightCols {
-        let mut b = FlightColsBuilder::new(collected.len());
+        let codes = Arc::new(JobCodes::new(&[]));
+        let mut b = FlightColsBuilder::new(collected.len(), codes.clone());
         for (leg, flights) in collected.iter().enumerate() {
-            b.push_arcs(leg, flights);
+            b.push_leg(leg, flights.iter().map(|f| Fl::from_ticket((**f).clone(), &codes)).collect());
         }
         b.finish()
     }
@@ -360,8 +442,14 @@ impl FlightCols {
                 Raw::Lazy(p) => Some(p.clone()),
                 Raw::Srcs(_) => None,
             };
-            path.and_then(|p| read_iso(&p).map_err(|e| eprintln!("[flightcols] {p}: dep_iso/arr_iso не прочитаны: {e}")).ok())
-                .unwrap_or_else(|| (vec![None; self.n], vec![None; self.n]))
+            match path {
+                Some(p) => read_iso(&p).map_err(|e| eprintln!("[flightcols] {p}: dep_iso/arr_iso не прочитаны: {e}")).unwrap_or_else(|_| (vec![None; self.n], vec![None; self.n])),
+                // рейсы сбора: строки — из полных рейсов (разбор всех строк — только по запросу)
+                None => {
+                    let (_, dep, arr) = self.seg_all();
+                    (dep, arr)
+                }
+            }
         })
     }
 
@@ -526,7 +614,8 @@ impl FlightCols {
 
     /// JSON сегмента (колонка seg) всех строк. Строки склада разбираются в порядке их
     /// блоков кусками по ~SEG_CHUNK строк — каждый блок разжимается один раз.
-    fn seg_all(&self) -> Vec<Option<String>> {
+    #[allow(clippy::type_complexity)]
+    fn seg_all(&self) -> (Vec<Option<String>>, Vec<Option<String>>, Vec<Option<String>>) {
         const SEG_CHUNK: usize = 32_768;
         let mut order: Vec<usize> = (0..self.n).collect();
         {
@@ -540,18 +629,22 @@ impl FlightCols {
             }
         }
         let mut out: Vec<Option<String>> = vec![None; self.n];
+        let (mut dep, mut arr): (Vec<Option<String>>, Vec<Option<String>>) = (vec![None; self.n], vec![None; self.n]);
         for chunk in order.chunks(SEG_CHUNK) {
             let mut rows = chunk.to_vec();
             rows.sort_unstable();
             for (r, t) in rows.iter().zip(self.materialize(&rows)) {
                 out[*r] = serde_json::to_string(&t.segment_source()).ok();
+                // вылет/прилёт строками — как в рейсе (прилёт — arrival(), если есть вылет)
+                dep[*r] = t.departure_at.clone().filter(|s| !s.is_empty());
+                arr[*r] = if dep[*r].is_some() { t.arrival() } else { None };
             }
         }
-        out
+        (out, dep, arr)
     }
 
     /// Строки [from, to) батчем Parquet (seg — готовые JSON этих строк).
-    fn to_batch(&self, from: usize, to: usize, seg: &[Option<String>]) -> Result<RecordBatch, String> {
+    fn to_batch(&self, from: usize, to: usize, seg: &[Option<String>], dep: &[Option<String>], arr: &[Option<String>]) -> Result<RecordBatch, String> {
         let r = from..to;
         let codes = |ids: &[u32]| -> ArrayRef { Arc::new(StringArray::from(ids.iter().map(|&id| Some(self.code(id))).collect::<Vec<_>>())) };
         let opt = |v: &[Option<i64>]| -> ArrayRef { Arc::new(Float64Array::from(v.iter().map(|v| v.map(|x| x as f64).unwrap_or(f64::NAN)).collect::<Vec<_>>())) };
@@ -560,8 +653,8 @@ impl FlightCols {
             codes(&self.orig_airport_id[r.clone()]),
             codes(&self.dest_id[r.clone()]),
             codes(&self.dest_airport_id[r.clone()]),
-            Arc::new(StringArray::from(self.dep_iso()[r.clone()].iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
-            Arc::new(StringArray::from(self.arr_iso()[r.clone()].iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(dep.iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(arr.iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
             Arc::new(Int16Array::from(self.leg[r.clone()].to_vec())),
             Arc::new(Float64Array::from(self.price[r.clone()].to_vec())),
             Arc::new(Int32Array::from(self.transfers[r.clone()].iter().map(|t| *t as i32).collect::<Vec<_>>())),
@@ -589,11 +682,11 @@ impl FlightCols {
             .set_column_compression("seg".into(), Compression::LZ4_RAW)
             .build();
         let mut writer = ArrowWriter::try_new(file, Self::schema(), Some(props)).map_err(|e| e.to_string())?;
-        let seg = self.seg_all();
+        let (seg, dep, arr) = self.seg_all();
         let mut from = 0;
         while from < self.n || from == 0 {
             let to = (from + WRITE_CHUNK).min(self.n);
-            writer.write(&self.to_batch(from, to, &seg[from..to])?).map_err(|e| e.to_string())?;
+            writer.write(&self.to_batch(from, to, &seg[from..to], &dep[from..to], &arr[from..to])?).map_err(|e| e.to_string())?;
             if to >= self.n {
                 break;
             }

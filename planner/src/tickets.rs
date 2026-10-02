@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::collect::CollectError;
+use crate::flightcols::{Fl, JobCodes};
 use crate::ticket::Ticket;
 
 /// Потолок строк одного запроса к складу: больше — запрос слишком широкий, джоба падает с
@@ -21,6 +22,16 @@ pub trait TicketStore: Send + Sync {
     fn coverage(&self, origins: &[String], from: &str, to: &str) -> Result<HashMap<(String, String), i64>, CollectError>;
     /// По дням [from, to]: сколько серий (городов) в складе.
     fn coverage_days(&self, from: &str, to: &str) -> Result<HashMap<String, i64>, CollectError>;
+    /// Рейсы сбора (компактные строки) под фильтры городов вылета / прилёта за дни
+    /// [from, to], в порядке `tickets`. По умолчанию — из полных билетов; склад в памяти
+    /// копирует свои колонки без разбора билетов.
+    fn flights(&self, origins: &[String], dests: &[String], from: &str, to: &str, codes: &JobCodes) -> Result<Vec<Fl>, CollectError> {
+        Ok(self.tickets(origins, dests, &[], from, to)?.into_iter().map(|t| Fl::from_ticket(t, codes)).collect())
+    }
+    /// Словарь кодов склада (номер → код): коды джобы начинаются с него.
+    fn code_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Покрытие склада под запрос: какие (город, день) X→ANY есть и по каким дням есть хоть
