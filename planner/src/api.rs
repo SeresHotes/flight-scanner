@@ -300,7 +300,7 @@ async fn dynamics(State(app): State<Arc<AppState>>, Query(p): Query<DynamicsPara
     let history_days = p.history.unwrap_or(DEFAULT_HISTORY_DAYS).clamp(1, MAX_HISTORY_DAYS);
     let out = tokio::task::spawn_blocking(move || {
         // серии озера лежат по городу вылета: аэропорт → его город (по накопленным котировкам)
-        let origin_city = hot::airport_city_map_cached(&app.db_path).get(&origin).cloned().unwrap_or_else(|| origin.clone());
+        let origin_city = crate::lakestore::airport_city_map(&app.db_path).get(&origin).cloned().unwrap_or_else(|| origin.clone());
         crate::dynamics::handle(DynamicsQuery { origin, origin_city, destination, from, to, history_days })
     })
     .await

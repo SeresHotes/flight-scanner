@@ -256,13 +256,8 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
     let fetcher = CountingFetcher { inner, on_hit: &on_hit };
     let store = make_store();
     let view = store_view(store.as_deref(), &stops);
-    // карта из quotes — кэш процесса (полный проход по таблице на проде — 6–17 с)
-    let mut airport_city: HashMap<String, String> = (*hot::airport_city_map_cached(db_path)).clone();
-    if let Some(s) = crate::lakestore::global() {
-        for (a, c) in s.airport_city() {
-            airport_city.entry(a).or_insert(c);
-        }
-    }
+    // карта аэропорт → город — из памяти склада (без склада — из quotes, кэш процесса)
+    let mut airport_city: HashMap<String, String> = (*crate::lakestore::airport_city_map(db_path)).clone();
     rep.timing("airports", t0.elapsed().as_secs_f64());
     let collected = collect_plan(&stops, &fetcher, view.as_ref(), &rep, &mut airport_city, workers)?;
     rep.flights(collected.len());
@@ -312,11 +307,14 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
 
     // Котировки планировщику не нужны, они копят карту аэропорт → город и статистику:
     // пишем после done, сбой тут не портит готовую джобу. Виртуальные рейсы — не котировки.
-    // рейсы склада в котировки не пишем: карту аэропортов склад ведёт сам
-    let flights = table.owned_tickets();
-    let mut qconn = hot::connect(db_path).map_err(CollectError::Failed)?;
-    if let Err(e) = hot::upsert_quotes(&mut qconn, &flights, &crate::dates::now_iso()) {
-        println!("[worker] plan job {job_id}: save quotes failed: {e}");
+    // Котировки в SQLite нужны только без склада (локально): из них карта аэропорт →
+    // город. Со складом карту ведёт склад в памяти — ничего не пишем.
+    if crate::lakestore::global().is_none() {
+        let flights = table.owned_tickets();
+        let mut qconn = hot::connect(db_path).map_err(CollectError::Failed)?;
+        if let Err(e) = hot::upsert_quotes(&mut qconn, &flights, &crate::dates::now_iso()) {
+            println!("[worker] plan job {job_id}: save quotes failed: {e}");
+        }
     }
     Ok(())
 }

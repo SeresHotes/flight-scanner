@@ -159,6 +159,7 @@ fn main() {
         ("MOW → ANY(3 дн) → MOW", vec![st("cities", &["MOW"], "", ""), st("any", &[], &d(0), &d(2)), st("cities", &["MOW"], "", "")]),
         ("MOW → ANY(7 дн) → MOW", vec![st("cities", &["MOW"], "", ""), st("any", &[], &d(0), &d(6)), st("cities", &["MOW"], "", "")]),
         ("MOW → ANY → ANY → MOW (по 3 дн)", vec![st("cities", &["MOW"], "", ""), st("any", &[], &d(0), &d(2)), st("any", &[], &d(3), &d(5)), st("cities", &["MOW"], "", "")]),
+        ("ANY → AAB(5 дн) → AAC", vec![st("any", &[], &d(0), &d(0)), st("cities", &["AAB"], &d(1), &d(5)), st("cities", &["AAC"], &d(6), &d(10))]),
         ("MOW → ANY×4 → MOW (по 3 дн)", vec![st("cities", &["MOW"], "", ""), st("any", &[], &d(0), &d(2)), st("any", &[], &d(3), &d(5)), st("any", &[], &d(6), &d(8)), st("any", &[], &d(9), &d(11)), st("cities", &["MOW"], "", "")]),
     ];
     let shared = SharedStore(store.clone());

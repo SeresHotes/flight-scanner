@@ -51,13 +51,13 @@ variable "vm_cores" {
 
 variable "vm_core_fraction" {
   type        = number
-  description = "Гарантированная доля vCPU, % (20 = burstable, дёшево)"
-  default     = 20
+  description = "Гарантированная доля vCPU, %: 100 — полные ядра (с 02.10.2026: склад и сбор джоб в памяти планировщика упираются в процессор; 20 — burstable, в 3–5 раз медленнее)"
+  default     = 100
 }
 
 variable "vm_memory_gb" {
   type        = number
-  description = "RAM, ГБ (8 с 01.10.2026: склад билетов в Postgres + планировщик)"
+  description = "RAM, ГБ (8 с 01.10.2026: склад билетов в памяти планировщика ~2,6 ГБ + джобы)"
   default     = 8
 }
 

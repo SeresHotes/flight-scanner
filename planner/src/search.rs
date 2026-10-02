@@ -424,6 +424,20 @@ fn stay_ok(cf: &CityFilter, cover: Option<Option<(i64, i64)>>, arrive_ts: f64, a
     true
 }
 
+/// Города старта цепочек: города первой остановки, а у «любой» первой остановки — все
+/// города вылета рейсов первого плеча (иначе стартов нет и маршрутов ноль).
+pub fn start_codes(stops: &[Stop], table: &FlightCols) -> Vec<String> {
+    if stops.first().map(|s| s.is_cities() && !s.codes.is_empty()).unwrap_or(false) {
+        return stops[0].codes.clone();
+    }
+    let mut ids: Vec<u32> = table.rows(0).into_iter().map(|r| table.orig_city_id[r]).filter(|&id| id != crate::flightcols::NO_CODE).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut out: Vec<String> = ids.into_iter().map(|id| table.code(id).to_string()).filter(|c| !c.is_empty()).collect();
+    out.sort();
+    out
+}
+
 /// Цепочки (индексы рейсов в table) по возрастанию цены, не больше max_results.
 pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>, check: &mut StepCheck) -> Result<Vec<Vec<usize>>, Aborted> {
     let t = ctx.table;
@@ -502,7 +516,7 @@ pub fn search_cheapest(ctx: &Ctx, max_results: usize, query: Option<&PlanQuery>,
         }
     };
 
-    for start in &ctx.stops[0].codes {
+    for start in &start_codes(ctx.stops, t) {
         let sid = ctx.code_id(start);
         if !lb[0].contains_key(&sid) {
             continue;
@@ -982,7 +996,7 @@ pub mod tests {
             }
         }
         let start_dt = parse_naive(&format!("{}T00:00:00", ctx.chain_start)).unwrap();
-        for start in &stops[0].codes {
+        for start in &start_codes(stops, t) {
             dfs(&ctx, t, 0, start, ordinal(start_dt.date()), naive_seconds(start_dt), &mut Vec::new(), &mut vec![start.clone()], 0.0, &mut out);
         }
         out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -1058,6 +1072,25 @@ pub mod tests {
                 let want: Vec<f64> = full.iter().take(n).map(|p| p.0).collect();
                 assert_eq!(prices, want, "seed {seed}, n {n}");
             }
+        }
+    }
+
+    /// Первая остановка «любая»: старт — из любого города вылета первого плеча (раньше
+    /// стартов не было и маршрутов — ноль: ANY → SEL → TAS на проде).
+    #[test]
+    fn any_first_stop_matches_full_enumeration() {
+        for seed in 1..=8 {
+            let (mut stops, collected) = random_case(seed);
+            stops[0] = Stop { kind: "any".into(), codes: Vec::new(), ..stops[0].clone() };
+            let table = FlightCols::from_collected(&collected);
+            let full = brute_force(&stops, &table);
+            assert!(!full.is_empty(), "seed {seed}: перебор пуст");
+            let ctx = build_ctx(&stops, &table, None);
+            let mut check = |_: usize| Ok(());
+            let got = search_cheapest(&ctx, full.len() + 10, None, &mut check).unwrap();
+            let prices: Vec<f64> = got.iter().map(|c| c.iter().map(|&fi| table.price[fi]).sum()).collect();
+            let want: Vec<f64> = full.iter().map(|p| p.0).collect();
+            assert_eq!(prices, want, "seed {seed}");
         }
     }
 

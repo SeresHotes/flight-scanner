@@ -631,7 +631,7 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
     let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last, lb: &lb, day_lb: day_lb.as_ref() };
     let leg0 = &legs[0];
     let mut starts: Vec<u32> = Vec::new();
-    for code in &stops[0].codes {
+    for code in &crate::search::start_codes(stops, table) {
         for d in hops.departs(0, code) {
             if let Some(id) = table.code_id(&d) {
                 if !starts.contains(&id) {
@@ -779,8 +779,12 @@ mod tests {
             (4, json!({"tripLength": [3, 6]})),
             (5, json!({"cities": [{}, {"mustCover": ["2026-11-02", "2026-11-03"]}, {}, {"maxStay": 2}, {}], "tripLength": [2, null], "legs": [{}, {}, {"maxTransfers": 1}, {}]})),
         ];
-        for (seed, extra) in cases {
-            let stops = stops();
+        for (seed, extra, any_first) in cases.into_iter().flat_map(|(s, e)| [(s, e.clone(), false), (s, e, true)]) {
+            let mut stops = stops();
+            if any_first {
+                // «любая» первая остановка: старты — все города вылета первого плеча
+                stops[0] = Stop { kind: "any".into(), codes: Vec::new(), ..stops[0].clone() };
+            }
             let collected = random_collected(seed);
             let table = FlightCols::from_collected(&collected);
             let q = query(extra.clone());
