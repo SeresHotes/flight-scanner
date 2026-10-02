@@ -424,7 +424,8 @@ class Engine:
             # но кэшем такая серия не считается (index.fresh пропускает error=1).
             self.index.put_days(req.origin, req.destination, req.params_key,
                                 [(d, job.pages if i == 0 else 0, 0) for i, d in enumerate(req.days)],
-                                exhausted=False, error=True, client=job.client, fetched_at=now)
+                                exhausted=False, error=True, client=job.client, fetched_at=now,
+                                error_msg=error)
             self.counters.inc(f"failed_{job.client}")
         job.error = error
         job.done = True

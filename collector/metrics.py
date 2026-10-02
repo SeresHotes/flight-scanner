@@ -4,9 +4,12 @@ ClickHouse, docs/COLLECTOR.md, фаза 3).
 Раз в METRICS_INTERVAL_SECONDS (60) снимается строка: нагрузка машины (/proc),
 объём озера и бакета, очередь, страницы/серии/429/ошибки за минуту по клиентам,
 задержка ответа приложению, возраст серий, сводка сборщика. Строки копятся и
-раз в METRICS_FLUSH_ROWS пишутся файлом `ops_metrics/date=YYYY-MM-DD/<HH-MM-SS>.parquet`.
+раз в METRICS_FLUSH_ROWS дописываются в файл часа `ops_metrics/date=YYYY-MM-DD/<HH>-00-00.parquet`
+(файл перезаписывается целиком), прошедшие дни склеиваются в один `.../day.parquet`.
+Мелкие файлы (раньше — файл на 5 минут, ~290 в сутки) ClickHouse читал по одному GET
+на каждую панель дашборда — загрузка шла 15–20 с.
 Раз в COVERAGE_SNAPSHOT_SECONDS (600) перезаписывается `coverage/latest.parquet` —
-покрытие «город × день» для тепловой карты свежести."""
+покрытие «город × день» для тепловой карты свежести (с текстом ошибки источника)."""
 import io
 import os
 import threading
@@ -21,6 +24,7 @@ import pyarrow.parquet as pq
 from collector.index import parse_ts
 
 OPS_PREFIX = "ops_metrics"
+DAY_FILE = "day.parquet"
 COVERAGE_KEY = "coverage/latest.parquet"
 
 # Счётчики движка, по которым считаем дельту за интервал.
@@ -45,13 +49,17 @@ OPS_SCHEMA = pa.schema([
     ("crawler_missing", pa.int64()), ("crawler_errors", pa.int64()),
     ("crawler_pass_progress", pa.float64()), ("crawler_submitted", pa.int64()),
     ("crawler_quarantined_cities", pa.int64()),
+    # с 02.10.2026 (старые файлы — null): p95 возраста, пары X→ANY на горизонте, второй
+    # эшелон сборщика (свежие, но старше суток — обновляются), очередь фона в оценочных страницах
+    ("series_age_p95_h", pa.float64()), ("horizon_pairs", pa.int64()),
+    ("crawler_refresh", pa.int64()), ("crawler_queued_pages_est", pa.int64()),
 ])
 
 COVERAGE_SCHEMA = pa.schema([
     ("snapshot_at", pa.timestamp("s", tz="UTC")),
     ("origin", pa.string()), ("day", pa.date32()), ("fetched_at", pa.timestamp("s", tz="UTC")),
     ("age_h", pa.float64()), ("pages", pa.int32()), ("tickets", pa.int32()),
-    ("exhausted", pa.bool_()), ("error", pa.bool_()),
+    ("exhausted", pa.bool_()), ("error", pa.bool_()), ("error_msg", pa.string()),
 ])
 
 
@@ -126,6 +134,9 @@ class Metrics:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_coverage = 0.0
+        self._hour_key: Optional[str] = None
+        self._hour_rows: List[Dict[str, Any]] = []
+        self._compacted_hour: Optional[str] = None
         self.files_written = 0
         self.last_row: Optional[Dict[str, Any]] = None
 
@@ -154,13 +165,16 @@ class Metrics:
         row["app_latency_avg_s"] = round(lat_t / lat_n, 2) if lat_n > 0 else None
         idx = stats["index"]
         row.update({"series_total": idx["series"], "series_age_p50_h": idx["age_p50_h"],
-                    "series_age_max_h": idx["age_max_h"], "cities": stats["cities"]})
+                    "series_age_p95_h": idx.get("age_p95_h"), "series_age_max_h": idx["age_max_h"],
+                    "horizon_pairs": idx.get("horizon_pairs"), "cities": stats["cities"]})
         cr = stats.get("crawler") or {}
         row.update({"crawler_pairs": cr.get("pairs"), "crawler_fresh": cr.get("fresh"),
                     "crawler_stale": cr.get("stale"), "crawler_missing": cr.get("missing"),
                     "crawler_errors": cr.get("errors"), "crawler_pass_progress": cr.get("pass_progress"),
                     "crawler_submitted": cr.get("submitted"),
-                    "crawler_quarantined_cities": cr.get("quarantined_cities")})
+                    "crawler_quarantined_cities": cr.get("quarantined_cities"),
+                    "crawler_refresh": cr.get("refresh"),
+                    "crawler_queued_pages_est": cr.get("queued_pages_est")})
         self._prev_counters = counters
         self.last_row = row
         self._rows.append(row)
@@ -169,26 +183,80 @@ class Metrics:
     # -------------------------------- write --------------------------------
 
     def flush(self, force: bool = False) -> Optional[str]:
+        """Новые строки — в файл их часа (перезапись с прежними строками часа). Возвращает
+        ключ последнего записанного файла."""
         if not self._rows or (not force and len(self._rows) < self.flush_rows):
             return None
         rows, self._rows = self._rows, []
-        table = pa.Table.from_pylist(rows, schema=OPS_SCHEMA)
-        sink = io.BytesIO()
-        pq.write_table(table, sink, compression="zstd")
-        first = rows[0]["ts"].astimezone(timezone.utc)
-        key = f"{OPS_PREFIX}/date={first:%Y-%m-%d}/{first:%H-%M-%S}.parquet"
-        self.engine.store.put_bytes(key, sink.getvalue())
+        key = None
+        for row in rows:
+            ts = row["ts"].astimezone(timezone.utc)
+            hour_key = f"{OPS_PREFIX}/date={ts:%Y-%m-%d}/{ts:%H}-00-00.parquet"
+            if hour_key != self._hour_key:
+                if key is not None:
+                    self._write_rows(self._hour_key, self._hour_rows)
+                # после рестарта в середине часа файл уже есть — дописываем к нему
+                self._hour_key, self._hour_rows = hour_key, self._read_rows(hour_key)
+            self._hour_rows.append(row)
+            key = hour_key
+        self._write_rows(self._hour_key, self._hour_rows)
         self.files_written += 1
         return key
+
+    def _read_rows(self, key: str) -> List[Dict[str, Any]]:
+        try:
+            table = pq.read_table(self.engine.store.open_input_file(key))
+        except Exception:  # файла нет (или битый) — начинаем с пустого
+            return []
+        return table.to_pylist()
+
+    def _write_rows(self, key: str, rows: List[Dict[str, Any]]) -> None:
+        by_ts = {r["ts"]: r for r in rows}  # повтор строки (склейка после рестарта) — последняя
+        ordered = [by_ts[t] for t in sorted(by_ts)]
+        table = pa.Table.from_pylist([{f.name: r.get(f.name) for f in OPS_SCHEMA} for r in ordered],
+                                     schema=OPS_SCHEMA)
+        sink = io.BytesIO()
+        pq.write_table(table, sink, compression="zstd")
+        self.engine.store.put_bytes(key, sink.getvalue())
+
+    def compact(self, include_today: bool = False) -> int:
+        """Склеивает файлы дня в один `day.parquet` (прошедшие дни; include_today — и
+        сегодняшний, при старте: там могут лежать мелкие файлы прежней раскладки).
+        Сначала пишется склейка, потом удаляются исходники — повтор после сбоя безопасен.
+        Старые файлы приводятся к текущей схеме (новые колонки — null). Возвращает
+        число склеенных дней."""
+        today = self._now().astimezone(timezone.utc).strftime("%Y-%m-%d")
+        by_day: Dict[str, List[str]] = {}
+        for obj in self.engine.store.list(OPS_PREFIX + "/"):
+            parts = obj.key.split("/")
+            if len(parts) == 3 and parts[1].startswith("date=") and parts[2].endswith(".parquet"):
+                by_day.setdefault(parts[1][5:], []).append(obj.key)
+        done = 0
+        for day, keys in sorted(by_day.items()):
+            target = f"{OPS_PREFIX}/date={day}/{DAY_FILE}"
+            if (day > today or (day == today and not include_today)
+                    or keys == [target]):
+                continue
+            rows: List[Dict[str, Any]] = []
+            for k in sorted(keys):
+                rows.extend(self._read_rows(k))
+            self._write_rows(target, rows)
+            self.engine.store.delete([k for k in keys if k != target])
+            if self._hour_key in keys:
+                self._hour_key, self._hour_rows = None, []
+            done += 1
+        return done
 
     def write_coverage(self) -> str:
         now = self._now()
         rows = []
+        messages = self.engine.index.coverage_errors()
         for origin, day, fetched_at, pages, tickets, exhausted, error in self.engine.index.coverage():
             fetched = parse_ts(fetched_at)
             rows.append({"snapshot_at": now, "origin": origin, "day": datetime.fromisoformat(day).date(),
                          "fetched_at": fetched, "age_h": round((now - fetched).total_seconds() / 3600, 2),
-                         "pages": pages, "tickets": tickets, "exhausted": bool(exhausted), "error": bool(error)})
+                         "pages": pages, "tickets": tickets, "exhausted": bool(exhausted), "error": bool(error),
+                         "error_msg": messages.get((origin, day)) if error else None})
         table = pa.Table.from_pylist(rows, schema=COVERAGE_SCHEMA)
         sink = io.BytesIO()
         pq.write_table(table, sink, compression="zstd")
@@ -213,10 +281,18 @@ class Metrics:
 
     def _loop(self) -> None:
         self.host.cpu_pct()  # первая точка для дельты CPU
+        try:
+            self.compact(include_today=True)
+        except Exception as e:
+            print(f"[metrics] склейка файлов не удалась: {e!r}")
         while not self._stop.wait(self.interval):
             try:
                 self.sample()
                 self.flush()
+                hour = self._now().astimezone(timezone.utc).strftime("%Y-%m-%d %H")
+                if hour != self._compacted_hour:  # раз в час: вчерашний день → один файл
+                    self._compacted_hour = hour
+                    self.compact()
                 if time.monotonic() - self._last_coverage >= self.coverage_interval:
                     self._last_coverage = time.monotonic()
                     self.write_coverage()

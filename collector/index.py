@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS series (
     exhausted    INTEGER NOT NULL,
     tickets      INTEGER NOT NULL,
     error        INTEGER NOT NULL DEFAULT 0,
+    error_msg    TEXT,
     client       TEXT,
     file_key     TEXT,
     row_group    INTEGER,
@@ -80,6 +81,10 @@ class Index:
             self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(SCHEMA)
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(series)")}
+        if "error_msg" not in cols:  # индекс до 02.10.2026: текст ошибки источника не хранился
+            self._conn.execute("ALTER TABLE series ADD COLUMN error_msg TEXT")
+            self._conn.commit()
         self._lock = threading.RLock()
 
     def close(self) -> None:
@@ -120,12 +125,12 @@ class Index:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO series (origin, destination, search_date, params_key, fetched_at, pages, "
-                "exhausted, tickets, error, client, file_key, row_group) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL) "
+                "exhausted, tickets, error, error_msg, client, file_key, row_group) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL) "
                 "ON CONFLICT(origin, destination, search_date, params_key) DO UPDATE SET "
                 "fetched_at=excluded.fetched_at, pages=excluded.pages, exhausted=excluded.exhausted, "
-                "tickets=excluded.tickets, error=excluded.error, client=excluded.client, "
-                "file_key=NULL, row_group=NULL",
+                "tickets=excluded.tickets, error=excluded.error, error_msg=excluded.error_msg, "
+                "client=excluded.client, file_key=NULL, row_group=NULL",
                 (o, d, day, k, _iso(fetched_at or utcnow()), int(pages), int(bool(exhausted)),
                  int(tickets), int(bool(error)), client))
             self._conn.commit()
@@ -135,21 +140,23 @@ class Index:
 
     def put_days(self, origin: Optional[str], destination: Optional[str], params_key: str,
                  days: Sequence[Tuple[str, int, int]], *, exhausted: bool, error: bool = False,
-                 client: Optional[str] = None, fetched_at: Optional[datetime] = None) -> List[int]:
+                 client: Optional[str] = None, fetched_at: Optional[datetime] = None,
+                 error_msg: Optional[str] = None) -> List[int]:
         """put для окна дат одной транзакцией: days — [(день, страниц, билетов)].
-        Возвращает id серий в том же порядке."""
+        error_msg — текст ошибки источника (для дашборда). Возвращает id серий в том же порядке."""
         o, d, _, k = series_key(origin, destination, "", params_key)
         ts = _iso(fetched_at or utcnow())
         with self._lock:
             self._conn.executemany(
                 "INSERT INTO series (origin, destination, search_date, params_key, fetched_at, pages, "
-                "exhausted, tickets, error, client, file_key, row_group) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL) "
+                "exhausted, tickets, error, error_msg, client, file_key, row_group) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL) "
                 "ON CONFLICT(origin, destination, search_date, params_key) DO UPDATE SET "
                 "fetched_at=excluded.fetched_at, pages=excluded.pages, exhausted=excluded.exhausted, "
-                "tickets=excluded.tickets, error=excluded.error, client=excluded.client, "
-                "file_key=NULL, row_group=NULL",
-                [(o, d, day, k, ts, int(pages), int(bool(exhausted)), int(tickets), int(bool(error)), client)
+                "tickets=excluded.tickets, error=excluded.error, error_msg=excluded.error_msg, "
+                "client=excluded.client, file_key=NULL, row_group=NULL",
+                [(o, d, day, k, ts, int(pages), int(bool(exhausted)), int(tickets), int(bool(error)),
+                  error_msg if error else None, client)
                  for day, pages, tickets in days])
             self._conn.commit()
             return [self._conn.execute(
@@ -184,16 +191,30 @@ class Index:
                  bool(r["exhausted"]), bool(r["error"])] for r in rows]
 
     def age_stats(self, now: Optional[datetime] = None) -> Dict[str, Any]:
-        """Число серий и возраст в часах: медиана и максимум (для health/метрик)."""
+        """Число серий без ошибки (все: и прошедшие дни, и запросы приложения) и возраст
+        данных сборщика в часах: медиана, p95 и максимум по парам «город × день» X→ANY
+        на дни вылета от сегодня. Прошедшие дни и пары приложения не обновляются и
+        лежат до ретеншна — по всем сериям максимум рос бы бесконечно."""
         now = now or utcnow()
         with self._lock:
+            total = self._conn.execute("SELECT COUNT(*) FROM series WHERE error=0").fetchone()[0]
             rows = self._conn.execute(
-                "SELECT fetched_at FROM series WHERE error=0 ORDER BY fetched_at").fetchall()
+                "SELECT fetched_at FROM series WHERE error=0 AND destination='' AND params_key='' "
+                "AND search_date >= ?", (now.astimezone(timezone.utc).date().isoformat(),)).fetchall()
         if not rows:
-            return {"series": 0, "age_p50_h": None, "age_max_h": None}
-        ages = sorted(((now - parse_ts(r["fetched_at"])).total_seconds() / 3600 for r in rows))
-        return {"series": len(ages), "age_p50_h": round(ages[len(ages) // 2], 2),
-                "age_max_h": round(ages[-1], 2)}
+            return {"series": total, "horizon_pairs": 0, "age_p50_h": None, "age_p95_h": None,
+                    "age_max_h": None}
+        ages = sorted((now - parse_ts(r["fetched_at"])).total_seconds() / 3600 for r in rows)
+        return {"series": total, "horizon_pairs": len(ages), "age_p50_h": round(ages[len(ages) // 2], 2),
+                "age_p95_h": round(ages[int(0.95 * (len(ages) - 1))], 2), "age_max_h": round(ages[-1], 2)}
+
+    def coverage_errors(self) -> Dict[Tuple[str, str], str]:
+        """Текст последней ошибки источника по парам X→ANY (origin, day) — для снимка покрытия."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT origin, search_date, error_msg FROM series "
+                "WHERE error=1 AND destination='' AND params_key=''").fetchall()
+        return {(r["origin"], r["search_date"]): r["error_msg"] or "" for r in rows}
 
     # ------------------------------- files ---------------------------------
 

@@ -24,7 +24,9 @@ CREATE OR REPLACE VIEW flights.tickets AS
         baggage_code Nullable(String), baggage_known Bool, baggage_included Bool,
         baggage_pieces Nullable(Int16), baggage_kg Nullable(Int16), source Nullable(String)');
 
--- Ops-метрики коллектора, строка в минуту (collector/metrics.py).
+-- Ops-метрики коллектора, строка в минуту (collector/metrics.py): файл на час,
+-- прошедшие дни склеены в day.parquet. Колонки, добавленные позже (с 02.10.2026), в
+-- старых файлах отсутствуют — читаются как NULL.
 CREATE OR REPLACE VIEW flights.ops_metrics AS
     SELECT * FROM s3(flights_ops_metrics, structure='
         ts DateTime(''UTC''),
@@ -44,10 +46,15 @@ CREATE OR REPLACE VIEW flights.ops_metrics AS
         crawler_pairs Nullable(Int64), crawler_fresh Nullable(Int64), crawler_stale Nullable(Int64),
         crawler_missing Nullable(Int64), crawler_errors Nullable(Int64),
         crawler_pass_progress Nullable(Float64), crawler_submitted Nullable(Int64),
-        crawler_quarantined_cities Nullable(Int64)');
+        crawler_quarantined_cities Nullable(Int64),
+        series_age_p95_h Nullable(Float64), horizon_pairs Nullable(Int64),
+        crawler_refresh Nullable(Int64), crawler_queued_pages_est Nullable(Int64)')
+    SETTINGS input_format_parquet_allow_missing_columns = 1;
 
 -- Снимок покрытия «город × день вылета» (перезаписывается раз в 10 мин).
 CREATE OR REPLACE VIEW flights.coverage AS
     SELECT * FROM s3(flights_coverage, structure='
         snapshot_at DateTime(''UTC''), origin String, day Date, fetched_at DateTime(''UTC''),
-        age_h Float64, pages Int32, tickets Int32, exhausted Bool, error Bool');
+        age_h Float64, pages Int32, tickets Int32, exhausted Bool, error Bool,
+        error_msg Nullable(String)')
+    SETTINGS input_format_parquet_allow_missing_columns = 1;
