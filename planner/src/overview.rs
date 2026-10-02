@@ -24,7 +24,7 @@ use crate::dates::{date_ordinal, weekend_deadline, DAY_SECONDS};
 use crate::flightcols::{FlightCols, NO_CODE};
 use crate::nearby::{Hops, HOP_MIN_GAP_MIN};
 use crate::planquery::{CityFilter, PlanQuery};
-use crate::search::{build_ctx, completion_lb, completion_lb_day, day_lb_get, leg_rows, DayLb, RESEARCH_DAY_LB};
+use crate::search::{build_ctx, chain_start, completion_lb, completion_lb_day, day_lb_get, leg_rows, variants, DayLb, RESEARCH_DAY_LB};
 use std::sync::atomic::{AtomicUsize, Ordering as AtOrd};
 
 /// ИССЛЕДОВАНИЕ: число стыковок групп (extend) и отсечённых групп.
@@ -32,7 +32,7 @@ pub static OV_EXTENDS: AtomicUsize = AtomicUsize::new(0);
 pub static OV_PRUNED: AtomicUsize = AtomicUsize::new(0);
 pub static OV_EMPTY: AtomicUsize = AtomicUsize::new(0);
 use crate::segments::city_pair;
-use crate::stops::{leg_dates, Stop, MAX_COMBO_STEPS};
+use crate::stops::{Stop, MAX_COMBO_STEPS};
 
 const BIG_TR: i64 = 1 << 20;
 
@@ -46,6 +46,9 @@ pub struct Combo {
     #[serde(rename = "minTransfers")]
     pub min_transfers: i64,
     pub count: i64,
+    /// Пропущенные остановки (номера в запросе): codes — только города варианта.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -328,8 +331,13 @@ impl PartialOrd for Ranked {
 }
 impl Ord for Ranked {
     fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-        self.0.min_price.partial_cmp(&o.0.min_price).unwrap_or(std::cmp::Ordering::Equal).then_with(|| self.0.codes.cmp(&o.0.codes))
+        cmp_combos(&self.0, &o.0)
     }
+}
+
+/// Порядок выдачи наборов: (minPrice, коды, пропуски).
+fn cmp_combos(a: &Combo, b: &Combo) -> std::cmp::Ordering {
+    a.min_price.partial_cmp(&b.min_price).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.codes.cmp(&b.codes)).then_with(|| a.skipped.cmp(&b.skipped))
 }
 
 /// K лучших наборов: max-куча по (цена, коды); `cutoff` — цена K-го (порог отсечения
@@ -381,8 +389,39 @@ pub fn build_overview_top(stops: &[Stop], table: &FlightCols, query: Option<&Pla
     build_overview_limited(stops, table, query, top, MAX_COMBO_STEPS)
 }
 
-/// То же с лимитом шагов стыковки (extend): при исчерпании — `incomplete`.
+/// То же с лимитом шагов стыковки (extend): при исчерпании — `incomplete`. С пропускаемыми
+/// остановками — по каждому варианту маршрута, затем `top` самых дешёвых из всех.
 pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<&PlanQuery>, top: usize, max_steps: usize) -> Overview {
+    if let Some(q) = query.filter(|q| q.variant.is_none()) {
+        let vars = variants(stops, q);
+        if vars.len() > 1 {
+            let parts: Vec<Overview> = vars.iter().map(|(vs, vq)| build_overview_limited(vs, table, Some(vq), top, max_steps)).collect();
+            return merge_overviews(parts, top);
+        }
+    }
+    build_overview_one(stops, table, query, top, max_steps)
+}
+
+/// Наборы нескольких вариантов маршрута: `top` самых дешёвых из всех.
+fn merge_overviews(parts: Vec<Overview>, top: usize) -> Overview {
+    let mut out = Overview::default();
+    for p in parts {
+        out.truncated |= p.truncated;
+        out.incomplete |= p.incomplete;
+        out.combos.extend(p.combos);
+        out.cities.extend(p.cities);
+    }
+    out.combos.sort_by(cmp_combos);
+    if out.combos.len() > top {
+        out.combos.truncate(top);
+        out.truncated = true;
+    }
+    out.total_count = out.combos.iter().map(|c| c.count).sum();
+    out
+}
+
+fn build_overview_one(stops: &[Stop], table: &FlightCols, query: Option<&PlanQuery>, top: usize, max_steps: usize) -> Overview {
+    let skipped: Vec<usize> = query.and_then(|q| q.variant.as_ref()).map(|v| v.skipped.clone()).unwrap_or_default();
     let last = stops.len().saturating_sub(1);
     if last < 1 || top == 0 {
         return Overview::default();
@@ -392,7 +431,7 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
     let city_filters: HashMap<usize, &CityFilter> = (1..last).filter_map(|i| query.and_then(|q| q.city_filter(i)).map(|cf| (i, cf))).collect();
     let trip = query.map(|q| q.trip_length).unwrap_or((0, None));
     let trip_active = trip.0 != 0 || trip.1.is_some();
-    let start_ord = date_ordinal(&leg_dates(stops, 0)[0]).unwrap_or(0);
+    let start_ord = date_ordinal(&chain_start(stops, query)).unwrap_or(0);
     let hops = Hops::new(stops);
     let n_codes = table.codes.len();
     // Разрешённые города прилёта остановки — маской по номерам кодов (None — любой);
@@ -429,6 +468,7 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
         last: usize,
         lb: &'a [FxHashMap<u32, f64>],
         day_lb: Option<&'a DayLb>,
+        skipped: &'a [usize],
     }
 
     impl Env<'_> {
@@ -584,6 +624,7 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
             transfers_at_min: state.tr_at[flat],
             min_transfers: mintr.iter().copied().min().unwrap_or(BIG_TR),
             count: total.round() as i64,
+            skipped: env.skipped.to_vec(),
         });
     }
 
@@ -628,10 +669,10 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
         }
     }
 
-    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last, lb: &lb, day_lb: day_lb.as_ref() };
+    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last, lb: &lb, day_lb: day_lb.as_ref(), skipped: &skipped };
     let leg0 = &legs[0];
     let mut starts: Vec<u32> = Vec::new();
-    for code in &crate::search::start_codes(stops, table) {
+    for code in &crate::search::start_codes(stops, table, query) {
         for d in hops.departs(0, code) {
             if let Some(id) = table.code_id(&d) {
                 if !starts.contains(&id) {
@@ -707,7 +748,7 @@ pub fn build_overview_limited(stops: &[Stop], table: &FlightCols, query: Option<
     let truncated = best.truncated;
     let incomplete = best.exhausted();
     let mut combos: Vec<Combo> = best.heap.into_iter().map(|r| r.0).collect();
-    combos.sort_by(|a, b| a.min_price.partial_cmp(&b.min_price).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.codes.cmp(&b.codes)));
+    combos.sort_by(cmp_combos);
     let total_count = combos.iter().map(|c| c.count).sum();
     let mut codes: Vec<String> = combos.iter().flat_map(|c| c.codes.iter().cloned()).collect::<HashSet<_>>().into_iter().collect();
     codes.sort();
@@ -938,8 +979,8 @@ mod tests {
         assert_eq!(
             got.combos,
             vec![
-                Combo { codes: vec!["MOW".into(), "IST".into()], min_price: 90.0, transfers_at_min: 1, min_transfers: 0, count: 2 },
-                Combo { codes: vec!["MOW".into(), "DXB".into()], min_price: 120.0, transfers_at_min: 0, min_transfers: 0, count: 1 },
+                Combo { codes: vec!["MOW".into(), "IST".into()], min_price: 90.0, transfers_at_min: 1, min_transfers: 0, count: 2, skipped: vec![] },
+                Combo { codes: vec!["MOW".into(), "DXB".into()], min_price: 120.0, transfers_at_min: 0, min_transfers: 0, count: 1, skipped: vec![] },
             ]
         );
         let empty = FlightCols::from_collected(&[]);

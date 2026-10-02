@@ -199,7 +199,7 @@ fn main() {
         let mut progress = |_f: usize, _e: usize| Ok(());
         let res = build_view(&stops, &table, &pq, &mut progress, &|_| {});
         let t_build = t.elapsed().as_secs_f64();
-        let count = res.map(|r| r.view.count).unwrap_or(0);
+        let count = res.map(|r| r.view.len()).unwrap_or(0);
         let held = rss_mb().saturating_sub(base);
         println!("| {label} | {flights} | {t_collect:.2} | {t_build:.2} | {count} | {} | {held} |", peak_mb().saturating_sub(base));
         drop(table);

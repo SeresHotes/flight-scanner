@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::flightcols::{ts_ord, FlightCols, FlightColsBuilder, FlightSrc, Fl, JobCodes, Tp, NO_CODE};
-use crate::stops::{collect_view, leg_dates, Stop, PAGES_ANY, PAGES_CITY};
+use crate::stops::{collect_view, leg_dates, leg_specs, spec_dates, LegSpec, Stop, PAGES_ANY, PAGES_CITY};
 use crate::ticket::Ticket;
 use crate::tickets::{coverage_for, Coverage, TicketStore};
 
@@ -320,7 +320,8 @@ pub fn store_view<'a>(store: Option<&'a dyn TicketStore>, stops: &[Stop]) -> Opt
 /// виртуальные hidden-city. Источник — склад билетов (один запрос на плечо), серии через
 /// `fetch` — только за городами и днями, которых в складе нет; без склада — всё сериями.
 /// Порядок: сначала плечи с конкретным городом, затем «любой → любой», суженные городами
-/// соседних плеч. `airport_city` — карта аэропорт → город из накопленных котировок
+/// соседних плеч. Плечи — `leg_specs`: обычные, затем в обход пропускаемых остановок (у
+/// обходного всегда есть конкретный город с одной стороны — `skip_error`). `airport_city` — карта аэропорт → город из накопленных котировок
 /// (дополняется по ходу сбора); `workers` — сколько серий плеча качать одновременно.
 /// Разбор — всегда в порядке обхода, результат не зависит от workers.
 pub fn collect_plan(
@@ -332,19 +333,24 @@ pub fn collect_plan(
     workers: usize,
 ) -> Result<FlightCols, CollectError> {
     let stops = collect_view(stops);
-    let legs = stops.len().saturating_sub(1);
+    let specs = leg_specs(&stops);
+    let legs = stops.len().saturating_sub(1); // обычные плечи; обходные — за ними
     // словарь кодов джобы: коды склада — теми же номерами (строки склада копируются как есть)
     let codes = Arc::new(JobCodes::new(&store.map(|v| v.store.code_names()).unwrap_or_default()));
     let mut ac: ApCity = airport_city.iter().map(|(a, c)| (codes.id(a), codes.id(c))).filter(|(a, c)| *a != NO_CODE && *c != NO_CODE).collect();
     // рейсы плеча сразу уходят в колонки джобы (из склада — номерами строк)
-    let mut out = FlightColsBuilder::new(legs, codes.clone());
+    let mut out = FlightColsBuilder::new(specs.len(), codes.clone());
     let mut done: Vec<bool> = vec![false; legs];
-    // 1. плечи с конкретным городом хотя бы с одной стороны
-    for i in 0..legs {
-        if stops[i].is_cities() || stops[i + 1].is_cities() {
+    // 1. плечи с конкретным городом хотя бы с одной стороны (и все плечи в обход)
+    for (i, &l) in specs.iter().enumerate() {
+        if stops[l.from].is_cities() || stops[l.to].is_cities() {
             progress.leg(i)?;
-            out.push_leg(i, collect_leg(&stops, i, fetch, store, progress, &mut ac, workers, &codes)?);
-            done[i] = true;
+            out.push_leg(i, collect_leg(&stops, l, fetch, store, progress, &mut ac, workers, &codes)?);
+            if i < legs {
+                done[i] = true;
+            }
+        } else if l.is_bypass() {
+            return Err(CollectError::Failed("плечо в обход между двумя «любыми» не поддерживается".into()));
         }
     }
     // 2. «любой → любой»: от концов к середине — каждый раз берём плечо, у которого больше
@@ -439,9 +445,9 @@ fn from_tickets(tickets: Vec<Ticket>, codes: &JobCodes) -> Vec<Fl> {
 
 /// Плечо с конкретным городом хотя бы с одной стороны.
 #[allow(clippy::too_many_arguments)]
-fn collect_leg(stops: &[Stop], i: usize, fetch: &dyn SeriesFetcher, store: Option<&StoreView>, progress: &dyn CollectProgress, ac: &mut ApCity, workers: usize, codes: &JobCodes) -> Result<Vec<Fl>, CollectError> {
-    let (from, to) = (&stops[i], &stops[i + 1]);
-    let dates = leg_dates(stops, i);
+fn collect_leg(stops: &[Stop], l: LegSpec, fetch: &dyn SeriesFetcher, store: Option<&StoreView>, progress: &dyn CollectProgress, ac: &mut ApCity, workers: usize, codes: &JobCodes) -> Result<Vec<Fl>, CollectError> {
+    let (from, to) = (&stops[l.from], &stops[l.to]);
+    let dates = spec_dates(stops, l);
     let (d0, d1) = (dates[0].clone(), dates[dates.len() - 1].clone());
     let mut acc = LegAcc::new();
 

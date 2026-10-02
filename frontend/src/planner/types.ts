@@ -16,6 +16,9 @@ export interface PlannerStop {
   window: [string, string]
   // Можно улететь дальше из соседнего города в этом радиусе, км (0/нет — только свой).
   radiusKm?: number
+  // Остановку можно пропустить (только промежуточную): сбор добавит перелёт в обход,
+  // его условия — cities[i].bypass запроса.
+  skip?: boolean
 }
 
 // Оценка объёма сбора: страниц GraphQL по переходам (planner/estimate.ts).
@@ -54,6 +57,7 @@ export interface ItineraryStop {
 
 export interface Itinerary {
   id: number
+  skipped?: number[] // пропущенные остановки (номера в запросе)
   stops: ItineraryStop[]
   segments: Segment[]
   total_price: number

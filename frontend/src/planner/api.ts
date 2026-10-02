@@ -23,6 +23,7 @@ export interface CityCombo {
   transfersAtMin: number
   minTransfers: number
   count: number
+  skipped?: number[] // пропущенные остановки (номера в запросе); codes — только города варианта
 }
 
 export interface CombosPage {

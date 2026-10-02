@@ -37,7 +37,8 @@ pub fn is_valid_max_results(n: Option<i64>) -> bool {
 }
 
 /// Остановка запроса: набор городов (kind='cities') или «любой» + окно дат.
-/// radius_km — можно улететь дальше из соседнего города; exact — прилёт строго в codes.
+/// radius_km — можно улететь дальше из соседнего города; exact — прилёт строго в codes;
+/// skip — остановку можно пропустить (сбор добавляет плечо в обход, см. `leg_specs`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stop {
     pub kind: String,
@@ -45,6 +46,7 @@ pub struct Stop {
     pub window: [String; 2],
     pub radius_km: i64,
     pub exact: bool,
+    pub skip: bool,
 }
 
 impl Stop {
@@ -55,11 +57,12 @@ impl Stop {
             window: [window[0].to_string(), window[1].to_string()],
             radius_km: 0,
             exact: false,
+            skip: false,
         }
     }
 
     pub fn from_spec(s: &StopSpec) -> Stop {
-        Stop { kind: s.kind.clone(), codes: s.codes.clone(), window: s.window.clone(), radius_km: s.radius_km, exact: false }
+        Stop { kind: s.kind.clone(), codes: s.codes.clone(), window: s.window.clone(), radius_km: s.radius_km, exact: false, skip: s.skip }
     }
 
     /// Принимаем и codes:[...], и airports:[{code}] (как во фронтовом PlannerStop).
@@ -81,6 +84,7 @@ impl Stop {
             window: [w0, w1],
             radius_km: clamp_radius(d.get("radiusKm")),
             exact: false,
+            skip: d.get("skip").and_then(|v| v.as_bool()).unwrap_or(false),
         }
     }
 
@@ -104,7 +108,7 @@ pub fn collect_view(stops: &[Stop]) -> Vec<Stop> {
         .enumerate()
         .map(|(i, s)| {
             if s.is_cities() {
-                Stop { kind: s.kind.clone(), codes: hops.collect_codes(i), window: s.window.clone(), radius_km: 0, exact: false }
+                Stop { kind: s.kind.clone(), codes: hops.collect_codes(i), window: s.window.clone(), radius_km: 0, exact: false, skip: s.skip }
             } else {
                 s.clone()
             }
@@ -142,12 +146,97 @@ pub fn leg_days(stops: &[Stop], i: usize) -> i64 {
     }
 }
 
+/// Плечо сбора (номер плеча в рейсах джобы = позиция в `leg_specs`): из остановки `from`
+/// в остановку `to`. Обычные плечи i → i+1 идут первыми (номер = i), за ними — плечи в
+/// обход пропускаемых остановок i−1 → i+1, по порядку остановок.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegSpec {
+    pub from: usize,
+    pub to: usize,
+}
+
+impl LegSpec {
+    /// Плечо в обход остановки `from + 1`.
+    pub fn is_bypass(&self) -> bool {
+        self.to > self.from + 1
+    }
+}
+
+/// Все плечи сбора джобы: обычные, затем в обход каждой пропускаемой остановки.
+pub fn leg_specs(stops: &[Stop]) -> Vec<LegSpec> {
+    let n = stops.len();
+    let mut out: Vec<LegSpec> = (0..n.saturating_sub(1)).map(|i| LegSpec { from: i, to: i + 1 }).collect();
+    for i in 1..n.saturating_sub(1) {
+        if stops[i].skip {
+            out.push(LegSpec { from: i - 1, to: i + 1 });
+        }
+    }
+    out
+}
+
+/// Номер плеча сбора «в обход остановки i» (None — остановку нельзя пропустить).
+pub fn bypass_leg(stops: &[Stop], i: usize) -> Option<usize> {
+    leg_specs(stops).iter().position(|l| l.is_bypass() && l.from + 1 == i)
+}
+
+/// Даты сбора плеча: у обычного — `leg_dates`, у обходного — от первого дня плеча в
+/// пропускаемую остановку до последнего дня плеча из неё (вылет в те дни, когда летели бы
+/// на любое из двух заменённых плеч).
+pub fn spec_dates(stops: &[Stop], l: LegSpec) -> Vec<String> {
+    if !l.is_bypass() {
+        return leg_dates(stops, l.from);
+    }
+    let (a, b) = (leg_dates(stops, l.from), leg_dates(stops, l.from + 1));
+    let lo = a.first().into_iter().chain(b.first()).min().cloned().unwrap_or_default();
+    let hi = a.last().into_iter().chain(b.last()).max().cloned().unwrap_or_default();
+    date_range(&lo, &hi)
+}
+
+/// Проверка пропусков запроса: пропускать можно только промежуточные остановки, не две
+/// подряд, не больше MAX_SKIPS и не между двумя «любыми» (плечо в обход «любой → любой»).
+pub fn skip_error(stops: &[Stop]) -> Option<String> {
+    let n = stops.len();
+    let skips: Vec<usize> = (0..n).filter(|&i| stops[i].skip).collect();
+    if skips.is_empty() {
+        return None;
+    }
+    if skips.iter().any(|&i| i == 0 || i + 1 == n) {
+        return Some("Пропускать можно только промежуточные остановки — не первую и не последнюю.".into());
+    }
+    if skips.windows(2).any(|w| w[1] == w[0] + 1) {
+        return Some("Нельзя разрешить пропуск двух остановок подряд.".into());
+    }
+    if skips.len() > MAX_SKIPS {
+        return Some(format!("Пропускаемых остановок — не больше {MAX_SKIPS}."));
+    }
+    if skips.iter().any(|&i| !stops[i - 1].is_cities() && !stops[i + 1].is_cities()) {
+        return Some("Пропуск остановки между двумя «любыми» не поддерживается: задайте город у соседней.".into());
+    }
+    None
+}
+
+/// Потолок пропускаемых остановок: вариантов маршрута (с ней / без неё) — до 2^MAX_SKIPS.
+pub const MAX_SKIPS: usize = 3;
+
+/// Дни плеча сбора.
+pub fn spec_days(stops: &[Stop], l: LegSpec) -> i64 {
+    if l.is_bypass() {
+        spec_dates(stops, l).len() as i64
+    } else {
+        leg_days(stops, l.from)
+    }
+}
+
 /// Страниц на плечо i: город→город — пары A×B по PAGES_CITY плюс hidden-city A→ANY
 /// по PAGES_ANY на город A; с «любым» концом — по PAGES_ANY на каждый конкретный
 /// город другого конца. Всё × дней окна.
 pub fn leg_requests(stops: &[Stop], i: usize) -> i64 {
-    let (from, to) = (&stops[i], &stops[i + 1]);
-    let days = leg_days(stops, i);
+    spec_requests(stops, LegSpec { from: i, to: i + 1 })
+}
+
+pub fn spec_requests(stops: &[Stop], l: LegSpec) -> i64 {
+    let (from, to) = (&stops[l.from], &stops[l.to]);
+    let days = spec_days(stops, l);
     if from.is_cities() && to.is_cities() {
         let a = from.codes.len().max(1) as i64;
         let b = to.codes.len().max(1) as i64;
@@ -185,9 +274,9 @@ pub struct Series {
 pub fn plan_series(stops: &[Stop]) -> Vec<Series> {
     let stops = collect_view(stops);
     let mut out = Vec::new();
-    for i in 0..stops.len().saturating_sub(1) {
-        let (from, to) = (&stops[i], &stops[i + 1]);
-        for day in leg_dates(&stops, i) {
+    for (i, l) in leg_specs(&stops).into_iter().enumerate() {
+        let (from, to) = (&stops[l.from], &stops[l.to]);
+        for day in spec_dates(&stops, l) {
             if from.is_cities() && to.is_cities() {
                 for a in &from.codes {
                     for b in &to.codes {
@@ -241,7 +330,8 @@ pub struct Estimate {
 /// сколько холодных и время по холодным.
 pub fn estimate_plan(stops: &[Stop], is_cached: Option<&dyn Fn(&Series) -> bool>) -> Estimate {
     let stops = collect_view(stops);
-    let mut cached_by_leg: Vec<i64> = vec![0; stops.len()];
+    let specs = leg_specs(&stops);
+    let mut cached_by_leg: Vec<i64> = vec![0; specs.len()];
     if let Some(probe) = is_cached {
         for s in plan_series(&stops) {
             if probe(&s) {
@@ -251,15 +341,19 @@ pub fn estimate_plan(stops: &[Stop], is_cached: Option<&dyn Fn(&Series) -> bool>
     }
     let mut legs = Vec::new();
     let (mut requests, mut cached) = (0, 0);
-    for i in 0..stops.len().saturating_sub(1) {
-        let reqs = leg_requests(&stops, i);
+    for (i, &l) in specs.iter().enumerate() {
+        let reqs = spec_requests(&stops, l);
+        let mut to_label = stop_label(&stops[l.to]);
+        if l.is_bypass() {
+            to_label = format!("{to_label} (без {})", stop_label(&stops[l.from + 1]));
+        }
         legs.push(EstimateLeg {
-            from_label: stop_label(&stops[i]),
-            to_label: stop_label(&stops[i + 1]),
-            days: leg_days(&stops, i),
+            from_label: stop_label(&stops[l.from]),
+            to_label,
+            days: spec_days(&stops, l),
             requests: reqs,
             cached: cached_by_leg[i],
-            any_leg: stops[i].kind == "any" || stops[i + 1].kind == "any",
+            any_leg: stops[l.from].kind == "any" || stops[l.to].kind == "any",
         });
         requests += reqs;
         cached += cached_by_leg[i];
@@ -268,14 +362,14 @@ pub fn estimate_plan(stops: &[Stop], is_cached: Option<&dyn Fn(&Series) -> bool>
     Estimate { requests, cached, cold, seconds: (cold as f64 * SECONDS_PER_REQUEST).round() as i64, legs, source: "collector".into() }
 }
 
-/// Суммарная ширина окон всех плеч (дни).
+/// Суммарная ширина окон всех плеч сбора, включая плечи в обход (дни).
 pub fn total_window_days(stops: &[Stop]) -> i64 {
-    (0..stops.len().saturating_sub(1)).map(|i| leg_days(stops, i)).sum()
+    leg_specs(stops).into_iter().map(|l| spec_days(stops, l)).sum()
 }
 
 pub fn request_count(stops: &[Stop]) -> i64 {
     let stops = collect_view(stops);
-    (0..stops.len().saturating_sub(1)).map(|i| leg_requests(&stops, i)).sum()
+    leg_specs(&stops).into_iter().map(|l| spec_requests(&stops, l)).sum()
 }
 
 #[cfg(test)]
@@ -317,6 +411,33 @@ mod tests {
         assert_eq!(total_window_days(&stops), 40);
         assert!(total_window_days(&stops) <= MAX_TOTAL_WINDOW_DAYS);
         assert_eq!(plan_series(&stops).iter().filter(|s| s.origin.is_none() && s.dest.is_none()).count(), 10, "любой → любой: серия на день");
+    }
+
+    #[test]
+    fn bypass_legs() {
+        let mut stops = vec![
+            Stop::new("cities", vec!["MOW"], ["", ""]),
+            Stop::new("cities", vec!["IST"], ["2026-11-01", "2026-11-03"]),
+            Stop::new("cities", vec!["TBS"], ["2026-11-06", "2026-11-08"]),
+            Stop::new("cities", vec!["MOW"], ["", ""]),
+        ];
+        assert_eq!(leg_specs(&stops).len(), 3);
+        assert_eq!(skip_error(&stops), None);
+        stops[1].skip = true;
+        let specs = leg_specs(&stops);
+        assert_eq!(specs[3], LegSpec { from: 0, to: 2 });
+        assert_eq!(bypass_leg(&stops, 1), Some(3));
+        assert_eq!(bypass_leg(&stops, 2), None);
+        // обход IST: от первого дня MOW→IST (окно IST) до последнего дня IST→TBS (окно IST)
+        assert_eq!(spec_dates(&stops, specs[3]), date_range("2026-11-01", "2026-11-03"));
+        assert_eq!(estimate_plan(&stops, None).legs.len(), 4);
+        assert_eq!(plan_series(&stops).iter().filter(|s| s.leg == 3).count(), 3 * 2);
+        assert_eq!(total_window_days(&stops), 3 + 3 + 3 + 3);
+        stops[2].skip = true;
+        assert!(skip_error(&stops).is_some(), "две подряд");
+        stops[2].skip = false;
+        stops[0].skip = true;
+        assert!(skip_error(&stops).is_some(), "первая");
     }
 
     #[test]

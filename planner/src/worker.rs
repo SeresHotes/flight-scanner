@@ -18,7 +18,7 @@ use crate::graphql::DirectFetcher;
 use crate::hot;
 use crate::overview::{build_overview, Overview};
 use crate::planquery::PlanQuery;
-use crate::search::{build_itineraries_compact, Aborted, View};
+use crate::search::{build_routes, Aborted, Routes};
 use crate::stops::{estimate_plan, parse_stops, request_count, Stop, MAX_SEARCH_STEPS};
 
 /// Свежесть кэша серий: источник сам отдаёт кэш цен с задержкой ~суток.
@@ -192,9 +192,10 @@ pub fn make_store() -> Option<Box<dyn TicketStore>> {
     lakestore::global().map(|s| Box::new(SharedStore(s)) as Box<dyn TicketStore>)
 }
 
-/// Результат джобы под фильтры («вид»): компактные цепочки + наборы городов.
+/// Результат джобы под фильтры («вид»): компактные цепочки (всех вариантов маршрута) +
+/// наборы городов.
 pub struct ViewResult {
-    pub view: View,
+    pub view: Routes,
     pub combos: Overview,
 }
 
@@ -207,7 +208,7 @@ pub fn build_view(stops: &[Stop], table: &FlightCols, pq: &PlanQuery, on_progres
         explored += 1;
         on_progress(found, explored)
     };
-    let view = build_itineraries_compact(stops, table, max_results, Some(pq), &mut check)?;
+    let view = build_routes(stops, table, max_results, pq, &mut check)?;
     on_stage("combos");
     let combos = build_overview(stops, table, Some(pq));
     Ok(ViewResult { view, combos })
@@ -277,7 +278,7 @@ fn run_inner(db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>
     if cancel.is_requested(job_id) {
         return Err(CollectError::Cancelled);
     }
-    let count = result.view.count;
+    let count = result.view.len();
     rep.timing("build", t.elapsed().as_secs_f64());
     rep.timing("total", t0.elapsed().as_secs_f64());
     rep.flush_state()?;

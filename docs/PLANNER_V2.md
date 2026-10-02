@@ -89,13 +89,24 @@ React (только планировщик)                FastAPI
 ### 1. Единый запрос `PlanQuery` (контракт фронт ↔ бэк)
 
 ```
-stops[]:        {kind: cities|any, codes[], window[start,end]}         # как сейчас
-cities[]:       {minStay, maxStay, mustCover|null, requireWeekend}      # == stops
+stops[]:        {kind: cities|any, codes[], window[start,end], radiusKm?, skip?}  # skip — можно пропустить
+cities[]:       {minStay, maxStay, mustCover|null, requireWeekend,
+                 bypass?: <как legs[]>}                 # условия перелёта в обход, если остановку пропускаем
+                                                                        # == stops
 legs[]:         {maxTransfers, minLayoverMin, travelMin[lo,hi],
                  depTime[lo,hi], arrTime[lo,hi],    # время суток вылета/прилёта, местное, мин; [0,1440] = любое
                  baggage: any|included|none, hiddenCity: bool}          # == stops-1
 tripLength[lo,hi], maxResults            # maxCost (бюджет) удалён 01.10.2026
 ```
+**Пропуск остановки** (`stops[i].skip`, только промежуточные, не две подряд, ≤ 3, не между
+двумя «любыми» — `stops::skip_error`): сбор добавляет плечо i−1 → i+1 «в обход» (`stops::leg_specs`:
+обычные плечи — номера 0…n−2, обходные — за ними; даты — от первого дня плеча в i до последнего
+дня плеча из i), флаг — часть `collect_key`. Перебор и наборы считаются по каждому варианту
+маршрута (подмножество пропущенных остановок, `search::variants`: `PlanQuery.variant` — карта
+плеч варианта на плечи сбора), результаты сливаются по цене (`search::Routes`). Плечо в обход
+фильтруется `cities[i].bypass` (фильтр при чтении, как остальные). У маршрута — `skipped`
+(номера пропущенных остановок), у набора — `skipped`, ключ набора `MOW-TBS~1`.
+
 Фильтр `allowedCodes` из старых фильтров исчезает: сужение по городам делается
 выбором наборов на странице `/combos`. Запрос сериализуется в URL целиком
 (`urlState.ts` расширить), хэш запроса — ключ джобы и кэша результата.

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { plural } from '../lib/format'
 import { fetchRoutes, type RoutesPage as RoutesPayload } from '../planner/api'
-import { encodeQuery, type PlanQuery } from '../planner/query'
+import { encodeQuery, stopName, type PlanQuery } from '../planner/query'
 import { usePlanJob } from '../planner/usePlanJob'
 import { useQueryFromUrl } from '../planner/useQueryState'
 import { JobShell } from '../planner/components/JobShell'
@@ -33,7 +33,8 @@ function RoutesPageInner() {
           <span>
             Наборы: {combos.map((c) => (
               <span className="mchip" key={c}>
-                {c.split('-').join(' → ')}
+                {c.split('~')[0].split('-').join(' → ')}
+                {c.includes('~') && ` · без ${c.split('~')[1].split('.').map((i) => stopName(query, Number(i))).join(', ')}`}
               </span>
             ))}
           </span>
@@ -79,7 +80,7 @@ function RoutesList({ jobId, query, combos }: { jobId: string; query: PlanQuery;
       </div>
       <div className="cards">
         {items.map((it) => (
-          <ItineraryCard key={it.id} it={it} />
+          <ItineraryCard key={it.id} it={it} skipped={it.skipped?.map((i) => stopName(query, i))} />
         ))}
       </div>
       {items.length < first.total && (

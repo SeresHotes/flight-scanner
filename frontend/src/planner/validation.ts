@@ -5,7 +5,11 @@
 //    ширина окон дат всех плеч ограничена MAX_TOTAL_WINDOW_DAYS — иначе выборка непомерна;
 //  • один и тот же единственный город не может идти дважды подряд;
 //  • у ПРОМЕЖУТОЧНЫХ остановок задан диапазон дат (start <= end); у концов даты
-//    выводятся из соседей — поле не показывается и не требуется.
+//    выводятся из соседей — поле не показывается и не требуется;
+//  • пропускать можно промежуточные остановки, не две подряд, не больше MAX_SKIPS и не
+//    между двумя «любыми» (planner/src/stops.rs skip_error).
+
+export const MAX_SKIPS = 3
 
 import { daysInWindow } from './dates'
 import type { PlannerStop } from './types'
@@ -23,10 +27,31 @@ export function legDays(stops: PlannerStop[], i: number): number {
   return DEFAULT_LEG_DAYS
 }
 
-// Суммарная ширина окон всех плеч (в днях).
+// Окно плеча i (даты сбора) или null — окон нет.
+function legWindow(stops: PlannerStop[], i: number): [string, string] | null {
+  const wi = stops[i].window
+  if (wi[0] && wi[1]) return wi
+  const wj = stops[i + 1].window
+  if (wj[0] && wj[1]) return wj
+  return null
+}
+
+// Дни перелёта в обход остановки i: от начала плеча в неё до конца плеча из неё.
+export function bypassDays(stops: PlannerStop[], i: number): number {
+  const a = legWindow(stops, i - 1)
+  const b = legWindow(stops, i)
+  if (!a && !b) return DEFAULT_LEG_DAYS
+  if (!a || !b) return daysInWindow((a ?? b)!)
+  return daysInWindow([a[0] < b[0] ? a[0] : b[0], a[1] > b[1] ? a[1] : b[1]])
+}
+
+// Суммарная ширина окон всех плеч, включая перелёты в обход (в днях).
 export function totalWindowDays(stops: PlannerStop[]): number {
   let total = 0
   for (let i = 0; i < stops.length - 1; i++) total += legDays(stops, i)
+  stops.forEach((s, i) => {
+    if (s.skip && i > 0 && i < stops.length - 1) total += bypassDays(stops, i)
+  })
   return total
 }
 
@@ -83,6 +108,16 @@ export function validatePlan(stops: PlannerStop[]): Validation {
       general.push(`Суммарная ширина окон дат — ${total} дн., максимум ${MAX_TOTAL_WINDOW_DAYS}. Сузьте диапазоны.`)
     }
   }
+
+  // Пропуски: не две подряд, не между двумя «любыми», не больше MAX_SKIPS.
+  const skips = stops.map((s, i) => (s.skip && i > 0 && i < stops.length - 1 ? i : -1)).filter((i) => i >= 0)
+  for (const i of skips) {
+    if (skips.includes(i + 1)) flag(i + 1, `Точки ${pointLabel(i)} и ${pointLabel(i + 1)}: нельзя разрешить пропуск двух остановок подряд.`)
+    if (stops[i - 1].kind === 'any' && stops[i + 1].kind === 'any') {
+      flag(i, `Точка ${pointLabel(i)}: пропуск между двумя «любыми» не поддерживается — задайте город у соседней.`)
+    }
+  }
+  if (skips.length > MAX_SKIPS) general.push(`Пропускаемых остановок — не больше ${MAX_SKIPS}.`)
 
   // Один и тот же единственный город дважды подряд.
   for (let i = 0; i < stops.length - 1; i++) {
