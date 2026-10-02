@@ -14,6 +14,9 @@ pub fn parse_naive(s: &str) -> Option<NaiveDateTime> {
     if s.len() < 10 {
         return None;
     }
+    if let Some(dt) = parse_naive_fast(s.as_bytes()) {
+        return Some(dt);
+    }
     let date = NaiveDate::parse_from_str(&s[..10], "%Y-%m-%d").ok()?;
     if s.len() == 10 {
         return Some(date.and_time(NaiveTime::default()));
@@ -29,6 +32,38 @@ pub fn parse_naive(s: &str) -> Option<NaiveDateTime> {
         .or_else(|_| NaiveTime::parse_from_str(time_part, "%H:%M"))
         .ok()?;
     Some(date.and_time(time))
+}
+
+/// Быстрый путь без форматного разбора chrono (сбор джобы разбирает миллионы дат):
+/// `YYYY-MM-DD` и `YYYY-MM-DD[T ]HH:MM[:SS]`, дальше — только зона (`+`, `-`, `Z`) или
+/// конец строки. Остальное (доли секунды и пр.) — None, разбирает общий путь.
+fn parse_naive_fast(b: &[u8]) -> Option<NaiveDateTime> {
+    let num = |r: std::ops::Range<usize>| -> Option<u32> {
+        let mut v = 0u32;
+        for &c in b.get(r)? {
+            if !c.is_ascii_digit() {
+                return None;
+            }
+            v = v * 10 + (c - b'0') as u32;
+        }
+        Some(v)
+    };
+    if b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let date = NaiveDate::from_ymd_opt(num(0..4)? as i32, num(5..7)?, num(8..10)?)?;
+    if b.len() == 10 {
+        return Some(date.and_time(NaiveTime::default()));
+    }
+    if !(b[10] == b'T' || b[10] == b' ') || b.len() < 16 || b[13] != b':' {
+        return None;
+    }
+    let (h, m) = (num(11..13)?, num(14..16)?);
+    let (sec, rest) = if b.len() >= 19 && b[16] == b':' { (num(17..19)?, 19) } else { (0, 16) };
+    match b.get(rest) {
+        None | Some(b'+') | Some(b'-') | Some(b'Z') | Some(b'z') => Some(date.and_time(NaiveTime::from_hms_opt(h, m, sec)?)),
+        _ => None,
+    }
 }
 
 /// Секунды от 1970-01-01 наивного времени (как `(dt - epoch).total_seconds()`).
@@ -196,6 +231,24 @@ pub fn now_naive() -> NaiveDateTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_parse_matches_chrono() {
+        let slow = |s: &str| -> Option<NaiveDateTime> {
+            let date = NaiveDate::parse_from_str(&s[..10], "%Y-%m-%d").ok()?;
+            if s.len() == 10 {
+                return Some(date.and_time(NaiveTime::default()));
+            }
+            let rest = &s[11..];
+            let end = rest.find(|c: char| c == '+' || c == 'Z' || c == 'z' || c == '-').unwrap_or(rest.len());
+            let tp = &rest[..end];
+            let time = NaiveTime::parse_from_str(tp, "%H:%M:%S%.f").or_else(|_| NaiveTime::parse_from_str(tp, "%H:%M:%S")).or_else(|_| NaiveTime::parse_from_str(tp, "%H:%M")).ok()?;
+            Some(date.and_time(time))
+        };
+        for s in ["2026-10-18", "2026-10-18T10:20:00+09:00", "2026-10-18T10:20:00-03:00", "2026-10-18T10:20:00Z", "2026-10-18 10:20:00", "2026-10-18T10:20", "2026-10-18T10:20+03:00", "2026-10-18T10:20:00.5+03:00", "2026-02-30T10:20:00", "2026-10-18T25:20:00"] {
+            assert_eq!(parse_naive(s), slow(s), "{s}");
+        }
+    }
 
     #[test]
     fn parses_offsets_and_dates() {
