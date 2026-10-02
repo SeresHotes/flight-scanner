@@ -510,6 +510,7 @@ pub struct LakeStore {
     pub dirty: std::sync::atomic::AtomicBool,
     /// Аэропорт → город из концов билетов (PKX → BJS): hidden-city и остановки по городу.
     airports: RwLock<HashMap<String, String>>,
+    airports_arc: Mutex<Option<Arc<HashMap<String, String>>>>,
 }
 
 /// Сколько ждать первой загрузки склада в запросе джобы.
@@ -641,6 +642,16 @@ impl LakeStore {
     /// Карта аэропорт → город из билетов склада.
     pub fn airport_city(&self) -> HashMap<String, String> {
         self.airports.read().unwrap().clone()
+    }
+
+    /// То же, общей копией: пересобирается, только когда карта выросла.
+    pub fn airport_city_arc(&self) -> Arc<HashMap<String, String>> {
+        let len = self.airports.read().unwrap().len();
+        let mut cached = self.airports_arc.lock().unwrap();
+        if cached.as_ref().map(|m| m.len() != len).unwrap_or(true) {
+            *cached = Some(Arc::new(self.airport_city()));
+        }
+        cached.clone().unwrap()
     }
 
     /// Прошедшие дни вылета — вон (строго раньше `before`). Сколько серий удалено.
@@ -907,6 +918,16 @@ pub fn global() -> Option<Arc<LakeStore>> {
 
 fn parse_day(s: &str) -> Result<NaiveDate, CollectError> {
     ymd(s).ok_or_else(|| CollectError::Failed(format!("склад билетов: плохая дата {s}")))
+}
+
+/// Карта аэропорт → город: со складом — из памяти склада (строится из концов билетов при
+/// загрузке, лежит в снапшоте); без склада (локально, без озера) — из `quotes` в SQLite.
+pub fn airport_city_map(db_path: &str) -> Arc<HashMap<String, String>> {
+    match global() {
+        Some(store) if store.is_ready() => store.airport_city_arc(),
+        // склад ещё грузится с нуля (минуты после рестарта без снапшота) — прежняя карта
+        _ => crate::hot::airport_city_map_cached(db_path),
+    }
 }
 
 /// Склад как источник рейсов джобы.

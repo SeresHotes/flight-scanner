@@ -18,7 +18,7 @@ ssh_public_key = "ssh-ed25519 AAAA... you@host"
 
 # Параметры VM (по умолчанию 2 vCPU / 20% / 4 ГБ / 20 ГБ диск).
 # vm_cores         = 2
-# vm_core_fraction = 20
+# vm_core_fraction = 100
 # vm_memory_gb     = 4
 # vm_disk_gb       = 20
 
