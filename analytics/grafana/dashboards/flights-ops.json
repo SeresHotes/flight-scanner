@@ -29,7 +29,7 @@
   },
   {
    "id": 2,
-   "title": "Серий в озере",
+   "title": "Пар «город × день» на горизонте",
    "type": "stat",
    "gridPos": {
     "x": 0,
@@ -38,19 +38,30 @@
     "h": 4
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT series_total FROM (SELECT * FROM flights.ops_metrics ORDER BY ts DESC LIMIT 1)",
-     "queryType": "table",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "всего пар"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
@@ -78,7 +89,8 @@
     "colorMode": "value",
     "graphMode": "none",
     "textMode": "value"
-   }
+   },
+   "description": "Сколько пар «город вылета × день вылета» сборщик держит свежими: города × 181 день от сегодня."
   },
   {
    "id": 3,
@@ -91,19 +103,30 @@
     "h": 4
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT cities FROM (SELECT * FROM flights.ops_metrics ORDER BY ts DESC LIMIT 1)",
-     "queryType": "table",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "городов"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
@@ -135,7 +158,7 @@
   },
   {
    "id": 4,
-   "title": "Проход сборщика",
+   "title": "Первый проход",
    "type": "stat",
    "gridPos": {
     "x": 8,
@@ -144,19 +167,30 @@
     "h": 4
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT crawler_pass_progress FROM (SELECT * FROM flights.ops_metrics ORDER BY ts DESC LIMIT 1)",
-     "queryType": "table",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "проход"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
@@ -193,7 +227,8 @@
     "colorMode": "value",
     "graphMode": "none",
     "textMode": "value"
-   }
+   },
+   "description": "Доля пар, по которым есть хоть какие-то данные."
   },
   {
    "id": 5,
@@ -206,19 +241,30 @@
     "h": 4
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT crawler_stale FROM (SELECT * FROM flights.ops_metrics ORDER BY ts DESC LIMIT 1)",
-     "queryType": "table",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "устарели"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
@@ -254,11 +300,12 @@
     "colorMode": "value",
     "graphMode": "none",
     "textMode": "value"
-   }
+   },
+   "description": "Пары старше цели свежести: до 60 дней вперёд — 72 ч, дальше — неделя."
   },
   {
    "id": 6,
-   "title": "Медианный возраст, ч",
+   "title": "Возраст данных: медиана, ч",
    "type": "stat",
    "gridPos": {
     "x": 16,
@@ -267,24 +314,36 @@
     "h": 4
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT series_age_p50_h FROM (SELECT * FROM flights.ops_metrics ORDER BY ts DESC LIMIT 1)",
-     "queryType": "table",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "медиана"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
     "defaults": {
      "unit": "h",
+     "decimals": 1,
      "thresholds": {
       "mode": "absolute",
       "steps": [
@@ -316,7 +375,8 @@
     "colorMode": "value",
     "graphMode": "none",
     "textMode": "value"
-   }
+   },
+   "description": "Половина пар «город × день» на горизонте получена не раньше стольких часов назад."
   },
   {
    "id": 7,
@@ -329,19 +389,30 @@
     "h": 4
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT lake_bytes/1073741824 FROM (SELECT * FROM flights.ops_metrics ORDER BY ts DESC LIMIT 1)",
-     "queryType": "table",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "озеро (tickets/)"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
@@ -381,8 +452,8 @@
    }
   },
   {
-   "id": 8,
-   "title": "Покрытие сборщика: пары «город × день»",
+   "id": 100,
+   "title": "Покрытие сборщика: пары «город × день вылета»",
    "type": "timeseries",
    "gridPos": {
     "x": 0,
@@ -401,43 +472,173 @@
       "uid": "flights-clickhouse"
      },
      "editorType": "sql",
-     "rawSql": "SELECT ts AS time, crawler_fresh AS \"свежие\", crawler_stale AS \"устарели\", crawler_missing AS \"нет данных\", crawler_errors AS \"ошибки источника\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
+     "rawSql": "SELECT ts AS time, crawler_fresh AS \"свежие\", crawler_pairs AS \"всего пар\", crawler_refresh AS \"из них старше суток (обновляются)\", crawler_stale AS \"устарели\", crawler_missing AS \"нет данных\", crawler_errors AS \"ошибка источника\", crawler_pass_progress AS \"проход\", cities AS \"городов\", series_age_p50_h AS \"медиана\", series_age_p95_h AS \"p95\", series_age_max_h AS \"максимум\", pages_app_1m + pages_crawl_1m AS \"всего запросов\", pages_app_1m AS \"запросы приложения\", pages_crawl_1m AS \"запросы фона\", rate_per_minute AS \"лимит в минуту\", queued_crawl AS \"фон, окон дат\", queued_app AS \"приложение, заданий\", crawler_queued_pages_est AS \"фон, оценка страниц\", http_429_1m AS \"429\", source_errors_1m AS \"ошибка в ответе GraphQL\", network_errors_1m AS \"сеть / HTTP 5xx\", lake_write_errors_1m AS \"запись в озеро\", series_app_1m + series_crawl_1m AS \"выборок\", tickets_1m AS \"билетов\", cpu_pct AS \"CPU\", mem_pct AS \"RAM\", disk_used_pct AS \"диск\", lake_bytes / 1073741824 AS \"озеро (tickets/)\", bucket_bytes / 1073741824 AS \"весь бакет\", lake_max_bytes / 1073741824 AS \"порог ретеншна\", lake_files AS \"файлов\", files_deleted_1m AS \"удалено за минуту\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
      "queryType": "timeseries",
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "всего пар",
+        "свежие",
+        "из них старше суток (обновляются)",
+        "устарели",
+        "нет данных",
+        "ошибка источника"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 12,
+      "fillOpacity": 0,
       "lineWidth": 2,
       "showPoints": "never",
-      "stacking": {
-       "mode": "normal",
-       "group": "A"
-      }
+      "axisSoftMin": 0,
+      "axisLabel": "пар"
      }
     },
     "overrides": [
      {
       "matcher": {
        "id": "byName",
-       "options": "ошибки источника"
+       "options": "всего пар"
       },
       "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8f8f8f"
+        }
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "свежие"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 10
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "из них старше суток (обновляются)"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3d7fd9"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "устарели"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       },
        {
         "id": "custom.axisPlacement",
         "value": "right"
        },
        {
-        "id": "custom.stacking",
+        "id": "custom.lineStyle",
         "value": {
-         "mode": "none"
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "нет данных"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
         }
        },
        {
-        "id": "custom.fillOpacity",
-        "value": 0
+        "id": "custom.axisPlacement",
+        "value": "right"
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "ошибка источника"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       },
+       {
+        "id": "custom.axisPlacement",
+        "value": "right"
        },
        {
         "id": "custom.lineStyle",
@@ -453,12 +654,21 @@
      }
     ]
    },
-   "options": {},
-   "description": "Свежие + устарели + нет данных = все пары на горизонте (стек). Ошибки источника — отдельно, правая ось, без стека. Цель свежести: до 60 дней вперёд — 72 ч, дальше — неделя."
+   "options": {
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   },
+   "description": "Каждая линия — отдельное число, без стека (раньше ряды складывались, и «устарели»/«нет данных» рисовались поверх «свежих», повторяя их). Левая ось: все пары на горизонте, свежие и те из свежих, что старше суток — сборщик обновляет их вторым эшелоном, самые старые первыми. Правая ось (пунктир): проблемные пары — устарели (старше цели: 72 ч до 60 дней вперёд, неделя дальше), нет данных, последняя попытка — ошибка источника (тексты — в таблице «Ошибки источника»)."
   },
   {
-   "id": 9,
-   "title": "Возраст серий в индексе, ч",
+   "id": 8,
+   "title": "Возраст данных сборщика, ч (пары X→ANY на дни вылета от сегодня)",
    "type": "timeseries",
    "gridPos": {
     "x": 12,
@@ -467,38 +677,82 @@
     "h": 8
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT ts AS time, series_age_p50_h AS \"медиана\", series_age_max_h AS \"максимум\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
-     "queryType": "timeseries",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "медиана",
+        "p95",
+        "максимум"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 12,
+      "fillOpacity": 0,
       "lineWidth": 2,
-      "showPoints": "never"
+      "showPoints": "never",
+      "axisSoftMin": 0,
+      "thresholdsStyle": {
+       "mode": "dashed"
+      }
      },
-     "unit": "h"
+     "unit": "h",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       },
+       {
+        "color": "#3d7fd9",
+        "value": 24
+       },
+       {
+        "color": "orange",
+        "value": 72
+       }
+      ]
+     }
     },
     "overrides": []
    },
-   "options": {}
+   "options": {
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   },
+   "description": "Сколько часов назад получены данные пары «город × день вылета» — по всем парам на горизонте (сегодня … +180 дней): медиана, p95 и самая старая. Прошедшие дни вылета и пары, запрошенные приложением (A→B), не обновляются и лежат до ретеншна — их здесь нет (до 02.10.2026 считалось по ним, и максимум рос бесконечно). Пунктир: 24 ч — с этого возраста пара встаёт на обновление (кэш коллектора — сутки), 72 ч — цель свежести ближних дат."
   },
   {
-   "id": 10,
-   "title": "Свежесть по дальности даты вылета (недели от сегодня)",
-   "type": "barchart",
+   "id": 9,
+   "title": "Когда получены данные: пар «город × день» по часу получения",
+   "type": "timeseries",
    "gridPos": {
     "x": 0,
     "y": 13,
@@ -516,31 +770,36 @@
       "uid": "flights-clickhouse"
      },
      "editorType": "sql",
-     "rawSql": "SELECT concat('нед. ', toString(intDiv(dateDiff('day', today(), day), 7))) AS week, round(avg(age_h), 1) AS \"средний возраст, ч\", round(max(age_h), 1) AS \"максимум, ч\" FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY intDiv(dateDiff('day', today(), day), 7) ORDER BY intDiv(dateDiff('day', today(), day), 7)",
-     "queryType": "table",
+     "rawSql": "SELECT toStartOfHour(fetched_at) AS time, countIf(dateDiff('day', today(), day) <= 14) AS \"вылет через 0–14 дн.\", countIf(dateDiff('day', today(), day) BETWEEN 15 AND 60) AS \"15–60 дн.\", countIf(dateDiff('day', today(), day) > 60) AS \"61–180 дн.\" FROM flights.coverage WHERE day >= today() AND NOT error AND $__timeFilter(fetched_at) GROUP BY time ORDER BY time",
+     "queryType": "timeseries",
      "refId": "A"
     }
    ],
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 12,
-      "lineWidth": 2,
-      "showPoints": "never"
-     },
-     "unit": "h"
+      "drawStyle": "bars",
+      "fillOpacity": 80,
+      "lineWidth": 0,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     }
     },
     "overrides": []
    },
    "options": {
-    "orientation": "vertical",
-    "xField": "week",
-    "showValue": "never"
-   }
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "description": "Распределение текущих данных по времени получения: у каждой пары «город × день» на горизонте берётся последний раз, когда её скачали, и считается, сколько пар пришлось на каждый час (цвет — дальность даты вылета). Правый край — то, что сборщик обновляет прямо сейчас; провал — часы, данные которых уже обновлены заново. Снимок покрытия — раз в 10 мин."
   },
   {
-   "id": 11,
-   "title": "Самые старые данные по городам (топ 20)",
+   "id": 10,
+   "title": "Сейчас обновляется: города за последний час",
    "type": "table",
    "gridPos": {
     "x": 12,
@@ -559,7 +818,7 @@
       "uid": "flights-clickhouse"
      },
      "editorType": "sql",
-     "rawSql": "SELECT origin AS \"город\", round(max(age_h), 1) AS \"макс. возраст, ч\", count() AS \"дней\", sum(tickets) AS \"билетов\" FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY origin ORDER BY max(age_h) DESC LIMIT 20",
+     "rawSql": "SELECT origin AS \"город\", count() AS \"пар обновлено\", min(dateDiff('day', today(), day)) AS \"дни вылета: с +\", max(dateDiff('day', today(), day)) AS \"по +\", sum(tickets) AS \"билетов\", formatDateTime(max(fetched_at), '%H:%i', 'Europe/Moscow') AS \"последнее (МСК)\" FROM flights.coverage WHERE day >= today() AND NOT error AND fetched_at >= snapshot_at - INTERVAL 1 HOUR GROUP BY origin ORDER BY max(fetched_at) DESC LIMIT 50",
      "queryType": "table",
      "refId": "A"
     }
@@ -574,15 +833,94 @@
     },
     "overrides": []
    },
-   "options": {}
+   "options": {},
+   "description": "Какие города (и какие дни вылета от сегодня) сборщик скачал за час до последнего снимка покрытия (раз в 10 мин). Почему именно они — в панели покрытия: сначала «нет данных» и «устарели», затем второй эшелон — свежие старше суток, самые старые первыми."
+  },
+  {
+   "id": 11,
+   "title": "Ошибки источника: что именно отвечает GraphQL",
+   "type": "table",
+   "gridPos": {
+    "x": 0,
+    "y": 21,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "flights-clickhouse"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "flights-clickhouse"
+     },
+     "editorType": "sql",
+     "rawSql": "SELECT substring(multiIf(error_msg IS NULL, '(текст не сохранён — ошибка до 02.10.2026)', startsWith(error_msg, '[') AND JSONExtractString(error_msg, 1, 'message') != '', JSONExtractString(error_msg, 1, 'message'), error_msg), 1, 200) AS \"ошибка\", uniqExact(origin) AS \"городов\", count() AS \"пар\", arrayStringConcat(arraySlice(groupUniqArray(origin), 1, 8), ', ') AS \"города (до 8)\", formatDateTime(max(fetched_at), '%d.%m %H:%i', 'Europe/Moscow') AS \"последняя (МСК)\" FROM flights.coverage WHERE error AND day >= today() GROUP BY 1 ORDER BY count() DESC LIMIT 30",
+     "queryType": "table",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 12,
+      "lineWidth": 2,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {},
+   "description": "Пары «город × день», где последняя попытка закончилась ошибкой: текст ответа источника (обычно «city … not found» — код, которого Aviasales не знает) или «network: …» — сеть и HTTP 5xx после повторов. Повтор — не раньше чем через сутки; город, у которого одни ошибки, — в карантине (проверяется одна дата)."
   },
   {
    "id": 12,
+   "title": "Самые старые данные по городам (топ 20)",
+   "type": "table",
+   "gridPos": {
+    "x": 12,
+    "y": 21,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "flights-clickhouse"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "flights-clickhouse"
+     },
+     "editorType": "sql",
+     "rawSql": "SELECT origin AS \"город\", round(max(age_h), 1) AS \"макс. возраст, ч\", round(avg(age_h), 1) AS \"средний, ч\", count() AS \"дней\", sum(tickets) AS \"билетов\" FROM flights.coverage WHERE day >= today() AND NOT error GROUP BY origin ORDER BY max(age_h) DESC LIMIT 20",
+     "queryType": "table",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 12,
+      "lineWidth": 2,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {},
+   "description": "Возраст — на момент снимка покрытия (раз в 10 мин). Около суток — норма: со 24 ч пара встаёт на обновление вторым эшелоном."
+  },
+  {
+   "id": 13,
    "title": "Запас свежести по дням вылета на 180 дней: p50 / p95 / p100 городов (7 − возраст в сутках)",
    "type": "barchart",
    "gridPos": {
     "x": 0,
-    "y": 21,
+    "y": 29,
     "w": 24,
     "h": 8
    },
@@ -736,179 +1074,178 @@
      "placement": "bottom"
     }
    },
-   "description": "Перцентили возраста данных по городам дня вылета: p50 — половина городов свежее, p95 — все, кроме 5 % самых отстающих, p100 — худший город. Город без данных на этот день считается самым старым: если не собрано больше 5 % городов, p95 на дне (−1), больше половины — и p50. Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за каждые сутки, −1 — нет данных или старше 8 суток. Пунктир: 4 — 72 ч (цель до 60 дней вперёд), 0 — неделя (цель для дальних дат). Города, у которых только ошибки источника, не учитываются."
+   "description": "Перцентили возраста данных по городам дня вылета: p50 — половина городов свежее, p95 — все, кроме 5 % самых отстающих, p100 — худший город. Город без данных на этот день считается самым старым: если не собрано больше 5 % городов, p95 на дне (−1), больше половины — и p50. Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за каждые сутки, −1 — нет данных или старше 8 суток. Пунктир: 4 — 72 ч (цель до 60 дней вперёд), 0 — неделя (цель для дальних дат). Пока сборщик успевает обновлять всё за сутки, столбики ровные (~6) — это норма. Города, у которых только ошибки источника, не учитываются."
   },
   {
-   "id": 13,
+   "id": 14,
    "type": "row",
    "title": "Ручка GraphQL и очередь",
    "collapsed": false,
    "gridPos": {
     "x": 0,
-    "y": 29,
+    "y": 37,
     "w": 24,
     "h": 1
    },
    "panels": []
   },
   {
-   "id": 14,
-   "title": "Страниц в минуту по клиентам",
+   "id": 15,
+   "title": "Запросы к GraphQL в минуту (1 запрос = страница до 400 билетов)",
    "type": "timeseries",
    "gridPos": {
     "x": 0,
-    "y": 30,
+    "y": 38,
     "w": 12,
     "h": 8
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT ts AS time, pages_app_1m AS \"приложение\", pages_crawl_1m AS \"фон\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
-     "queryType": "timeseries",
+     "panelId": 100,
      "refId": "A"
     }
    ],
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 12,
-      "lineWidth": 2,
-      "showPoints": "never",
-      "stacking": {
-       "mode": "normal",
-       "group": "A"
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "всего запросов",
+        "запросы фона",
+        "запросы приложения",
+        "лимит в минуту"
+       ]
       }
      }
-    },
-    "overrides": []
-   },
-   "options": {},
-   "description": "Лимит источника — 60 запросов в минуту на токен."
-  },
-  {
-   "id": 15,
-   "title": "Очередь коллектора",
-   "type": "timeseries",
-   "gridPos": {
-    "x": 12,
-    "y": 30,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
-     },
-     "editorType": "sql",
-     "rawSql": "SELECT ts AS time, queued_app AS \"приложение\", queued_crawl AS \"фон\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
-     "queryType": "timeseries",
-     "refId": "A"
     }
    ],
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 12,
+      "fillOpacity": 0,
       "lineWidth": 2,
-      "showPoints": "never"
-     }
-    },
-    "overrides": []
-   },
-   "options": {}
-  },
-  {
-   "id": 16,
-   "title": "429 и ошибки в минуту",
-   "type": "timeseries",
-   "gridPos": {
-    "x": 0,
-    "y": 38,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
-     },
-     "editorType": "sql",
-     "rawSql": "SELECT ts AS time, http_429_1m AS \"429\", source_errors_1m AS \"ошибки источника\", network_errors_1m AS \"сеть\", lake_write_errors_1m AS \"запись в озеро\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
-     "queryType": "timeseries",
-     "refId": "A"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 12,
-      "lineWidth": 2,
-      "showPoints": "never"
-     }
-    },
-    "overrides": []
-   },
-   "options": {}
-  },
-  {
-   "id": 17,
-   "title": "Приложение: серии, кэш, задержка",
-   "type": "timeseries",
-   "gridPos": {
-    "x": 12,
-    "y": 38,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
-     },
-     "editorType": "sql",
-     "rawSql": "SELECT ts AS time, series_app_1m AS \"серий из источника\", cache_hit_app_1m AS \"из кэша\", app_latency_avg_s AS \"задержка, с\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
-     "queryType": "timeseries",
-     "refId": "A"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 12,
-      "lineWidth": 2,
-      "showPoints": "never"
+      "showPoints": "never",
+      "axisSoftMin": 0
      }
     },
     "overrides": [
      {
       "matcher": {
        "id": "byName",
-       "options": "задержка, с"
+       "options": "всего запросов"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8f8f8f"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "лимит в минуту"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   },
+   "description": "Сколько запросов к ручке prices_one_way ушло за минуту: фон — сборщик, приложение — планировщик (он берёт рейсы из склада в памяти и ходит в источник только за дырами, поэтому обычно около нуля). Пунктир — лимит коллектора (60 в минуту на токен; после 429 временно снижается). Держаться у лимита — норма: ручка выбирается целиком."
+  },
+  {
+   "id": 16,
+   "title": "Очередь коллектора",
+   "type": "timeseries",
+   "gridPos": {
+    "x": 12,
+    "y": 38,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "datasource",
+    "uid": "-- Dashboard --"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "datasource",
+      "uid": "-- Dashboard --"
+     },
+     "panelId": 100,
+     "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "фон, окон дат",
+        "приложение, заданий",
+        "фон, оценка страниц"
+       ]
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 0,
+      "lineWidth": 2,
+      "showPoints": "never",
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "фон, оценка страниц"
       },
       "properties": [
        {
@@ -916,139 +1253,139 @@
         "value": "right"
        },
        {
-        "id": "unit",
-        "value": "s"
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
        }
       ]
      }
     ]
    },
-   "options": {}
+   "options": {
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   },
+   "description": "Буфер, а не отставание. Сборщик раз в 2 мин досыпает очередь до ~600 оценочных страниц (~10 мин работы ручки при 60 запросах в минуту), не больше 500 окон. Окно дат = «город × несколько дней вылета» одним запросом: у маленького города это одна страница (секунда), у крупного — десятки, поэтому число окон скачет пилой и «падает мгновенно», пока оценка страниц (правая ось) держит уровень. Очередь пуста надолго — сборщику нечего обновлять или он не работает."
   },
   {
-   "id": 18,
-   "type": "row",
-   "title": "Машина и хранилище",
-   "collapsed": false,
+   "id": 17,
+   "title": "429 и ошибки в минуту",
+   "type": "timeseries",
    "gridPos": {
     "x": 0,
     "y": 46,
-    "w": 24,
-    "h": 1
-   },
-   "panels": []
-  },
-  {
-   "id": 19,
-   "title": "Нагрузка VM",
-   "type": "timeseries",
-   "gridPos": {
-    "x": 0,
-    "y": 47,
     "w": 12,
     "h": 8
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT ts AS time, cpu_pct AS CPU, mem_pct AS RAM, disk_used_pct AS \"диск\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
-     "queryType": "timeseries",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "429",
+        "ошибка в ответе GraphQL",
+        "сеть / HTTP 5xx",
+        "запись в озеро"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 12,
+      "fillOpacity": 0,
       "lineWidth": 2,
-      "showPoints": "never"
-     },
-     "unit": "percent"
+      "showPoints": "never",
+      "axisSoftMin": 0
+     }
     },
     "overrides": []
    },
-   "options": {}
+   "options": {
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   },
+   "description": "429 — превышен лимит ручки (коллектор ждёт и снижает темп; запрос повторяется, данные не теряются). Ошибка в ответе GraphQL — источник ответил полем errors (обычно неизвестный код города); тексты — в таблице «Ошибки источника». Сеть / HTTP 5xx — таймауты, обрывы и 5xx, до 3 повторов. Запись в озеро — не удалось положить файл в S3."
   },
   {
-   "id": 20,
-   "title": "Озеро и бакет, ГБ",
+   "id": 18,
+   "title": "Готовые выборки и билеты в минуту",
    "type": "timeseries",
    "gridPos": {
     "x": 12,
-    "y": 47,
+    "y": 46,
     "w": 12,
     "h": 8
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT ts AS time, lake_bytes/1073741824 AS \"озеро (tickets)\", bucket_bytes/1073741824 AS \"весь бакет\", lake_max_bytes/1073741824 AS \"порог ретеншна\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
-     "queryType": "timeseries",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "выборок",
+        "билетов"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 12,
+      "fillOpacity": 0,
       "lineWidth": 2,
-      "showPoints": "never"
-     },
-     "unit": "decgbytes"
-    },
-    "overrides": []
-   },
-   "options": {},
-   "description": "Жёсткий потолок бакета — 200 ГБ (terraform), ретеншн удаляет старые файлы выше порога."
-  },
-  {
-   "id": 21,
-   "title": "Серий и билетов в минуту",
-   "type": "timeseries",
-   "gridPos": {
-    "x": 0,
-    "y": 55,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
-     },
-     "editorType": "sql",
-     "rawSql": "SELECT ts AS time, series_app_1m + series_crawl_1m AS \"серий\", tickets_1m AS \"билетов\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
-     "queryType": "timeseries",
-     "refId": "A"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 12,
-      "lineWidth": 2,
-      "showPoints": "never"
+      "showPoints": "never",
+      "axisSoftMin": 0
      }
     },
     "overrides": [
@@ -1066,11 +1403,119 @@
      }
     ]
    },
-   "options": {}
+   "options": {
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   },
+   "description": "Выборка — результат одного задания коллектора: «город → куда угодно» на окно дней вылета (или пара A→B на день от приложения), все страницы. Билеты — строки в ней (конкретные варианты перелёта с ценой)."
   },
   {
-   "id": 22,
-   "title": "Файлы озера и удаления ретеншном",
+   "id": 19,
+   "type": "row",
+   "title": "Машина и хранилище",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 54,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "id": 20,
+   "title": "Нагрузка VM, % от предела",
+   "type": "timeseries",
+   "gridPos": {
+    "x": 0,
+    "y": 55,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "datasource",
+    "uid": "-- Dashboard --"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "datasource",
+      "uid": "-- Dashboard --"
+     },
+     "panelId": 100,
+     "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "CPU",
+        "RAM",
+        "диск"
+       ]
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 0,
+      "lineWidth": 2,
+      "showPoints": "never",
+      "axisSoftMin": 0,
+      "thresholdsStyle": {
+       "mode": "dashed"
+      }
+     },
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 80
+       },
+       {
+        "color": "red",
+        "value": 95
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   },
+   "description": "Проценты от возможностей VM (CPU — все ядра, RAM — вся память машины, диск — том данных). Пунктир: 80 % — внимание, 95 % — предел."
+  },
+  {
+   "id": 21,
+   "title": "Озеро и бакет, ГБ",
    "type": "timeseries",
    "gridPos": {
     "x": 12,
@@ -1079,27 +1524,129 @@
     "h": 8
    },
    "datasource": {
-    "type": "grafana-clickhouse-datasource",
-    "uid": "flights-clickhouse"
+    "type": "datasource",
+    "uid": "-- Dashboard --"
    },
    "targets": [
     {
      "datasource": {
-      "type": "grafana-clickhouse-datasource",
-      "uid": "flights-clickhouse"
+      "type": "datasource",
+      "uid": "-- Dashboard --"
      },
-     "editorType": "sql",
-     "rawSql": "SELECT ts AS time, lake_files AS \"файлов\", files_deleted_1m AS \"удалено за минуту\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
-     "queryType": "timeseries",
+     "panelId": 100,
      "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "озеро (tickets/)",
+        "весь бакет",
+        "порог ретеншна"
+       ]
+      }
+     }
     }
    ],
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 12,
+      "fillOpacity": 0,
       "lineWidth": 2,
-      "showPoints": "never"
+      "showPoints": "never",
+      "axisSoftMin": 0
+     },
+     "unit": "decgbytes"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "порог ретеншна"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   },
+   "description": "Озеро — файлы билетов tickets/ (по учёту коллектора). Весь бакет — озеро плюс служебное: ops_metrics/ (эти графики), coverage/ (снимок покрытия) и прочее (листинг S3 раз в 30 мин). Порог ретеншна — выше него удаляются самые старые файлы озера; жёсткий потолок бакета — 200 ГБ."
+  },
+  {
+   "id": 22,
+   "title": "Файлы озера и удаления ретеншном",
+   "type": "timeseries",
+   "gridPos": {
+    "x": 0,
+    "y": 63,
+    "w": 24,
+    "h": 8
+   },
+   "datasource": {
+    "type": "datasource",
+    "uid": "-- Dashboard --"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "datasource",
+      "uid": "-- Dashboard --"
+     },
+     "panelId": 100,
+     "refId": "A"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "time",
+        "файлов",
+        "удалено за минуту"
+       ]
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 0,
+      "lineWidth": 2,
+      "showPoints": "never",
+      "axisSoftMin": 0
      }
     },
     "overrides": [
@@ -1117,7 +1664,16 @@
      }
     ]
    },
-   "options": {}
+   "options": {
+    "tooltip": {
+     "mode": "multi"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   }
   }
  ]
 }
