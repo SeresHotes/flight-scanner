@@ -261,20 +261,35 @@ impl Ticket {
             .find(|(j, code)| *j >= 1 && **code == hub)
             .map(|(j, _)| j)
             .unwrap_or(self.chain.len().saturating_sub(1));
-        let mut v = self.clone();
-        v.destination = Some(hub_city.to_string());
-        v.destination_airport = Some(hub.clone());
-        v.duration = minutes_between_aware(
-            self.departure_at.as_deref().unwrap_or(""),
-            arrival.as_deref().unwrap_or(""),
-        );
-        v.arrival_at = arrival;
-        v.duration_to = duration_to;
-        v.transfers = k as i64;
-        v.transfer_points = Some(points[..k].to_vec());
-        v.legs = legs;
-        v.chain = self.chain[..(cut + 1).min(self.chain.len())].to_vec();
-        v.src = self.src.as_ref().map(|s| s.with_hub(k, hub_city));
+        // поля по одному (без копии билета целиком: legs/chain/пересадки — только нужная часть)
+        let mut v = Ticket {
+            origin: self.origin.clone(),
+            destination: Some(hub_city.to_string()),
+            origin_airport: self.origin_airport.clone(),
+            destination_airport: Some(hub.clone()),
+            departure_at: self.departure_at.clone(),
+            duration: minutes_between_aware(self.departure_at.as_deref().unwrap_or(""), arrival.as_deref().unwrap_or("")),
+            arrival_at: arrival,
+            duration_to,
+            transfers: k as i64,
+            airline: self.airline.clone(),
+            flight_number: self.flight_number.clone(),
+            price: self.price,
+            currency: self.currency.clone(),
+            link: self.link.clone(),
+            chain: self.chain[..(cut + 1).min(self.chain.len())].to_vec(),
+            legs,
+            transfer_points: Some(points[..k].to_vec()),
+            baggage: self.baggage.clone(),
+            baggage_code: self.baggage_code.clone(),
+            source: self.source.clone(),
+            search_origin: self.search_origin.clone(),
+            search_destination: self.search_destination.clone(),
+            search_date: self.search_date.clone(),
+            hidden_city: None,
+            layover_minutes: self.layover_minutes,
+            src: self.src.as_ref().map(|s| s.with_hub(k, hub_city)),
+        };
         v.hidden_city = Some(HiddenCity {
             final_: self.destination.clone(),
             final_airport: self.destination_airport.clone(),

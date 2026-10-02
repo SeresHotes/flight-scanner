@@ -417,13 +417,6 @@ impl LegAcc {
         leg.extend(self.virtual_);
         leg
     }
-
-    /// Собранное на сейчас — наружу (в колонки джобы); дедуп `seen` остаётся.
-    fn drain(&mut self) -> Vec<Ticket> {
-        let mut leg = std::mem::take(&mut self.regular);
-        leg.append(&mut self.virtual_);
-        leg
-    }
 }
 
 /// Плечо с конкретным городом хотя бы с одной стороны.
@@ -534,6 +527,11 @@ fn collect_leg(stops: &[Stop], i: usize, fetch: &dyn SeriesFetcher, store: Optio
     Ok(acc.finish())
 }
 
+/// Сколько дней плеча «любой → любой» разбирать параллельно: COLLECT_THREADS или число ядер.
+fn collect_threads() -> usize {
+    std::env::var("COLLECT_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)).max(1)
+}
+
 /// Плечо «любой → любой» из склада: вылеты из городов прилёта предыдущего плеча (если оно
 /// собрано), прилёты — в города вылета следующего (если собрано); хотя бы одна сторона задана.
 /// hidden-city — как у X→ANY, хабы — из dests. По дням: выборка дня → отбор → рейсы сразу
@@ -541,27 +539,50 @@ fn collect_leg(stops: &[Stop], i: usize, fetch: &dyn SeriesFetcher, store: Optio
 #[allow(clippy::too_many_arguments)]
 fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String], dests: &[String], progress: &dyn CollectProgress, airport_city: &mut HashMap<String, String>, out: &mut FlightColsBuilder) -> Result<(), CollectError> {
     let dates = leg_dates(stops, i);
-    let mut acc = LegAcc::new();
     if origins.is_empty() && dests.is_empty() {
         return Err(CollectError::Failed(format!("плечо {} «любой → любой» не ограничено ни одной стороной", i + 1)));
     }
     let allow: Option<HashSet<String>> = if dests.is_empty() { None } else { Some(dests.iter().cloned().collect()) };
-    let mut leg_total = 0usize;
-    for day in &dates {
+    // День = выборка склада → отбор → hidden-city; дни независимы (ключ дедупа содержит дату
+    // вылета) — по `collect_threads()` дней параллельно, результат — по порядку дней.
+    let day_job = |day: &String, base: &HashMap<String, String>| -> Result<(Vec<Ticket>, usize, HashMap<String, String>), CollectError> {
         // Известны города вылета: берём их X→ANY целиком и режем по dests сами (hidden-city
         // через хаб из dests требует всех билетов из origins). Известны только города
         // прилёта: срез склада по ним.
         let flights = if origins.is_empty() { view.store.tickets(&[], dests, &[], day, day)? } else { view.store.tickets(origins, &[], &[], day, day)? };
-        leg_total += flights.len();
-        if leg_total > STORE_MAX_ROWS {
-            let side = if !origins.is_empty() { format!("из {} городов", origins.len()) } else { format!("в {} городов", dests.len()) };
-            return Err(CollectError::Failed(format!("Слишком широкий запрос: плечо {side} за {}..{} даёт больше {STORE_MAX_ROWS} рейсов. Сузьте окна дат или задайте города вместо «любых».", dates[0], dates[dates.len() - 1])));
-        }
-        acc.keep(&flights, allow.as_ref(), airport_city);
-        acc.hidden_any(&[(day.clone(), flights)], airport_city, allow.as_ref());
-        out.push_leg(i, acc.drain());
-        if out.len() > MAX_JOB_FLIGHTS {
-            return Err(CollectError::Failed(format!("Слишком широкий запрос: уже {} рейсов (потолок {MAX_JOB_FLIGHTS}). Сузьте окна дат или задайте города вместо «любых».", out.len())));
+        let n = flights.len();
+        let mut ac = base.clone();
+        let mut acc = LegAcc::new();
+        acc.keep(&flights, allow.as_ref(), &mut ac);
+        acc.hidden_any(&[(day.clone(), flights)], &ac, allow.as_ref());
+        Ok((acc.finish(), n, ac))
+    };
+    let threads = collect_threads().min(dates.len()).max(1);
+    let mut leg_total = 0usize;
+    for batch in dates.chunks(threads) {
+        let base = airport_city.clone();
+        let results: Vec<Result<(Vec<Ticket>, usize, HashMap<String, String>), CollectError>> = if batch.len() == 1 {
+            vec![day_job(&batch[0], &base)]
+        } else {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = batch.iter().map(|day| s.spawn(|| day_job(day, &base))).collect();
+                handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(CollectError::Failed("сбор дня упал".into())))).collect()
+            })
+        };
+        for r in results {
+            let (kept, n, learned) = r?;
+            leg_total += n;
+            if leg_total > STORE_MAX_ROWS {
+                let side = if !origins.is_empty() { format!("из {} городов", origins.len()) } else { format!("в {} городов", dests.len()) };
+                return Err(CollectError::Failed(format!("Слишком широкий запрос: плечо {side} за {}..{} даёт больше {STORE_MAX_ROWS} рейсов. Сузьте окна дат или задайте города вместо «любых».", dates[0], dates[dates.len() - 1])));
+            }
+            for (a, c) in learned {
+                airport_city.entry(a).or_insert(c);
+            }
+            out.push_leg(i, kept);
+            if out.len() > MAX_JOB_FLIGHTS {
+                return Err(CollectError::Failed(format!("Слишком широкий запрос: уже {} рейсов (потолок {MAX_JOB_FLIGHTS}). Сузьте окна дат или задайте города вместо «любых».", out.len())));
+            }
         }
     }
     let covered = dates.iter().filter(|d| view.coverage.has_day(d)).count();
