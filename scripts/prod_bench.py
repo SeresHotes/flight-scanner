@@ -33,6 +33,7 @@ def scenarios():
         ("MOW → ANY(3 дн) → MOW", [stop("cities", ["MOW"]), stop("any", [], d(30), d(32)), stop("cities", ["MOW"])]),
         ("MOW → ANY(7 дн) → MOW", [stop("cities", ["MOW"]), stop("any", [], d(30), d(36)), stop("cities", ["MOW"])]),
         ("MOW → ANY → ANY → MOW (по 3 дн)", [stop("cities", ["MOW"]), stop("any", [], d(30), d(32)), stop("any", [], d(33), d(35)), stop("cities", ["MOW"])]),
+        ("ANY → ANY(3 дн)", [stop("any", [], d(30), d(32)), stop("any", [])]),
         ("ANY → SEL(5 дн) → TAS(5 дн)", [stop("any", [], d(40), d(40)), stop("cities", ["SEL"], d(41), d(45)), stop("cities", ["TAS"], d(46), d(50))]),
     ], open_
 

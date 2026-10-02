@@ -57,8 +57,8 @@ variable "vm_core_fraction" {
 
 variable "vm_memory_gb" {
   type        = number
-  description = "RAM, ГБ (8 с 01.10.2026: склад билетов в памяти планировщика ~2,6 ГБ + джобы)"
-  default     = 8
+  description = "RAM, ГБ (12 с 02.10.2026: склад билетов в памяти планировщика ~3,9 ГБ, процесс ~5,4 ГБ + рейсы джоб ~1,2 КБ пика на рейс, до 2 млн на джобу)"
+  default     = 12
 }
 
 variable "vm_disk_gb" {
