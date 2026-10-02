@@ -9,10 +9,10 @@ use crate::collect::CollectError;
 use crate::flightcols::{Fl, JobCodes};
 use crate::ticket::Ticket;
 
-/// Потолок строк одного запроса к складу — тот же, что у всей джобы (`MAX_JOB_FLIGHTS`):
-/// больше — запрос слишком широкий, джоба падает с понятной ошибкой (вместо молчаливого
-/// усечения). Отдельного лимита на плечо нет — ограничивает только память джобы.
-pub const STORE_MAX_ROWS: usize = crate::stops::MAX_JOB_FLIGHTS;
+/// Потолка строк выборки склада нет (02.10.2026): ограничивает только память VM. Кончилась —
+/// ядро убивает контейнер планировщика (`mem_limit` в compose.prod.yml), docker поднимает
+/// его заново (`restart: always`), склад — из снапшота за ~10 с.
+pub const STORE_MAX_ROWS: usize = usize::MAX;
 
 /// Источник рейсов из склада (реализует `lakestore::SharedStore`; тесты — заглушки).
 pub trait TicketStore: Send + Sync {

@@ -20,6 +20,12 @@ services:
       - /opt/flights/data:/app/data
     depends_on:
       - collector
+    # Потолка рейсов на джобу нет — память ограничивает контейнер: кончилась — ядро убивает
+    # только планировщик (коллектор, краулер, web и система живы), docker поднимает его
+    # заново, склад — из снапшота за ~10 с; джоба, шедшая в момент падения, — error.
+    # 10 ГБ из 12 (коллектор + краулер + web + система ≈ 1–1,5 ГБ).
+    mem_limit: ${PLANNER_MEM_LIMIT:-10g}
+    memswap_limit: ${PLANNER_MEM_LIMIT:-10g}
     restart: always
 
   # Коллектор: очередь к GraphQL, лимит ручки, Parquet-озеро в Object Storage.
