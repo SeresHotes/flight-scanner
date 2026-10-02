@@ -1,8 +1,8 @@
 //! Горячее состояние планировщика — в памяти, без БД: джобы (статус, этап, параметры) и
 //! кэш серий прямого режима GraphQL. Джоба при создании и смене статуса пишется маленьким
-//! JSON-файлом `plan_jobs/<job>.json` (ссылки на результаты переживают деплой), рейсы
-//! джобы — Parquet `plan_flights/<job>.parquet`; оба — рядом с `FLIGHT_DB` (только как
-//! якорь каталога данных; SQLite с 02.10.2026 нет). Склад билетов — `lakestore`.
+//! JSON-файлом `plan_jobs/<job>.json` рядом с `FLIGHT_DB` (только якорь каталога данных;
+//! SQLite с 02.10.2026 нет) — ссылки на результаты переживают деплой; рейсы джобы на диск
+//! не пишутся — после рестарта собираются заново из склада. Склад — `lakestore`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,6 @@ use serde_json::Value;
 
 use crate::collect::SeriesResult;
 use crate::dates::{now_iso, now_naive, parse_naive};
-use crate::flightcols::FlightCols;
 use crate::ticket::Ticket;
 
 /// Якорь каталога данных: файлы джоб, рейсов и снапшот склада — рядом с этим путём.
@@ -43,18 +42,10 @@ pub fn airport_city_map_cached(_db_path: &str) -> Arc<HashMap<String, String>> {
     EMPTY.get_or_init(|| Arc::new(HashMap::new())).clone()
 }
 
-// ----------------------------- plan_flights ----------------------------------
+// ----------------------------- старые файлы ----------------------------------
 
-/// Джоба живёт сутки — файлы старше двух суток удаляем.
+/// Джоба живёт сутки — файлы джоб старше двух суток удаляем.
 pub const PLAN_FLIGHTS_KEEP_SECONDS: i64 = 2 * 24 * 3600;
-
-fn plan_flights_dir(db_path: &str) -> PathBuf {
-    data_dir(db_path).join("plan_flights")
-}
-
-pub fn plan_flights_path(db_path: &str, job_id: &str) -> PathBuf {
-    plan_flights_dir(db_path).join(format!("{job_id}.parquet"))
-}
 
 /// Удаляет из каталога файлы с расширением ext старше PLAN_FLIGHTS_KEEP_SECONDS.
 fn prune_dir(dir: &Path, ext: &str) {
@@ -68,29 +59,13 @@ fn prune_dir(dir: &Path, ext: &str) {
     }
 }
 
-/// Сохраняет рейсы джобы (колонки) для видов под другие фильтры и маршрутов наборов;
-/// чистит файлы старых джоб.
-pub fn put_plan_flights(db_path: &str, job_id: &str, table: &FlightCols) -> DbResult<()> {
-    let path = plan_flights_path(db_path, job_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(err)?;
-    }
-    let tmp = path.with_extension("parquet.tmp");
-    table.write(&tmp.to_string_lossy())?;
-    std::fs::rename(&tmp, &path).map_err(err)?;
-    if let Some(parent) = path.parent() {
-        prune_dir(parent, "parquet");
-    }
-    Ok(())
-}
-
-/// Рейсы джобы колонками или None (файла нет).
-pub fn get_plan_flights(db_path: &str, job_id: &str) -> DbResult<Option<FlightCols>> {
-    let path = plan_flights_path(db_path, job_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    FlightCols::read(&path.to_string_lossy()).map(Some)
+/// Рейсы джоб на диск больше не пишутся (собираются заново из склада) — прежний каталог
+/// `plan_flights/` удаляется. Сколько файлов было.
+pub fn drop_plan_flights(db_path: &str) -> usize {
+    let dir = data_dir(db_path).join("plan_flights");
+    let n = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
+    let _ = std::fs::remove_dir_all(&dir);
+    n
 }
 
 // ----------------------------- ticket cache ----------------------------------

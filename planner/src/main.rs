@@ -46,6 +46,10 @@ fn main() {
             println!("[startup] удалён прежний файл SQLite {p}");
         }
     }
+    let old = hot::drop_plan_flights(&db_path);
+    if old > 0 {
+        println!("[startup] удалены прежние файлы рейсов джоб: {old} (рейсы собираются заново из склада)");
+    }
     // Джобы, не пережившие прошлый рестарт (pending/running в файлах), — уже error.
     let stale = hot::fail_stale_jobs(&db_path);
     println!(

@@ -213,9 +213,8 @@ pub fn build_view(stops: &[Stop], table: &FlightCols, pq: &PlanQuery, on_progres
     Ok(ViewResult { view, combos })
 }
 
-/// Джоба = сбор рейсов по остановкам запроса, рейсы — в plan_flights; пока они в
-/// памяти, стыковка под фильтры запроса и вид в `on_view` (кэш API) до выставления
-/// done; файл рейсов — уже после done.
+/// Джоба = сбор рейсов по остановкам запроса; рейсы — в памяти (`on_table`, кэш API),
+/// стыковка под фильтры запроса и вид в `on_view` до выставления done.
 pub fn run_plan_collection(db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>, on_view: &dyn Fn(&PlanQuery, ViewResult), on_table: &dyn Fn(Arc<FlightCols>)) {
     let outcome = run_inner(db_path, job_id, pq, cancel.clone(), on_view, on_table);
     match outcome {
@@ -286,14 +285,16 @@ fn run_inner(db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>
     on_view(pq, result);
     hot::update_job(db_path, job_id, &[("status", json!("done"))]).map_err(CollectError::Failed)?;
     println!("[worker] plan job {job_id} done: {count} цепочек");
-
-    // Рейсы в Parquet — уже после done: другие фильтры берут таблицу из памяти (кэш API),
-    // файл нужен после вытеснения из кэша и рестарта.
-    let t = Instant::now();
-    if let Err(e) = hot::put_plan_flights(db_path, job_id, &table) {
-        println!("[worker] plan job {job_id}: рейсы не сохранены: {e}");
-    }
-    rep.timing("save", t.elapsed().as_secs_f64());
-    let _ = rep.flush_state();
     Ok(())
+}
+
+/// Рейсы джобы заново из склада — таблица вытеснена из памяти или был рестарт (на диск
+/// рейсы джобы не пишутся: сбор из колонок склада — доли секунды).
+pub fn recollect(db_path: &str, pq: &PlanQuery) -> Result<FlightCols, CollectError> {
+    let stops = parse_stops(&pq.stops);
+    let (fetcher, workers) = make_fetcher();
+    let store = make_store();
+    let view = store_view(store.as_deref(), &stops);
+    let mut airport_city: HashMap<String, String> = (*crate::lakestore::airport_city_map(db_path)).clone();
+    collect_plan(&stops, fetcher.as_ref(), view.as_ref(), &crate::collect::NoProgress, &mut airport_city, workers)
 }

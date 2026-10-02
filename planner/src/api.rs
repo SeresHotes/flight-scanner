@@ -95,8 +95,9 @@ pub struct AppState {
     pub tables: Mutex<Vec<(String, Arc<FlightCols>)>>,
 }
 
-/// Сколько таблиц рейсов джоб держать в памяти.
-const TABLE_CACHE_SIZE: usize = 4;
+/// Сколько таблиц рейсов джоб держать в памяти (~150 Б на рейс; вытесненная — собирается
+/// заново из склада).
+const TABLE_CACHE_SIZE: usize = 6;
 
 impl AppState {
     pub fn new(db_path: &str) -> Result<Arc<AppState>, String> {
@@ -125,12 +126,19 @@ impl AppState {
         }
     }
 
-    /// Рейсы джобы: из памяти, иначе из Parquet (джоба до рестарта или вытеснена).
+    /// Рейсы джобы: из памяти, иначе — заново из склада по параметрам джобы (вытеснена из
+    /// кэша или был рестарт; сбор из колонок склада — доли секунды).
     pub fn table(&self, job_id: &str) -> Result<Option<Arc<FlightCols>>, String> {
         if let Some((_, t)) = self.tables.lock().unwrap().iter().find(|(k, _)| k == job_id) {
             return Ok(Some(t.clone()));
         }
-        Ok(hot::get_plan_flights(&self.db_path, job_id)?.map(Arc::new))
+        let Some(job) = hot::get_job(&self.db_path, job_id) else { return Ok(None) };
+        let params: Value = serde_json::from_str(job.params_json.as_deref().unwrap_or("{}")).map_err(|e| e.to_string())?;
+        let pq = PlanQuery::from_value(&params)?;
+        let table = Arc::new(worker::recollect(&self.db_path, &pq).map_err(|e| e.to_string())?);
+        println!("[view] {job_id}: рейсы собраны заново ({} рейсов)", table.len());
+        self.put_table(job_id, table.clone());
+        Ok(Some(table))
     }
 
     /// Кладёт готовый вид в кэш (вытесняя самый старый) и снимает состояние стройки.
