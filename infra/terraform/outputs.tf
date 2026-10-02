@@ -62,6 +62,38 @@ output "ci_sa_key_json" {
   })
 }
 
+# --- Для GitHub Actions (переменные environment prod, см. README) ---
+
+output "tfstate_bucket" {
+  description = "Бакет состояния Terraform"
+  value       = yandex_storage_bucket.tfstate.bucket
+}
+
+output "github_oidc_subject" {
+  description = "subject OIDC-токена GitHub, которому федерация выдаёт IAM-токены"
+  value       = local.github_oidc_subject
+}
+
+output "ci_sa_id" {
+  description = "SA flights-ci (vars.YC_CI_SA_ID)"
+  value       = yandex_iam_service_account.ci.id
+}
+
+output "terraform_sa_id" {
+  description = "SA flights-terraform (vars.YC_TERRAFORM_SA_ID)"
+  value       = yandex_iam_service_account.terraform.id
+}
+
+output "lockbox_terraform_id" {
+  description = "Lockbox flights-terraform (vars.LOCKBOX_TERRAFORM_ID)"
+  value       = yandex_lockbox_secret.terraform.id
+}
+
+output "lockbox_ops_id" {
+  description = "Lockbox flights-ops (vars.LOCKBOX_OPS_ID)"
+  value       = yandex_lockbox_secret.ops.id
+}
+
 output "seed_and_push_hint" {
   description = "Что сделать сразу после apply: залить сид и собрать/запушить образы"
   value       = <<-EOT

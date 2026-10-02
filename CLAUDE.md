@@ -39,6 +39,10 @@
   дашборда и скрипт заливки — `analytics/` (`analytics/README.md`).
 - Все ручки Travelpayouts/Aviasales (GraphQL-схема, REST Data API, Search API, справочники, лимиты) — `docs/travelpayouts/README.md`.
 - Инфраструктура прод-деплоя (Terraform + cloud-init + registry) — `infra/terraform/`.
+  State — в бакете `sereshotes-flights-tfstate` (локально `./tf.sh plan|apply`). GitHub Actions
+  ходят в Yandex Cloud без ключей (OIDC-федерация, environment `prod` = только `main`), секреты —
+  в Lockbox. Без SSH (облачная сессия): `gh workflow run ops.yml -f command='…'` (команда на VM),
+  `gh workflow run terraform.yml -f command=plan|apply`; логи публичные — секреты не печатать.
 - Фронтенд: Vite + React + TS (`frontend/`), только планировщик: `pages/PlanPage`
   (`/`, запрос) → `pages/CombosPage` (`/combos/:job`) → `pages/RoutesPage`
   (`/routes/:job`); общее — `frontend/src/planner/` (запрос `query.ts`, API `api.ts`).

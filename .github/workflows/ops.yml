@@ -1,0 +1,50 @@
+name: Ops
+
+# Команда на прод-VM по SSH — для облачных сессий Claude, у которых нет ни SSH (только
+# HTTP через прокси), ни ключей. Ключ деплоя — в Lockbox flights-ops, читает его SA flights-ci
+# по IAM-токену из федерации (environment prod, только main).
+#   gh workflow run ops.yml -f command='cd /opt/flights && sudo docker compose ps'
+#   gh run watch "$(gh run list -w ops.yml -L1 --json databaseId -q '.[0].databaseId')"
+#   gh run view <id> --log
+# Репозиторий публичный — вывод команды попадает в общедоступный лог. Не печатать секреты
+# (.env, docker inspect, env контейнеров) и персональные данные.
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "bash на VM под ubuntu (sudo без пароля)"
+        required: true
+        default: "cd /opt/flights && sudo docker compose ps && df -h / && free -m"
+
+jobs:
+  ops:
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/yc-oidc
+        with:
+          service-account-id: ${{ vars.YC_CI_SA_ID }}
+
+      - name: SSH key from Lockbox
+        run: |
+          mkdir -p ~/.ssh
+          .github/scripts/lockbox.sh ${{ vars.LOCKBOX_OPS_ID }} vm_ssh_key=@$HOME/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+        env:
+          KNOWN_HOSTS: ${{ vars.VM_SSH_KNOWN_HOSTS }}
+
+      - name: Run on VM
+        env:
+          VM_HOST: ${{ vars.VM_HOST }}
+          COMMAND: ${{ inputs.command }}
+        run: ssh -i ~/.ssh/id_deploy -o IdentitiesOnly=yes -o BatchMode=yes "ubuntu@$VM_HOST" "$COMMAND"
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_deploy
