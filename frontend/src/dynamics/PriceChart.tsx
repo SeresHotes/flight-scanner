@@ -183,7 +183,7 @@ export function PriceChart({
 
   return (
     <div className={`dyn-chart ${mini ? 'mini' : ''}`} ref={boxRef}>
-      {legend && !mini && series.length > 1 && (
+      {legend && !mini && series.length > 1 && series.length <= 12 && (
         <div className="dyn-legend">
           {series.map((s) => (
             <span key={s.id} className="dyn-legend-item">
