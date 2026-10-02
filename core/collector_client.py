@@ -150,5 +150,11 @@ class CollectorClient:
     def stats(self) -> Dict[str, Any]:
         return self._get("/v1/stats")
 
+    def crawler_state(self) -> Optional[Dict[str, Any]]:
+        return self._get("/v1/crawler/state").get("state")
+
+    def save_crawler_state(self, state: Dict[str, Any]) -> None:
+        self._post("/v1/crawler/state", state)
+
     def report_crawler_stats(self, payload: Dict[str, Any]) -> None:
         self._post("/v1/stats/crawler", payload)

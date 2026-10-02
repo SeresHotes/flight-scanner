@@ -48,7 +48,8 @@ CREATE OR REPLACE VIEW flights.ops_metrics AS
         crawler_pass_progress Nullable(Float64), crawler_submitted Nullable(Int64),
         crawler_quarantined_cities Nullable(Int64),
         series_age_p95_h Nullable(Float64), horizon_pairs Nullable(Int64),
-        crawler_refresh Nullable(Int64), crawler_queued_pages_est Nullable(Int64)')
+        crawler_refresh Nullable(Int64), crawler_queued_pages_est Nullable(Int64),
+        crawler_pass Nullable(Int64), crawler_sweep_offset Nullable(Int64)')
     SETTINGS input_format_parquet_allow_missing_columns = 1;
 
 -- Снимок покрытия «город × день вылета» (перезаписывается раз в 10 мин).

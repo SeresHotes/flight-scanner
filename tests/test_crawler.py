@@ -1,5 +1,7 @@
-"""Фоновый сборщик: срочность пар «город × день», карантин городов с ошибками,
-исключение серий из очереди, один тик против коллектора (TestClient)."""
+"""Фоновый сборщик: проход по календарю дат вылета (все города по дню, окна по плотности),
+курсор прохода, карантин городов с ошибками, исключение серий из очереди, тики против
+коллектора (TestClient) со сменой прохода."""
+import time
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -12,21 +14,17 @@ from collector.store import LocalStore
 from core.collector_client import CollectorClient
 from crawler import main as crawler_main
 from crawler.config import Settings
-from crawler.schedule import Targets, merge_cities, plan
+from crawler.schedule import merge_cities, sweep
 from tests.test_collector_engine import Source
 
 NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
 TODAY = date(2026, 9, 28)
-T = Targets(near_days=14, near_hours=24, mid_days=60, mid_hours=72, far_hours=168, error_retry_hours=24)
+PASS = NOW - timedelta(hours=10)  # начало текущего прохода
 
 
 def _row(origin, offset, age_h, error=False, tickets=5):
     day = (TODAY + timedelta(days=offset)).isoformat()
     return [origin, day, (NOW - timedelta(hours=age_h)).isoformat(), 1, tickets, True, error]
-
-
-def test_targets_by_horizon():
-    assert (T.hours(0), T.hours(14), T.hours(15), T.hours(60), T.hours(61)) == (24, 24, 72, 72, 168)
 
 
 def test_merge_cities_seeds_first_then_by_tickets():
@@ -35,92 +33,94 @@ def test_merge_cities_seeds_first_then_by_tickets():
     assert merge_cities(["MOW", "LED"], known) == ["MOW", "LED", "IST", "SEL"]
 
 
-def test_missing_pairs_go_near_to_far_and_big_cities_first():
-    items, s = plan(["MOW", "SEL"], [], today=TODAY, horizon_days=3, targets=T, now=NOW)
+def test_calendar_order_all_cities_per_day():
+    items, s = sweep(["MOW", "SEL"], [], today=TODAY, horizon_days=3, pass_started=PASS, window_tickets=None)
     assert [(i.origin, i.offset) for i in items] == [("MOW", 0), ("SEL", 0), ("MOW", 1), ("SEL", 1),
                                                      ("MOW", 2), ("SEL", 2), ("MOW", 3), ("SEL", 3)]
     assert all(i.reason == "missing" for i in items)
-    assert s["pairs"] == 8 and s["missing"] == 8 and s["pass_progress"] == 0 and s["due"] == 8
+    assert s["pairs"] == 8 and s["missing"] == 8 and s["done"] == 0 and s["due"] == 8
+    assert s["sweep_offset"] == 0 and s["sweep_day"] == "2026-09-28" and not s["pass_done"]
 
 
-def test_stale_near_beats_missing_far_only_after_double_target():
-    cov = [_row("MOW", 0, age_h=30), _row("MOW", 1, age_h=75)]   # 1.25× и 3.1× цели (24 ч)
-    items, s = plan(["MOW"], cov, today=TODAY, horizon_days=100, targets=T, now=NOW)
-    order = [(i.offset, i.reason) for i in items]
-    # Отсутствующие пары — 2…3 по дальности; день 1 (3.1) обгоняет их все,
-    # день 0 (1.25) идёт после всех отсутствующих.
-    assert order[0] == (1, "stale") and order[1] == (2, "missing") and order[-1] == (0, "stale")
-    assert s["stale"] == 2 and s["fresh"] == 0 and s["missing"] == 99
+def test_cursor_is_first_day_not_done_in_this_pass():
+    # дни 0–1 обработаны в этом проходе (5 ч назад), день 2 — с прошлого (30 ч), день 3 — тоже
+    cov = [_row(c, o, 5) for c in ("MOW", "SEL") for o in (0, 1)]
+    cov += [_row(c, o, 30) for c in ("MOW", "SEL") for o in (2, 3)]
+    items, s = sweep(["MOW", "SEL"], cov, today=TODAY, horizon_days=3, pass_started=PASS, window_tickets=None)
+    assert [(i.origin, i.offset, i.reason) for i in items] == [
+        ("MOW", 2, "update"), ("SEL", 2, "update"), ("MOW", 3, "update"), ("SEL", 3, "update")]
+    assert s["done"] == 4 and s["update"] == 4 and s["sweep_offset"] == 2 and s["pass_progress"] == 0.5
+    # всё обработано — проход окончен, подавать нечего
+    done = [_row(c, o, 5) for c in ("MOW", "SEL") for o in range(4)]
+    items, s = sweep(["MOW", "SEL"], done, today=TODAY, horizon_days=3, pass_started=PASS)
+    assert items == [] and s["pass_done"] and s["sweep_offset"] == 4 and s["sweep_day"] is None
 
 
-def test_fresh_pairs_are_skipped_and_far_target_is_a_week():
-    cov = [_row("MOW", o, age_h=100) for o in range(0, 181)]  # 100 ч: ближние/средние устарели, дальние свежие
-    items, s = plan(["MOW"], cov, today=TODAY, horizon_days=180, targets=T, now=NOW, refresh_floor_hours=None)
-    assert s["missing"] == 0 and s["stale"] == 61 and s["fresh"] == 120
-    assert max(i.offset for i in items) == 60 and min(i.score for i in items) > 1
+def test_small_city_window_runs_ahead_of_cursor():
+    # маленький город берёт весь горизонт одним окном; курсор держит Москва (по дню)
+    cov = [_row("MOW", o, 30, tickets=9000) for o in range(6)] + [_row("VDY", o, 30, tickets=2) for o in range(6)]
+    items, s = sweep(["MOW", "VDY"], cov, today=TODAY, horizon_days=5, pass_started=PASS)
+    assert [(i.origin, i.offset, i.days) for i in items][:3] == [("MOW", 0, 1), ("VDY", 0, 6), ("MOW", 1, 1)]
 
 
-def test_fresh_pairs_refresh_oldest_first_after_due():
-    # Весь горизонт свежий, но старше суток: сбор не останавливается — второй эшелон по убыванию
-    # срочности (возраст / цель): ближние даты (цель 24 ч) раньше дальних (168 ч); младше суток — нет.
-    cov = [_row("MOW", o, age_h=(10 if o == 1 else 20 if o <= 14 else 60 if o <= 60 else 150)) for o in range(0, 181)]
-    cov.append(_row("MOW", 0, age_h=30))  # сегодня — пора (30/24 > 1); перепишет строку для offset 0
-    items, s = plan(["MOW"], cov[1:] + [cov[-1]], today=TODAY, horizon_days=180, targets=T, now=NOW,
-                    window_tickets=None)
-    # ближние (1..14, 20 ч) младше суток — коллектор отдал бы из кэша, их нет; остальные 166 — к обновлению
-    assert s["stale"] == 1 and s["refresh"] == 166 and s["fresh"] == 180
-    assert items[0].offset == 0 and items[0].reason == "stale"
-    assert all(i.reason == "refresh" and i.score < 1 for i in items[1:])
-    assert not {i.offset for i in items} & set(range(1, 15))
-    scores = [i.score for i in items[1:]]
-    assert scores == sorted(scores, reverse=True)
-    # самые старые относительно цели первыми: дальние 150/168 = 0.89 раньше средних 60/72 = 0.83
-    assert [i.offset for i in items[1:4]] == [61, 62, 63]
-    # по умолчанию (без параметра) порог тоже 24 ч
-    items2, _ = plan(["MOW"], cov[1:] + [cov[-1]], today=TODAY, horizon_days=180, targets=T, now=NOW)
-    assert len(items2) == len(items)
-
-
-def test_error_rows_retry_after_interval_and_quarantine_city():
-    cov = [_row("MOW", 0, age_h=1, error=True), _row("MOW", 1, age_h=30, error=True)]
-    cov += [_row("XXX", o, age_h=30, error=True, tickets=0) for o in (0, 1, 2)]
-    items, s = plan(["MOW", "XXX"], cov, today=TODAY, horizon_days=3, targets=T, now=NOW)
-    mow = [(i.offset, i.reason) for i in items if i.origin == "MOW"]
-    assert (0, "error") not in mow and (1, "error") in mow          # 1 ч — рано, 30 ч — пора
+def test_errors_count_as_done_and_quarantine_city():
+    cov = [_row("MOW", 0, 1, error=True), _row("MOW", 1, 30, error=True), _row("MOW", 2, 30)]
+    cov += [_row("XXX", o, 30, error=True, tickets=0) for o in (0, 1, 2)]
+    items, s = sweep(["MOW", "XXX"], cov, today=TODAY, horizon_days=2, pass_started=PASS, window_tickets=None)
+    mow = [i.offset for i in items if i.origin == "MOW"]
+    assert mow == [1, 2]                                      # ошибка в этом проходе — до следующего
     xxx = [(i.offset, i.reason) for i in items if i.origin == "XXX"]
-    assert xxx == [(1, "error")]                                      # карантин: одна проба
-    assert s["quarantined_cities"] == 1 and s["errors"] == 3 and s["pairs"] == 4 + 1
+    assert xxx == [(0, "quarantine")]                         # карантин: одна проба (сегодня)
+    assert s["quarantined_cities"] == 1 and s["errors"] == 3 and s["pairs"] == 3 + 1
 
 
-def test_exclude_queued_and_limit():
-    items, s = plan(["MOW"], [], today=TODAY, horizon_days=5, targets=T, now=NOW,
-                    exclude=[("MOW", TODAY.isoformat())], limit=2)
-    assert [i.offset for i in items] == [1, 2] and s["queued_excluded"] == 1 and s["due"] == 5
+def test_exclude_queued():
+    items, s = sweep(["MOW"], [], today=TODAY, horizon_days=4, pass_started=PASS,
+                     exclude=[("MOW", TODAY.isoformat())], window_tickets=None)
+    assert [i.offset for i in items] == [1, 2, 3, 4] and s["queued_excluded"] == 1
+    assert s["sweep_offset"] == 0                             # в очереди — ещё не обработан
 
 
-def test_tick_submits_missing_series_and_reports(tmp_path):
+def _wait_series(c, n):
+    for _ in range(100):
+        if c.get("/v1/health").json()["series"] >= n:
+            return
+        time.sleep(0.05)
+
+
+def test_tick_sweeps_and_starts_next_pass(tmp_path):
     csettings = CollectorSettings(db_path=":memory:", lake_local_root=str(tmp_path / "lake"),
                                   s3_bucket=None, rate_per_minute=100_000)
     source = Source({("MOW", ""): [3], ("LED", ""): [0]})
     engine = Engine(csettings, LocalStore(csettings.lake_local_root), Index(":memory:"), page_fn=source)
-    settings = Settings(collector_url="http://testserver", seeds=["MOW", "LED"], horizon_days=2,
-                        queue_target=3, max_pages=5, window_tickets=0)
+    # SEL — заранее в списке: он же приходит направлением в билетах MOW (иначе новый город
+    # посреди прохода вернул бы курсор на начало — это отдельный тест ниже)
+    settings = Settings(collector_url="http://testserver", seeds=["MOW", "LED", "SEL"], horizon_days=1,
+                        queue_target=3, max_pages=5, window_tickets=0, min_pass_hours=24)
     with TestClient(create_app(engine)) as c:
         client = CollectorClient("http://testserver", http=c, poll_wait=1)
-        s = crawler_main.tick(client, settings, today=TODAY, now=NOW)
-        assert s["submitted"] == 3 and s["missing"] == 6 and s["queued_crawl"] == 0
-        assert s["cities"] == 2 and s["horizon_days"] == 2
+        start = datetime.now(timezone.utc) - timedelta(minutes=1)  # серии коллектор пишет по реальным часам
+        s = crawler_main.tick(client, settings, today=TODAY, now=start)
+        assert s["pass"] == 1 and s["submitted"] == 3 and s["missing"] == 6 and s["sweep_offset"] == 0
+        assert client.crawler_state()["pass_started"] == start.isoformat(timespec="seconds")
         assert c.get("/v1/stats").json()["crawler"]["submitted"] == 3
-        # Дождаться выполнения: 3 серии × 1 страница.
-        for _ in range(50):
-            if c.get("/v1/health").json()["series"] >= 3:
-                break
-            import time
-            time.sleep(0.05)
-        rows = c.get("/v1/coverage").json()["rows"]
-        assert sorted((r[0], r[1]) for r in rows) == [("LED", "2026-09-28"), ("MOW", "2026-09-28"),
-                                                      ("MOW", "2026-09-29")]
-        # Второй тик: три пары свежие, остались три отсутствующие; новых городов из билетов (SEL, BKK)
-        # добавились в список.
-        s2 = crawler_main.tick(client, settings, today=TODAY, now=NOW + timedelta(seconds=1))
-        assert s2["submitted"] == 3 and s2["fresh"] == 3 and s2["cities"] >= 3
+        _wait_series(c, 3)
+        # день 0 у всех обработан — курсор на дне 1, подаётся день 1 всех городов
+        s2 = crawler_main.tick(client, settings, today=TODAY, now=start + timedelta(minutes=2))
+        assert s2["sweep_offset"] == 1 and s2["submitted"] == 3 and s2["done"] == 3 and s2["cities"] == 3
+        _wait_series(c, 6)
+        # проход окончен, но младше суток — новый не начинается
+        s3 = crawler_main.tick(client, settings, today=TODAY, now=start + timedelta(hours=1))
+        assert s3["pass_done"] and s3["pass"] == 1 and s3["submitted"] == 0
+        # через сутки — проход 2 с начала горизонта (кэш коллектора не мешает: ttl от начала прохода)
+        later = start + timedelta(hours=25)
+        s4 = crawler_main.tick(client, settings, today=TODAY, now=later)
+        assert s4["pass"] == 2 and s4["sweep_offset"] == 0 and s4["submitted"] == 3
+        assert s4["previous_pass_hours"] == 25.0
+
+
+def test_new_city_mid_pass_is_caught_up_from_start():
+    cov = [_row("MOW", o, 5) for o in range(3)] + [_row("MOW", 3, 30)]
+    items, s = sweep(["MOW", "NEW"], cov, today=TODAY, horizon_days=3, pass_started=PASS, window_tickets=None)
+    assert [(i.origin, i.offset) for i in items] == [("NEW", 0), ("NEW", 1), ("NEW", 2), ("MOW", 3), ("NEW", 3)]
+    assert s["sweep_offset"] == 0

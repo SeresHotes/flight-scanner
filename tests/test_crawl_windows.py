@@ -17,12 +17,12 @@ from core import graphql_api as g
 from core.collector_client import CollectorClient
 from crawler import main as crawler_main
 from crawler.config import Settings
-from crawler.schedule import Targets, plan
+from crawler.schedule import sweep
 from tests.test_collector_engine import Clock
 
 NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
 TODAY = date(2026, 9, 28)
-T = Targets(near_days=14, near_hours=72, mid_days=60, mid_hours=72, far_hours=168, error_retry_hours=24)
+PASS = NOW - timedelta(hours=1)  # начало текущего прохода
 
 
 def _raw(i, day, price, origin="MOW", dest="SEL"):
@@ -134,36 +134,31 @@ def _row(origin, offset, age_h, tickets, exhausted=True, error=False):
     return [origin, day, (NOW - timedelta(hours=age_h)).isoformat(), 1, tickets, exhausted, error]
 
 
-def test_windows_follow_city_density_and_freshness_tiers():
+def test_windows_follow_city_density():
     cov = [_row("MOW", o, 200, 5000) for o in range(0, 181)]  # 5 000/день → окно 2 дня
-    cov += [_row("VDY", o, 200, 3) for o in range(0, 181)]    # почти пусто → окно на весь уровень
-    items, s = plan(["MOW", "VDY"], cov, today=TODAY, horizon_days=180, targets=T, now=NOW,
-                    window_tickets=10_000)
-    vdy = [(i.offset, i.days) for i in items if i.origin == "VDY"]
-    assert sorted(vdy) == [(0, 61), (61, 120)]               # граница свежести на 60-м дне
+    cov += [_row("VDY", o, 200, 3) for o in range(0, 181)]    # почти пусто → весь горизонт одним окном
+    items, s = sweep(["MOW", "VDY"], cov, today=TODAY, horizon_days=180, pass_started=PASS,
+                     window_tickets=10_000)
+    assert [(i.offset, i.days) for i in items if i.origin == "VDY"] == [(0, 181)]
     mow = [i for i in items if i.origin == "MOW"]
-    assert all(i.days <= 2 for i in mow) and sum(i.days for i in mow) == 181
+    assert all(i.days == 2 for i in mow[:-1]) and sum(i.days for i in mow) == 181
     assert s["due"] == 362 and s["windows"] == len(items)
-    req = next(i for i in items if i.origin == "VDY" and i.offset == 0).request(100)
+    # по календарю: на дне 0 сначала Москва (раньше в списке городов), потом VDY
+    assert [(i.origin, i.offset) for i in items[:3]] == [("MOW", 0), ("VDY", 0), ("MOW", 2)]
+    req = next(i for i in items if i.origin == "VDY").request(100)
     assert req == {"origin": "VDY", "destination": None, "day": "2026-09-28",
-                   "day_to": "2026-11-27", "max_pages": 100}
+                   "day_to": "2027-03-27", "max_pages": 100}
 
 
-def test_windows_break_on_gaps_and_unknown_city_uses_default():
-    cov = [_row("LED", o, 1, 10) for o in (3, 4)]             # свежие дни 3–4 — разрыв
-    items, _ = plan(["LED", "NEW"], cov, today=TODAY, horizon_days=10, targets=T, now=NOW,
-                    window_tickets=10_000, unknown_window_days=4)
+def test_windows_break_on_done_days_and_unknown_city_uses_default():
+    cov = [_row("LED", o, 0.5, 10) for o in (3, 4)]           # дни 3–4 уже в этом проходе — разрыв
+    items, s = sweep(["LED", "NEW"], cov, today=TODAY, horizon_days=10, pass_started=PASS,
+                     window_tickets=10_000, unknown_window_days=4)
     led = sorted((i.offset, i.days) for i in items if i.origin == "LED")
     assert led == [(0, 3), (5, 6)]
     new = sorted((i.offset, i.days) for i in items if i.origin == "NEW")
     assert new == [(0, 4), (4, 4), (8, 3)]
-
-
-def test_truncated_series_is_refetched_after_retry_interval():
-    cov = [_row("MOW", 0, 30, 4800, exhausted=False), _row("MOW", 1, 30, 4800)]
-    items, s = plan(["MOW"], cov, today=TODAY, horizon_days=1, targets=T, now=NOW)
-    # обрезанная — «пора»; свежая соседка старше суток — вторым эшелоном (refresh), отдельным окном
-    assert [(i.offset, i.reason) for i in items] == [(0, "truncated"), (1, "refresh")] and s["truncated"] == 1
+    assert s["done"] == 2 and s["sweep_offset"] == 0
 
 
 def test_tick_submits_windows_and_collector_splits_them(tmp_path):
@@ -194,7 +189,7 @@ def test_estimate_pages_follows_density_and_window_length():
     assert estimate_pages(5000, 2) == 25 and estimate_pages(401, 1) == 2
     cov = [_row("MOW", o, 200, 5000) for o in range(10)] + [_row("X", 0, 1, 0, error=True)]
     assert densities(cov) == {"MOW": 5000}
-    items, _ = plan(["MOW"], cov, today=TODAY, horizon_days=9, targets=T, now=NOW, window_tickets=10_000)
+    items, _ = sweep(["MOW"], cov, today=TODAY, horizon_days=9, pass_started=PASS, window_tickets=10_000)
     assert all(i.est_pages == 25 for i in items)
 
 
