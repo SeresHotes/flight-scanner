@@ -12,9 +12,6 @@ use crate::segments::city_info;
 pub const SECONDS_PER_REQUEST: f64 = 1.0;
 /// Предохранитель: столько ХОЛОДНЫХ страниц (не в кэше) за один сбор, ~35 мин.
 pub const MAX_REQUESTS: i64 = 2000;
-/// Потолок суммарной ширины окон дат всех плеч (дни): объём выборки из склада растёт с числом
-/// «любых» подряд и шириной окон. Совпадает с frontend/src/planner/validation.ts.
-pub const MAX_TOTAL_WINDOW_DAYS: i64 = 60;
 /// Потолок шагов перебора маршрутов (извлечений из кучи) на одну стыковку.
 pub const MAX_SEARCH_STEPS: usize = 3_000_000;
 /// Потолок стыковок групп (extend) при обходе наборов городов.
@@ -426,11 +423,6 @@ pub fn estimate_plan(stops: &[Stop], is_cached: Option<&dyn Fn(&Series) -> bool>
     Estimate { requests, cached, cold, seconds: (cold as f64 * SECONDS_PER_REQUEST).round() as i64, legs, source: "collector".into() }
 }
 
-/// Суммарная ширина окон всех плеч сбора, включая плечи в обход (дни).
-pub fn total_window_days(stops: &[Stop]) -> i64 {
-    leg_specs(stops).into_iter().map(|l| spec_days(stops, l)).sum()
-}
-
 pub fn request_count(stops: &[Stop]) -> i64 {
     let stops = collect_view(stops);
     leg_specs(&stops).into_iter().map(|l| spec_requests(&stops, l)).sum()
@@ -464,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn total_window_days_sums_legs() {
+    fn any_any_series_per_day() {
         let stops = vec![
             Stop::new("cities", vec!["MOW"], ["", ""]),
             Stop::new("any", vec![], ["2026-11-01", "2026-11-10"]),
@@ -472,8 +464,7 @@ mod tests {
             Stop::new("cities", vec!["TBS"], ["", ""]),
         ];
         // плечо 0 — окно остановки 1 (10 дн.), плечо 1 — остановки 1 (10), плечо 2 — остановки 2 (20)
-        assert_eq!(total_window_days(&stops), 40);
-        assert!(total_window_days(&stops) <= MAX_TOTAL_WINDOW_DAYS);
+        assert_eq!((0..3).map(|i| leg_days(&stops, i)).collect::<Vec<_>>(), vec![10, 10, 20]);
         assert_eq!(plan_series(&stops).iter().filter(|s| s.origin.is_none() && s.dest.is_none()).count(), 10, "любой → любой: серия на день");
     }
 
@@ -496,7 +487,7 @@ mod tests {
         assert_eq!(spec_dates(&stops, specs[3]), date_range("2026-11-01", "2026-11-03"));
         assert_eq!(estimate_plan(&stops, None).legs.len(), 4);
         assert_eq!(plan_series(&stops).iter().filter(|s| s.leg == 3).count(), 3 * 2);
-        assert_eq!(total_window_days(&stops), 3 + 3 + 3 + 3);
+        assert_eq!(spec_days(&stops, specs[3]), 3);
         stops[2].skip = true;
         assert!(plan_error(&stops).is_some(), "две подряд");
         stops[2].skip = false;

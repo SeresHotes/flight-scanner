@@ -1,8 +1,7 @@
 // Правила корректности скелета маршрута (v1):
 //  • минимум 2 остановки;
 //  • любая остановка, включая концы, — города (≥1) или «любой» (откуда / куда угодно);
-//  • несколько «любых» подряд разрешены (рейсы берутся из склада билетов), но суммарная
-//    ширина окон дат всех плеч ограничена MAX_TOTAL_WINDOW_DAYS — иначе выборка непомерна;
+//  • несколько «любых» подряд разрешены (рейсы берутся из склада билетов);
 //  • один и тот же единственный город не может идти дважды подряд;
 //  • у ПРОМЕЖУТОЧНЫХ остановок задан диапазон дат (start <= end); у концов даты
 //    выводятся из соседей — поле не показывается и не требуется;
@@ -21,51 +20,7 @@ const block = (s: PlannerStop): [number, number] | null =>
   s.kind === 'any' && s.count && (s.count[0] !== 1 || s.count[1] !== 1) ? s.count : null
 const removable = (s: PlannerStop): boolean => !!s.skip || block(s)?.[0] === 0
 
-import { daysInWindow } from './dates'
 import type { PlannerStop } from './types'
-
-// Совпадает с planner/src/stops.rs MAX_TOTAL_WINDOW_DAYS и DEFAULT_LEG_DAYS.
-export const MAX_TOTAL_WINDOW_DAYS = 60
-const DEFAULT_LEG_DAYS = 7
-
-// Окно плеча i (stop i → i+1): заданное окно того конца, у кого оно есть; без окон — дефолт.
-export function legDays(stops: PlannerStop[], i: number): number {
-  const wi = stops[i].window
-  if (wi[0] && wi[1]) return daysInWindow(wi)
-  const wj = stops[i + 1].window
-  if (wj[0] && wj[1]) return daysInWindow(wj)
-  return DEFAULT_LEG_DAYS
-}
-
-// Окно плеча i (даты сбора) или null — окон нет.
-function legWindow(stops: PlannerStop[], i: number): [string, string] | null {
-  const wi = stops[i].window
-  if (wi[0] && wi[1]) return wi
-  const wj = stops[i + 1].window
-  if (wj[0] && wj[1]) return wj
-  return null
-}
-
-// Дни перелёта в обход остановки i: от начала плеча в неё до конца плеча из неё.
-export function bypassDays(stops: PlannerStop[], i: number): number {
-  const a = legWindow(stops, i - 1)
-  const b = legWindow(stops, i)
-  if (!a && !b) return DEFAULT_LEG_DAYS
-  if (!a || !b) return daysInWindow((a ?? b)!)
-  return daysInWindow([a[0] < b[0] ? a[0] : b[0], a[1] > b[1] ? a[1] : b[1]])
-}
-
-// Суммарная ширина окон всех плеч, включая перелёты в обход и внутри блоков (в днях).
-export function totalWindowDays(stops: PlannerStop[]): number {
-  let total = 0
-  for (let i = 0; i < stops.length - 1; i++) total += legDays(stops, i)
-  stops.forEach((s, i) => {
-    if (i === 0 || i === stops.length - 1) return
-    if (removable(s)) total += bypassDays(stops, i)
-    if ((block(s)?.[1] ?? 0) >= 2) total += legDays(stops, i)
-  })
-  return total
-}
 
 // Вариантов маршрута: 2 на пропускаемую остановку × (до − от + 1) на блок.
 export function variantCount(stops: PlannerStop[]): number {
@@ -120,14 +75,6 @@ export function validatePlan(stops: PlannerStop[]): Validation {
       }
     }
   })
-
-  // Суммарная ширина окон: объём выборки растёт с числом «любых» и шириной окон.
-  if (stops.length >= 2) {
-    const total = totalWindowDays(stops)
-    if (total > MAX_TOTAL_WINDOW_DAYS) {
-      general.push(`Суммарная ширина окон дат — ${total} дн., максимум ${MAX_TOTAL_WINDOW_DAYS}. Сузьте диапазоны.`)
-    }
-  }
 
   // Блоки любых городов: между городами, от 0 до MAX_BLOCK_CITIES.
   stops.forEach((s, i) => {
