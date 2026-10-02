@@ -50,6 +50,7 @@ export function PriceChart({
   yDomain,
   legend = true,
   tipNewestFirst = false,
+  alwaysDots = false,
 }: {
   series: Series[]
   emptyText?: string
@@ -63,6 +64,8 @@ export function PriceChart({
   legend?: boolean
   // подсказка: строки в порядке линий от последней к первой (а не по цене)
   tipNewestFirst?: boolean
+  // точки на всех значениях (линия соединяет только реальные наблюдения)
+  alwaysDots?: boolean
 }) {
   const boxRef = useRef<HTMLDivElement>(null)
   const [w, setW] = useState(mini ? 300 : 800)
@@ -215,7 +218,7 @@ export function PriceChart({
           {hoverT !== null && <line x1={x(hoverT)} x2={x(hoverT)} y1={pad.t} y2={H - pad.b} className="dyn-cross" />}
           {series.map((s, si) => {
             const rs = runs(s)
-            const dotR = (t: number) => (t === hoverT ? 5 : format === 'dots' ? 4 : mini ? 2.5 : 3.5)
+            const dotR = (t: number) => (t === hoverT ? 5 : format === 'dots' ? 4 : mini || (alwaysDots && series.length > 8) ? 2.5 : 3.5)
             return (
               <g key={s.id}>
                 {format === 'band' &&
@@ -256,8 +259,8 @@ export function PriceChart({
                   ))}
                 {format !== 'bars' &&
                   s.points.map((p) =>
-                    p.v === null ? null : format !== 'dots' && p.t !== hoverT && (!sparse || mini) ? null : (
-                      <circle key={p.si} cx={x(p.t)} cy={y(p.v)} r={dotR(p.t)} fill={s.color} className="dyn-dot" />
+                    p.v === null ? null : format !== 'dots' && !alwaysDots && p.t !== hoverT && (!sparse || mini) ? null : (
+                      <circle key={`${p.t}-${p.si}`} cx={x(p.t)} cy={y(p.v)} r={dotR(p.t)} fill={s.color} className="dyn-dot" />
                     ),
                   )}
               </g>

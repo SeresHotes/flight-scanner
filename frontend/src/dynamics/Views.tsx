@@ -267,10 +267,11 @@ export function ProfileView({ series, snapshots, format, unit }: ViewProps & { s
           ))}
         </span>
       </div>
-      <PriceChart series={unit === 'pct' ? toPct(prof) : prof} format={format === 'band' ? 'line' : format} unit={unit} xKind="day" tipNewestFirst />
+      <PriceChart series={unit === 'pct' ? toPct(prof) : prof} format={format === 'band' ? 'line' : format} unit={unit} xKind="day" tipNewestFirst alwaysDots />
       <div className="dyn-note">
-        Ось X — день вылета. Каждая линия — как выглядели цены в этот день наблюдения: последний снимок каждого дня вылета
-        не позже его конца. Видно, какие дни подорожали и как сдвигался весь «профиль» цен. {prof.length}{' '}
+        Ось X — день вылета. Каждая линия — цены, увиденные в этот день наблюдения: точка есть только у дней вылета,
+        которые в этот день действительно смотрели (коллектор обновляет каждый день вылета раз в 1–3 дня), линия
+        соединяет только эти точки. Видно, какие дни подорожали и как сдвигался весь «профиль» цен. {prof.length}{' '}
         {plural(prof.length, 'линия', 'линии', 'линий')}.
       </div>
     </>
