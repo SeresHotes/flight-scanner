@@ -49,6 +49,8 @@ pub struct Combo {
     /// Пропущенные остановки (номера в запросе): codes — только города варианта.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<usize>,
+    /// Ключ набора (`search::combo_key`: коды + метка варианта) — для `…/routes?combos=`.
+    pub key: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -422,6 +424,7 @@ fn merge_overviews(parts: Vec<Overview>, top: usize) -> Overview {
 
 fn build_overview_one(stops: &[Stop], table: &FlightCols, query: Option<&PlanQuery>, top: usize, max_steps: usize) -> Overview {
     let skipped: Vec<usize> = query.and_then(|q| q.variant.as_ref()).map(|v| v.skipped.clone()).unwrap_or_default();
+    let tag: String = query.and_then(|q| q.variant.as_ref()).map(|v| v.tag.clone()).unwrap_or_default();
     let last = stops.len().saturating_sub(1);
     if last < 1 || top == 0 {
         return Overview::default();
@@ -469,6 +472,7 @@ fn build_overview_one(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
         lb: &'a [FxHashMap<u32, f64>],
         day_lb: Option<&'a DayLb>,
         skipped: &'a [usize],
+        tag: &'a str,
     }
 
     impl Env<'_> {
@@ -618,8 +622,10 @@ fn build_overview_one(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
                 flat = cell;
             }
         }
+        let codes: Vec<String> = seq.iter().map(|&c| env.table.codes[c as usize].clone()).collect();
         best.push(Combo {
-            codes: seq.iter().map(|&c| env.table.codes[c as usize].clone()).collect(),
+            key: crate::search::combo_key(&codes, env.tag),
+            codes,
             min_price: minp[flat],
             transfers_at_min: state.tr_at[flat],
             min_transfers: mintr.iter().copied().min().unwrap_or(BIG_TR),
@@ -669,7 +675,7 @@ fn build_overview_one(stops: &[Stop], table: &FlightCols, query: Option<&PlanQue
         }
     }
 
-    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last, lb: &lb, day_lb: day_lb.as_ref(), skipped: &skipped };
+    let env = Env { legs: &legs, hops: &hops, table, allow: &allow, departs: RefCell::new(FxHashMap::default()), city_filters: &city_filters, trip, trip_active, last, lb: &lb, day_lb: day_lb.as_ref(), skipped: &skipped, tag: &tag };
     let leg0 = &legs[0];
     let mut starts: Vec<u32> = Vec::new();
     for code in &crate::search::start_codes(stops, table, query) {
@@ -979,8 +985,8 @@ mod tests {
         assert_eq!(
             got.combos,
             vec![
-                Combo { codes: vec!["MOW".into(), "IST".into()], min_price: 90.0, transfers_at_min: 1, min_transfers: 0, count: 2, skipped: vec![] },
-                Combo { codes: vec!["MOW".into(), "DXB".into()], min_price: 120.0, transfers_at_min: 0, min_transfers: 0, count: 1, skipped: vec![] },
+                Combo { codes: vec!["MOW".into(), "IST".into()], min_price: 90.0, transfers_at_min: 1, min_transfers: 0, count: 2, skipped: vec![], key: "MOW-IST".into() },
+                Combo { codes: vec!["MOW".into(), "DXB".into()], min_price: 120.0, transfers_at_min: 0, min_transfers: 0, count: 1, skipped: vec![], key: "MOW-DXB".into() },
             ]
         );
         let empty = FlightCols::from_collected(&[]);

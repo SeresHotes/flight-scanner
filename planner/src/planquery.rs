@@ -32,6 +32,8 @@ pub struct StopSpec {
     pub radius_km: i64,
     /// Остановку можно пропустить: сбор добавляет плечо в обход (часть ключа сбора).
     pub skip: bool,
+    /// У «любой»: сколько городов подряд (от, до); (1, 1) — обычная остановка.
+    pub count: (usize, usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -42,6 +44,9 @@ pub struct CityFilter {
     pub require_weekend: bool,
     /// Фильтр плеча в обход этой остановки (если её пропускаем): None — открытый.
     pub bypass: Option<LegFilter>,
+    /// Блок любых городов: фильтр всех его перелётов (в блок, внутри, из блока и напрямую,
+    /// если городов 0); None — открытый. Фильтры обычных плеч вокруг блока не действуют.
+    pub flights: Option<LegFilter>,
 }
 
 impl CityFilter {
@@ -57,21 +62,25 @@ impl CityFilter {
             }
             None
         });
-        let bypass = match d.get("bypass") {
-            Some(v) if v.is_object() => Some(LegFilter::from_value(Some(v))?).filter(|f| !f.is_open()),
-            _ => None,
+        let leg = |key: &str| -> Result<Option<LegFilter>, String> {
+            match d.get(key) {
+                Some(v) if v.is_object() => Ok(Some(LegFilter::from_value(Some(v))?).filter(|f| !f.is_open())),
+                _ => Ok(None),
+            }
         };
+        let (bypass, flights) = (leg("bypass")?, leg("flights")?);
         Ok(CityFilter {
             min_stay: int_of(d.get("minStay"))?.unwrap_or(0),
             max_stay: int_of(d.get("maxStay"))?,
             must_cover: cover,
             require_weekend: bool_of(d.get("requireWeekend")),
             bypass,
+            flights,
         })
     }
 
     pub fn is_open(&self) -> bool {
-        self.stay_open() && self.bypass.is_none()
+        self.stay_open() && self.bypass.is_none() && self.flights.is_none()
     }
 
     /// Фильтр пребывания (без фильтра плеча в обход) не задан.
@@ -88,6 +97,9 @@ impl CityFilter {
         });
         if let Some(b) = &self.bypass {
             v["bypass"] = b.as_value(); // без обхода — ключ вида как раньше
+        }
+        if let Some(f) = &self.flights {
+            v["flights"] = f.as_value();
         }
         v
     }
@@ -220,6 +232,9 @@ pub struct Variant {
     pub table_legs: Vec<usize>,
     pub chain_start: String,
     pub skipped: Vec<usize>,
+    /// Метка варианта для ключа набора (`search::combo_key`): «s1.3» — пропуски, «n2» — число
+    /// городов блоков по порядку; пусто — вариант без пропусков и блоков.
+    pub tag: String,
 }
 
 /// Окно времени суток `[lo, hi]` в минутах: null/нет → края суток, значения зажаты в [0, DAY_MIN].
@@ -294,7 +309,15 @@ impl PlanQuery {
             ];
             let radius_km = clamp_radius(s.get("radiusKm"));
             let skip = bool_of(s.get("skip"));
-            stops.push(StopSpec { kind, codes, window, radius_km, skip });
+            let count = match s.get("count").and_then(|v| v.as_array()) {
+                Some(a) if kind == "any" => {
+                    let lo = a.first().map(|v| int_of(Some(v))).transpose()?.flatten().unwrap_or(1).max(0) as usize;
+                    let hi = a.get(1).map(|v| int_of(Some(v))).transpose()?.flatten().unwrap_or(lo as i64).max(0) as usize;
+                    (lo, hi)
+                }
+                _ => (1, 1),
+            };
+            stops.push(StopSpec { kind, codes, window, radius_km, skip, count });
         }
         let n = stops.len();
         let cities_raw = d.get("cities").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -330,6 +353,9 @@ impl PlanQuery {
                     if s.skip {
                         m.insert("skip".into(), json!(true));
                     }
+                    if s.count != (1, 1) {
+                        m.insert("count".into(), json!([s.count.0, s.count.1]));
+                    }
                     Value::Object(m)
                 })
                 .collect(),
@@ -363,6 +389,9 @@ impl PlanQuery {
                 let mut v = json!({"kind": s.kind, "codes": codes, "window": [s.window[0], s.window[1]], "radiusKm": s.radius_km});
                 if s.skip {
                     v["skip"] = json!(true); // без пропуска — ключ как раньше
+                }
+                if s.count != (1, 1) {
+                    v["count"] = json!([s.count.0, s.count.1]);
                 }
                 v
             })

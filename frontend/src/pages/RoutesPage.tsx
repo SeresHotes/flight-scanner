@@ -10,6 +10,14 @@ import { ItineraryCard } from '../planner/components/ItineraryCard'
 
 const PAGE = 50
 
+// Подпись набора по ключу (search::combo_key): «MOW → TBS · без Стамбул» — метка «~s1.3»
+// (или старая «~1.3») = пропущенные остановки; «~n2» (число городов блока) видно по кодам.
+function comboLabel(key: string, query: PlanQuery): string {
+  const [codes, ...tags] = key.split('~')
+  const skipped = tags.flatMap((t) => (/^s?\d/i.test(t) ? t.replace(/^s/i, '').split('.').map(Number) : []))
+  return codes.split('-').join(' → ') + (skipped.length ? ` · без ${skipped.map((i) => stopName(query, i)).join(', ')}` : '')
+}
+
 // Режим маршрутов: цепочки по возрастанию цены, страницами с бэка. При переходе
 // из наборов (combos=) — только выбранные наборы, вместе.
 export function RoutesPage() {
@@ -33,8 +41,7 @@ function RoutesPageInner() {
           <span>
             Наборы: {combos.map((c) => (
               <span className="mchip" key={c}>
-                {c.split('~')[0].split('-').join(' → ')}
-                {c.includes('~') && ` · без ${c.split('~')[1].split('.').map((i) => stopName(query, Number(i))).join(', ')}`}
+                {comboLabel(c, query)}
               </span>
             ))}
           </span>

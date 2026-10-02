@@ -38,7 +38,9 @@ pub fn is_valid_max_results(n: Option<i64>) -> bool {
 
 /// Остановка запроса: набор городов (kind='cities') или «любой» + окно дат.
 /// radius_km — можно улететь дальше из соседнего города; exact — прилёт строго в codes;
-/// skip — остановку можно пропустить (сбор добавляет плечо в обход, см. `leg_specs`).
+/// skip — остановку можно пропустить (сбор добавляет плечо в обход, см. `leg_specs`);
+/// count — у «любой»: сколько городов подряд (от–до), (1, 1) — обычная остановка, иначе
+/// «блок любых городов» с общим окном (см. `is_block`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stop {
     pub kind: String,
@@ -47,6 +49,7 @@ pub struct Stop {
     pub radius_km: i64,
     pub exact: bool,
     pub skip: bool,
+    pub count: (usize, usize),
 }
 
 impl Stop {
@@ -58,11 +61,12 @@ impl Stop {
             radius_km: 0,
             exact: false,
             skip: false,
+            count: (1, 1),
         }
     }
 
     pub fn from_spec(s: &StopSpec) -> Stop {
-        Stop { kind: s.kind.clone(), codes: s.codes.clone(), window: s.window.clone(), radius_km: s.radius_km, exact: false, skip: s.skip }
+        Stop { kind: s.kind.clone(), codes: s.codes.clone(), window: s.window.clone(), radius_km: s.radius_km, exact: false, skip: s.skip, count: s.count }
     }
 
     /// Принимаем и codes:[...], и airports:[{code}] (как во фронтовом PlannerStop).
@@ -85,11 +89,22 @@ impl Stop {
             radius_km: clamp_radius(d.get("radiusKm")),
             exact: false,
             skip: d.get("skip").and_then(|v| v.as_bool()).unwrap_or(false),
+            count: (1, 1),
         }
     }
 
     pub fn is_cities(&self) -> bool {
         self.kind == "cities"
+    }
+
+    /// Блок «любые города, от–до»: «любая» остановка с числом городов не ровно 1.
+    pub fn is_block(&self) -> bool {
+        self.kind == "any" && self.count != (1, 1)
+    }
+
+    /// Остановку может не быть в маршруте: пропуск или блок «от 0».
+    pub fn removable(&self) -> bool {
+        self.skip || (self.is_block() && self.count.0 == 0)
     }
 }
 
@@ -108,7 +123,7 @@ pub fn collect_view(stops: &[Stop]) -> Vec<Stop> {
         .enumerate()
         .map(|(i, s)| {
             if s.is_cities() {
-                Stop { kind: s.kind.clone(), codes: hops.collect_codes(i), window: s.window.clone(), radius_km: 0, exact: false, skip: s.skip }
+                Stop { kind: s.kind.clone(), codes: hops.collect_codes(i), window: s.window.clone(), radius_km: 0, exact: false, skip: s.skip, count: s.count }
             } else {
                 s.clone()
             }
@@ -147,8 +162,9 @@ pub fn leg_days(stops: &[Stop], i: usize) -> i64 {
 }
 
 /// Плечо сбора (номер плеча в рейсах джобы = позиция в `leg_specs`): из остановки `from`
-/// в остановку `to`. Обычные плечи i → i+1 идут первыми (номер = i), за ними — плечи в
-/// обход пропускаемых остановок i−1 → i+1, по порядку остановок.
+/// в остановку `to`. Обычные плечи i → i+1 идут первыми (номер = i), за ними — по порядку
+/// остановок плечи в обход пропускаемых i−1 → i+1 и плечи внутри блоков любых городов
+/// (from == to: «любой → любой» между городами блока, общее для всех его переходов).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegSpec {
     pub from: usize,
@@ -160,15 +176,24 @@ impl LegSpec {
     pub fn is_bypass(&self) -> bool {
         self.to > self.from + 1
     }
+
+    /// Плечо между городами блока `from`.
+    pub fn is_inner(&self) -> bool {
+        self.to == self.from
+    }
 }
 
-/// Все плечи сбора джобы: обычные, затем в обход каждой пропускаемой остановки.
+/// Все плечи сбора джобы: обычные (в блок и из блока — обычные плечи i−1 → i и i → i+1),
+/// затем по остановкам: в обход (пропуск или блок «от 0») и внутри блока (до 2+ городов).
 pub fn leg_specs(stops: &[Stop]) -> Vec<LegSpec> {
     let n = stops.len();
     let mut out: Vec<LegSpec> = (0..n.saturating_sub(1)).map(|i| LegSpec { from: i, to: i + 1 }).collect();
     for i in 1..n.saturating_sub(1) {
-        if stops[i].skip {
+        if stops[i].removable() {
             out.push(LegSpec { from: i - 1, to: i + 1 });
+        }
+        if stops[i].is_block() && stops[i].count.1 >= 2 {
+            out.push(LegSpec { from: i, to: i });
         }
     }
     out
@@ -179,9 +204,14 @@ pub fn bypass_leg(stops: &[Stop], i: usize) -> Option<usize> {
     leg_specs(stops).iter().position(|l| l.is_bypass() && l.from + 1 == i)
 }
 
-/// Даты сбора плеча: у обычного — `leg_dates`, у обходного — от первого дня плеча в
-/// пропускаемую остановку до последнего дня плеча из неё (вылет в те дни, когда летели бы
-/// на любое из двух заменённых плеч).
+/// Номер плеча сбора между городами блока i (None — в блоке не больше одного города).
+pub fn inner_leg(stops: &[Stop], i: usize) -> Option<usize> {
+    leg_specs(stops).iter().position(|l| l.is_inner() && l.from == i)
+}
+
+/// Даты сбора плеча: у обычного — `leg_dates`, внутри блока — его окно, у обходного — от
+/// первого дня плеча в пропускаемую остановку до последнего дня плеча из неё (вылет в те
+/// дни, когда летели бы на любое из двух заменённых плеч).
 pub fn spec_dates(stops: &[Stop], l: LegSpec) -> Vec<String> {
     if !l.is_bypass() {
         return leg_dates(stops, l.from);
@@ -192,19 +222,36 @@ pub fn spec_dates(stops: &[Stop], l: LegSpec) -> Vec<String> {
     date_range(&lo, &hi)
 }
 
-/// Проверка пропусков запроса: пропускать можно только промежуточные остановки, не две
-/// подряд, не больше MAX_SKIPS и не между двумя «любыми» (плечо в обход «любой → любой»).
-pub fn skip_error(stops: &[Stop]) -> Option<String> {
+/// Проверка пропусков и блоков запроса (None — всё в порядке):
+/// - пропускать можно только промежуточные остановки, не две подряд (блок «от 0» считается
+///   пропускаемой), не больше MAX_SKIPS и не между двумя «любыми»;
+/// - блок любых городов — промежуточный, между двумя остановками с городами (плечи в блок и
+///   из блока — «город → любой» и «любой → город»), от 0 до MAX_BLOCK_CITIES городов;
+/// - вариантов маршрута (пропуски × число городов блоков) — не больше MAX_VARIANTS.
+pub fn plan_error(stops: &[Stop]) -> Option<String> {
     let n = stops.len();
-    let skips: Vec<usize> = (0..n).filter(|&i| stops[i].skip).collect();
-    if skips.is_empty() {
-        return None;
+    for (i, s) in stops.iter().enumerate() {
+        if !s.is_block() {
+            continue;
+        }
+        let (lo, hi) = s.count;
+        if i == 0 || i + 1 == n {
+            return Some("Несколько любых городов «от–до» — только в середине маршрута.".into());
+        }
+        if lo > hi || hi == 0 || hi > MAX_BLOCK_CITIES {
+            return Some(format!("Любых городов подряд — от 0 до {MAX_BLOCK_CITIES}, «от» не больше «до»."));
+        }
+        if !stops[i - 1].is_cities() || !stops[i + 1].is_cities() {
+            return Some("Рядом с блоком любых городов «от–до» должны быть остановки с городами.".into());
+        }
     }
+    let skips: Vec<usize> = (0..n).filter(|&i| stops[i].skip).collect();
     if skips.iter().any(|&i| i == 0 || i + 1 == n) {
         return Some("Пропускать можно только промежуточные остановки — не первую и не последнюю.".into());
     }
-    if skips.windows(2).any(|w| w[1] == w[0] + 1) {
-        return Some("Нельзя разрешить пропуск двух остановок подряд.".into());
+    let removable: Vec<usize> = (0..n).filter(|&i| stops[i].removable()).collect();
+    if removable.windows(2).any(|w| w[1] == w[0] + 1) {
+        return Some("Нельзя пропускать две остановки подряд (блок «от 0» тоже пропускается).".into());
     }
     if skips.len() > MAX_SKIPS {
         return Some(format!("Пропускаемых остановок — не больше {MAX_SKIPS}."));
@@ -212,11 +259,26 @@ pub fn skip_error(stops: &[Stop]) -> Option<String> {
     if skips.iter().any(|&i| !stops[i - 1].is_cities() && !stops[i + 1].is_cities()) {
         return Some("Пропуск остановки между двумя «любыми» не поддерживается: задайте город у соседней.".into());
     }
+    let variants = variant_count(stops);
+    if variants > MAX_VARIANTS {
+        return Some(format!("Слишком много вариантов маршрута ({variants}, максимум {MAX_VARIANTS}): уменьшите пропуски или разброс числа городов."));
+    }
     None
 }
 
-/// Потолок пропускаемых остановок: вариантов маршрута (с ней / без неё) — до 2^MAX_SKIPS.
+/// Вариантов маршрута: 2 на пропускаемую остановку × (до − от + 1) на блок.
+pub fn variant_count(stops: &[Stop]) -> usize {
+    stops.iter().map(|s| if s.skip { 2 } else if s.is_block() { s.count.1.saturating_sub(s.count.0) + 1 } else { 1 }).product()
+}
+
+/// Потолок пропускаемых остановок.
 pub const MAX_SKIPS: usize = 3;
+/// Потолок городов в блоке «любые от–до»: плечо внутри блока собирается одно на все его
+/// переходы — вылеты из городов прилёта плеча в блок ИЛИ прилёты в города вылета плеча из
+/// блока; при 4+ городах средний переход не задевает ни то ни другое.
+pub const MAX_BLOCK_CITIES: usize = 3;
+/// Потолок вариантов маршрута: перебор и наборы считаются по каждому.
+pub const MAX_VARIANTS: usize = 16;
 
 /// Дни плеча сбора.
 pub fn spec_days(stops: &[Stop], l: LegSpec) -> i64 {
@@ -346,6 +408,8 @@ pub fn estimate_plan(stops: &[Stop], is_cached: Option<&dyn Fn(&Series) -> bool>
         let mut to_label = stop_label(&stops[l.to]);
         if l.is_bypass() {
             to_label = format!("{to_label} (без {})", stop_label(&stops[l.from + 1]));
+        } else if l.is_inner() {
+            to_label = format!("{to_label} (внутри блока)");
         }
         legs.push(EstimateLeg {
             from_label: stop_label(&stops[l.from]),
@@ -422,7 +486,7 @@ mod tests {
             Stop::new("cities", vec!["MOW"], ["", ""]),
         ];
         assert_eq!(leg_specs(&stops).len(), 3);
-        assert_eq!(skip_error(&stops), None);
+        assert_eq!(plan_error(&stops), None);
         stops[1].skip = true;
         let specs = leg_specs(&stops);
         assert_eq!(specs[3], LegSpec { from: 0, to: 2 });
@@ -434,10 +498,34 @@ mod tests {
         assert_eq!(plan_series(&stops).iter().filter(|s| s.leg == 3).count(), 3 * 2);
         assert_eq!(total_window_days(&stops), 3 + 3 + 3 + 3);
         stops[2].skip = true;
-        assert!(skip_error(&stops).is_some(), "две подряд");
+        assert!(plan_error(&stops).is_some(), "две подряд");
         stops[2].skip = false;
         stops[0].skip = true;
-        assert!(skip_error(&stops).is_some(), "первая");
+        assert!(plan_error(&stops).is_some(), "первая");
+    }
+
+    #[test]
+    fn block_legs() {
+        let mut stops = vec![
+            Stop::new("cities", vec!["MOW"], ["", ""]),
+            Stop::new("any", vec![], ["2026-11-01", "2026-11-10"]),
+            Stop::new("cities", vec!["TBS"], ["", ""]),
+        ];
+        stops[1].count = (0, 3);
+        assert!(stops[1].is_block() && stops[1].removable());
+        assert_eq!(plan_error(&stops), None);
+        let specs = leg_specs(&stops);
+        assert_eq!(specs[2..], [LegSpec { from: 0, to: 2 }, LegSpec { from: 1, to: 1 }]);
+        assert_eq!((bypass_leg(&stops, 1), inner_leg(&stops, 1)), (Some(2), Some(3)));
+        assert_eq!(spec_dates(&stops, specs[3]).len(), 10);
+        assert_eq!(variant_count(&stops), 4);
+        assert_eq!(estimate_plan(&stops, None).legs[3].to_label, "Любой город (внутри блока)");
+        stops[1].count = (1, 4);
+        assert!(plan_error(&stops).is_some(), "больше трёх");
+        stops[1].count = (1, 2);
+        assert_eq!(leg_specs(&stops).len(), 3, "без обхода");
+        stops[0] = Stop::new("any", vec![], ["", ""]);
+        assert!(plan_error(&stops).is_some(), "сосед — любой");
     }
 
     #[test]

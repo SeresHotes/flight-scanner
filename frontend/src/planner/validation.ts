@@ -7,9 +7,19 @@
 //  • у ПРОМЕЖУТОЧНЫХ остановок задан диапазон дат (start <= end); у концов даты
 //    выводятся из соседей — поле не показывается и не требуется;
 //  • пропускать можно промежуточные остановки, не две подряд, не больше MAX_SKIPS и не
-//    между двумя «любыми» (planner/src/stops.rs skip_error).
+//    между двумя «любыми»;
+//  • блок любых городов «от–до» — в середине, между остановками с городами, до
+//    MAX_BLOCK_CITIES городов; блок «от 0» считается пропускаемой остановкой;
+//  • вариантов маршрута (пропуски × число городов блоков) не больше MAX_VARIANTS
+//    (planner/src/stops.rs plan_error).
 
 export const MAX_SKIPS = 3
+export const MAX_BLOCK_CITIES = 3
+export const MAX_VARIANTS = 16
+
+const block = (s: PlannerStop): [number, number] | null =>
+  s.kind === 'any' && s.count && (s.count[0] !== 1 || s.count[1] !== 1) ? s.count : null
+const removable = (s: PlannerStop): boolean => !!s.skip || block(s)?.[0] === 0
 
 import { daysInWindow } from './dates'
 import type { PlannerStop } from './types'
@@ -45,14 +55,24 @@ export function bypassDays(stops: PlannerStop[], i: number): number {
   return daysInWindow([a[0] < b[0] ? a[0] : b[0], a[1] > b[1] ? a[1] : b[1]])
 }
 
-// Суммарная ширина окон всех плеч, включая перелёты в обход (в днях).
+// Суммарная ширина окон всех плеч, включая перелёты в обход и внутри блоков (в днях).
 export function totalWindowDays(stops: PlannerStop[]): number {
   let total = 0
   for (let i = 0; i < stops.length - 1; i++) total += legDays(stops, i)
   stops.forEach((s, i) => {
-    if (s.skip && i > 0 && i < stops.length - 1) total += bypassDays(stops, i)
+    if (i === 0 || i === stops.length - 1) return
+    if (removable(s)) total += bypassDays(stops, i)
+    if ((block(s)?.[1] ?? 0) >= 2) total += legDays(stops, i)
   })
   return total
+}
+
+// Вариантов маршрута: 2 на пропускаемую остановку × (до − от + 1) на блок.
+export function variantCount(stops: PlannerStop[]): number {
+  return stops.reduce((n, s) => {
+    const b = block(s)
+    return n * (s.skip ? 2 : b ? Math.max(1, b[1] - b[0] + 1) : 1)
+  }, 1)
 }
 
 export interface StopIssue {
@@ -109,15 +129,34 @@ export function validatePlan(stops: PlannerStop[]): Validation {
     }
   }
 
+  // Блоки любых городов: между городами, от 0 до MAX_BLOCK_CITIES.
+  stops.forEach((s, i) => {
+    const b = block(s)
+    if (!b || i === 0 || i === stops.length - 1) return
+    if (b[0] > b[1] || b[1] < 1 || b[1] > MAX_BLOCK_CITIES) {
+      flag(i, `Точка ${pointLabel(i)}: любых городов подряд — от 0 до ${MAX_BLOCK_CITIES}, «от» не больше «до».`)
+    }
+    if (stops[i - 1].kind !== 'cities' || stops[i + 1].kind !== 'cities') {
+      flag(i, `Точка ${pointLabel(i)}: рядом с несколькими любыми городами должны быть остановки с городами.`)
+    }
+  })
+
   // Пропуски: не две подряд, не между двумя «любыми», не больше MAX_SKIPS.
   const skips = stops.map((s, i) => (s.skip && i > 0 && i < stops.length - 1 ? i : -1)).filter((i) => i >= 0)
+  const gone = stops.map((s, i) => (removable(s) && i > 0 && i < stops.length - 1 ? i : -1)).filter((i) => i >= 0)
+  for (const i of gone) {
+    if (gone.includes(i + 1)) flag(i + 1, `Точки ${pointLabel(i)} и ${pointLabel(i + 1)}: нельзя пропускать две остановки подряд (блок «от 0» тоже пропускается).`)
+  }
   for (const i of skips) {
-    if (skips.includes(i + 1)) flag(i + 1, `Точки ${pointLabel(i)} и ${pointLabel(i + 1)}: нельзя разрешить пропуск двух остановок подряд.`)
     if (stops[i - 1].kind === 'any' && stops[i + 1].kind === 'any') {
       flag(i, `Точка ${pointLabel(i)}: пропуск между двумя «любыми» не поддерживается — задайте город у соседней.`)
     }
   }
   if (skips.length > MAX_SKIPS) general.push(`Пропускаемых остановок — не больше ${MAX_SKIPS}.`)
+  const variants = variantCount(stops)
+  if (variants > MAX_VARIANTS) {
+    general.push(`Слишком много вариантов маршрута (${variants}, максимум ${MAX_VARIANTS}): уменьшите пропуски или разброс числа городов.`)
+  }
 
   // Один и тот же единственный город дважды подряд.
   for (let i = 0; i < stops.length - 1; i++) {

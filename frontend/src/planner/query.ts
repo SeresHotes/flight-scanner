@@ -14,6 +14,7 @@ export interface CityQuery {
   mustCover: [string, string] | null
   requireWeekend: boolean
   bypass: LegQuery | null // условия перелёта в обход остановки (если её пропускаем)
+  flights: LegQuery | null // блок любых городов: условия всех его перелётов (в блок, внутри, из блока)
 }
 
 export interface LegQuery {
@@ -40,7 +41,7 @@ export const TRAVEL_MAX_MIN = 48 * 60 // длительность перелёт
 export const TRIP_MAX = 60 // длина поездки, дней
 export const DAY_MIN = 24 * 60 // окно времени суток [0, DAY_MIN] = любое
 
-export const openCity = (): CityQuery => ({ minStay: 0, maxStay: null, mustCover: null, requireWeekend: false, bypass: null })
+export const openCity = (): CityQuery => ({ minStay: 0, maxStay: null, mustCover: null, requireWeekend: false, bypass: null, flights: null })
 export const openLeg = (): LegQuery => ({
   maxTransfers: -1,
   minLayoverMin: 0,
@@ -69,6 +70,10 @@ export function defaultBypass(q: PlanQuery, i: number): LegQuery {
   }
 }
 
+// Блок любых городов «от–до» (planner/src/stops.rs is_block).
+export const isBlock = (s: { kind: string; count?: [number, number] }): boolean =>
+  s.kind === 'any' && !!s.count && (s.count[0] !== 1 || s.count[1] !== 1)
+
 // Название остановки для подписей: города через «/», «любой» или буква точки.
 export function stopName(q: PlanQuery, i: number): string {
   const s = q.stops[i]
@@ -81,7 +86,10 @@ export function stopName(q: PlanQuery, i: number): string {
 // Пропуск — только у промежуточных остановок: у концов флаг снимается.
 export function fitFilters(q: PlanQuery): PlanQuery {
   const n = q.stops.length
-  const stops = q.stops.map((s, i) => (s.skip && (i === 0 || i === n - 1) ? { ...s, skip: false } : s))
+  // пропуск и блок «от–до» — только у промежуточных; у концов снимаются
+  const stops = q.stops.map((s, i) =>
+    (i === 0 || i === n - 1) && (s.skip || s.count) ? { ...s, skip: false, count: undefined } : s,
+  )
   const cities = Array.from({ length: n }, (_, i) => q.cities[i] ?? openCity())
   const legs = Array.from({ length: Math.max(0, n - 1) }, (_, i) => q.legs[i] ?? openLeg())
   return { ...q, stops, cities, legs }
@@ -109,6 +117,7 @@ export function toApi(q: PlanQuery) {
       window: s.window,
       radiusKm: s.radiusKm || 0,
       ...(s.skip ? { skip: true } : {}),
+      ...(isBlock(s) ? { count: s.count } : {}),
     })),
     cities: q.cities.map((c, i) => ({
       minStay: c.minStay,
@@ -116,6 +125,7 @@ export function toApi(q: PlanQuery) {
       mustCover: c.mustCover && c.mustCover[0] && c.mustCover[1] ? c.mustCover : null,
       requireWeekend: c.requireWeekend,
       ...(q.stops[i]?.skip && c.bypass ? { bypass: legApi(c.bypass) } : {}),
+      ...(q.stops[i] && isBlock(q.stops[i]) && c.flights ? { flights: legApi(c.flights) } : {}),
     })),
     legs: q.legs.map(legApi),
     tripLength: q.tripLength,
@@ -139,6 +149,8 @@ function legApi(l: LegQuery) {
 //   st = kind.codes(-).winA.winB.radius[.s]   — по остановке (radius — км переезда, нет — 0;
 //        s — можно пропустить)
 //   bf = stop.<поля lf>   — условия перелёта в обход пропускаемой остановки stop
+//   ff = stop.<поля lf>   — условия перелётов блока любых городов stop
+//   в st после radius — флаги: s (можно пропустить), nОТ-ДО (блок любых городов)
 //   cf = minStay.maxStay.coverA.coverB.wk — по остановке ('' = ∞ / нет)
 //   lf = maxTransfers.minLayover.travelLo.travelHi.baggage(a|i|n).hidden(1|0)[.depLo.depHi.arrLo.arrHi]
 //        — по переходу; окна времени суток — только если заданы ('' = край суток)
@@ -162,8 +174,10 @@ export function encodeQuery(q: PlanQuery): URLSearchParams {
   const sp = new URLSearchParams()
   for (const s of q.stops) {
     const parts = [s.kind === 'any' ? 'any' : 'c', s.airports.map((a) => a.code).join(L), s.window[0], s.window[1]]
-    if (s.radiusKm || s.skip) parts.push(String(s.radiusKm || 0))
+    const block = isBlock(s) && s.count
+    if (s.radiusKm || s.skip || block) parts.push(String(s.radiusKm || 0))
     if (s.skip) parts.push('s')
+    if (block) parts.push(`n${block[0]}${L}${block[1]}`)
     sp.append('st', parts.join(F))
   }
   for (const c of q.cities) {
@@ -173,6 +187,7 @@ export function encodeQuery(q: PlanQuery): URLSearchParams {
   for (const l of q.legs) sp.append('lf', legEnc(l))
   q.cities.forEach((c, i) => {
     if (q.stops[i]?.skip && c.bypass) sp.append('bf', `${i}${F}${legEnc(c.bypass)}`)
+    if (q.stops[i] && isBlock(q.stops[i]) && c.flights) sp.append('ff', `${i}${F}${legEnc(c.flights)}`)
   })
   sp.set('tl', `${q.tripLength[0]}${F}${q.tripLength[1] ?? ''}`)
   return sp
@@ -201,12 +216,14 @@ function legDec(raw: string): LegQuery {
 export function decodeQuery(sp: URLSearchParams, nextId: () => string): PlanQuery | null {
   const stops: PlannerStop[] = []
   for (const raw of sp.getAll('st')) {
-    const [kind, codesRaw, winA, winB, radius, skip] = raw.split(F)
+    const [kind, codesRaw, winA, winB, radius, ...flags] = raw.split(F)
+    const n = flags.find((f) => f.startsWith('n'))?.slice(1).split(L).map(Number)
+    const count: [number, number] | undefined = n && n.length === 2 && n.every((x) => Number.isFinite(x)) ? [n[0], n[1]] : undefined
     if (!kind) continue
     const k: StopKind = kind === 'any' ? 'any' : 'cities'
     const airports: AirportOption[] =
       k === 'cities' && codesRaw ? codesRaw.split(L).filter(Boolean).map((code) => ({ code, city: '', label: code })) : []
-    stops.push({ id: nextId(), kind: k, airports, window: [winA ?? '', winB ?? ''], radiusKm: Number(radius) || 0, ...(skip === 's' ? { skip: true } : {}) })
+    stops.push({ id: nextId(), kind: k, airports, window: [winA ?? '', winB ?? ''], radiusKm: Number(radius) || 0, ...(flags.includes('s') ? { skip: true } : {}), ...(count && k === 'any' ? { count } : {}) })
   }
   if (!stops.length) return null
   const cities = sp.getAll('cf').map((raw): CityQuery => {
@@ -217,6 +234,7 @@ export function decodeQuery(sp: URLSearchParams, nextId: () => string): PlanQuer
       mustCover: coverA && coverB ? [coverA, coverB] : null,
       requireWeekend: wk === '1',
       bypass: null,
+      flights: null,
     }
   })
   const legs = sp.getAll('lf').map(legDec)
@@ -228,10 +246,12 @@ export function decodeQuery(sp: URLSearchParams, nextId: () => string): PlanQuer
     tripLength: tl ? [Number(tl[0]) || 0, numOrNull(tl[1])] : [0, null], // параметр mc (бюджет) удалён — игнорируется
   })
   // условия обхода — после fitFilters: cf в URL может не быть, а cities уже по числу остановок
-  for (const raw of sp.getAll('bf')) {
-    const dot = raw.indexOf(F)
-    const i = Number(raw.slice(0, dot))
-    if (dot > 0 && q.cities[i]) q.cities[i] = { ...q.cities[i], bypass: legDec(raw.slice(dot + 1)) }
+  for (const [param, field] of [['bf', 'bypass'], ['ff', 'flights']] as const) {
+    for (const raw of sp.getAll(param)) {
+      const dot = raw.indexOf(F)
+      const i = Number(raw.slice(0, dot))
+      if (dot > 0 && q.cities[i]) q.cities[i] = { ...q.cities[i], [field]: legDec(raw.slice(dot + 1)) }
+    }
   }
   return q
 }
