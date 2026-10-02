@@ -65,8 +65,9 @@ X→ANY, ANY→Y, пара, ANY→ANY — после плеч с городом,
 в складе; все фильтры — при чтении: параметр `f` (JSON фильтров) у `GET /api/plan/jobs/{id}`,
 `…/combos`, `…/routes` — вид под фильтры стыкуется из сохранённых рейсов в фоне
 (этап «Стыковка»), кэш в памяти по `(джоба, view_key)`. Рейсы джобы — колонками
-(`core/flightcols.FlightCols`, Parquet `plan_flights/<job>.parquet` рядом с БД): A* и
-наборы строят таблицы из numpy-колонок, полный рейс (JSON) — только для результата. `…/routes?offset&limit&combos=`
+(`flightcols.FlightCols`), собираются копированием горячих колонок склада без разбора билетов
+(доли секунды; `docs/TICKETS.md`), держатся в памяти (вытесненная джоба собирается заново,
+на диск не пишутся); полный рейс — только для результата. `…/routes?offset&limit&combos=`
 — страница маршрутов (полные сегменты: багаж, пересадки, hidden-city). Фильтры
 плеча применяются до перебора, городов — внутри A*, длина поездки — при выдаче.
 Старый `POST /api/plan/gather` = тот же запуск с открытыми фильтрами. Наборы
@@ -102,7 +103,7 @@ X→ANY, ANY→Y, пара, ANY→ANY — после плеч с городом,
 поэтому `value_min/value_max` обязательны для разумного объёма. `trip_duration`
 приходит 0 — длительность считаем по сегментам. На проде серии получает коллектор
 (`COLLECTOR_URL`, свежесть сутки, озеро в S3); без него планировщик ходит в GraphQL
-сам и кэширует серии в `ticket_cache` (`planner/src/graphql.rs`). Проверить руками:
+сам и кэширует серии в памяти (`planner/src/graphql.rs`, `hot.rs`). Проверить руками:
 
 ```sh
 poetry run python scripts/fetch_tickets.py MOW SEL 2026-10-15
@@ -116,9 +117,10 @@ poetry run python scripts/fetch_tickets.py MOW - 2026-10-15 --min 20000 --max 40
 
 ## Планировщик на Rust (`planner/`, 2026-09-30)
 
-Сервис `flights-planner` (axum + tokio, rusqlite, arrow/parquet, reqwest) повторяет
-контракт и семантику Python-планировщика один в один: те же `/api/*`, та же SQLite
-`data/flights.db` (jobs, quotes, ticket_cache), те же Parquet-файлы `plan_flights/<job>.parquet`
+Сервис `flights-planner` (axum + tokio, arrow/parquet, reqwest) повторяет
+контракт и семантику Python-планировщика один в один: те же `/api/*`; рейсы джоб — в
+памяти, SQLite нет с 02.10.2026 — джобы в памяти + JSON-файл на джобу
+`plan_jobs/<job>.json`, кэш серий прямого режима — в памяти (`hot.rs`)
 (Python-планировщик `api/` + `storage/` + планировочные модули `core/` удалены 30.09.2026;
 в `core/` остались только общие с коллектором `graphql_api`, `collector_client`,
 `series_arrow`). Модули: `stops` (остановки, окна, оценка), `collect`
@@ -138,6 +140,6 @@ X→ANY (`core/transfer_graph`, `core/anyscan`, `scripts/scan_any.py`,
 `/api/graph/*`), CLI-скрипты в корне, `web/`. Их заменяют GraphQL-сбор и
 планировщик v2. Контейнер `flights-scan` на VM (если ещё крутится) работает
 из смонтированной копии старого кода — его можно остановить:
-`ssh ubuntu@93.77.186.45 'sudo docker rm -f flights-scan'`. Накопленные `quotes`
-остаются: из них берётся карта аэропорт→город (`hot.airport_city_map`).
+`ssh ubuntu@93.77.186.45 'sudo docker rm -f flights-scan'`. Карта аэропорт→город —
+из склада билетов в памяти (`lakestore::airport_city_map`); `quotes` и SQLite удалены 02.10.2026.
 Разбор ссылки Aviasales (`t=`, `static_fare_key`) — `core/linkinfo.py`.

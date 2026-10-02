@@ -32,38 +32,33 @@ fn main() {
     let app = match AppState::new(&db_path) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("[startup] БД {db_path}: {e}");
+            eprintln!("[startup] {db_path}: {e}");
             std::process::exit(1);
         }
     };
     // Статичные справочники — один раз на процесс.
     segments::city_names();
     nearby::geo();
-    let (quotes, stale) = {
-        let conn = app.conn.lock().unwrap();
-        // Джобы, не пережившие прошлый рестарт, висят в running — помечаем error.
-        let stale = hot::fail_stale_jobs(&conn, "прервана рестартом сервера").unwrap_or(0);
-        // С коллектором серии живут в озере: локальный кэш серий не нужен и не должен расти.
-        if collector_url().is_some() {
-            let _ = hot::drop_ticket_cache(&conn);
+    // SQLite больше нет (02.10.2026): прежний файл БД (джобы, котировки, кэш серий) — вон.
+    for suffix in ["", "-wal", "-shm"] {
+        let p = format!("{db_path}{suffix}");
+        if std::path::Path::new(&p).is_file() && std::fs::remove_file(&p).is_ok() {
+            println!("[startup] удалён прежний файл SQLite {p}");
         }
-        (hot::count_quotes(&conn).unwrap_or(0), stale)
-    };
+    }
+    let old = hot::drop_plan_flights(&db_path);
+    if old > 0 {
+        println!("[startup] удалены прежние файлы рейсов джоб: {old} (рейсы собираются заново из склада)");
+    }
+    // Джобы, не пережившие прошлый рестарт (pending/running в файлах), — уже error.
+    let stale = hot::fail_stale_jobs(&db_path);
     println!(
-        "[startup] котировок в БД: {quotes}; зависших джоб сброшено: {stale}; коллектор: {}",
+        "[startup] джоб, прерванных рестартом: {stale}; коллектор: {}",
         collector_url().unwrap_or_else(|| "нет (прямой GraphQL)".into())
     );
     // Склад билетов в памяти: снапшот с диска, затем озеро (S3 или LAKE_LOCAL_ROOT) в фоне.
     if lakesync::bootstrap(&db_path).is_none() {
         println!("[startup] склад билетов: нет (озеро не задано) — рейсы только сериями");
-        // карта аэропорт → город без склада — из quotes: прогрев в фоне
-        // (со складом карта в памяти склада)
-        let db = db_path.clone();
-        std::thread::spawn(move || {
-            let t = std::time::Instant::now();
-            let n = hot::airport_city_map_cached(&db).len();
-            println!("[startup] карта аэропорт → город: {n} за {:.1} с", t.elapsed().as_secs_f64());
-        });
     }
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8000);
     let rt = tokio::runtime::Runtime::new().expect("tokio");

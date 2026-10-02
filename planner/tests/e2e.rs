@@ -214,6 +214,7 @@ async fn plan_job_end_to_end() {
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let app_ref = app.clone();
     tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
@@ -314,8 +315,16 @@ async fn plan_job_end_to_end() {
     assert_eq!(bad2["status"], "invalid");
     assert_eq!(get_json(&client, &format!("{base}/api/plan/jobs/nope")).await["status"], "not_found");
 
-    // файл рейсов джобы лежит рядом с БД
-    assert!(dir.join("plan_flights").join(format!("{job_id}.parquet")).exists());
+    // рейсы джобы на диск не пишутся: вытесненная из памяти (или после рестарта) джоба
+    // собирается заново из склада — тот же результат под тот же фильтр
+    assert!(!dir.join("plan_flights").exists());
+    assert!(dir.join("plan_jobs").join(format!("{job_id}.json")).exists());
+    app_ref.tables.lock().unwrap().clear();
+    app_ref.views.lock().unwrap().clear();
+    let st3 = wait_done(&client, &format!("{base}/api/plan/jobs/{job_id}?f={f}")).await;
+    assert_eq!(st3["summary"]["count"], 6, "{st3}");
+    let combos3 = get_json(&client, &format!("{base}/api/plan/jobs/{job_id}/combos?f={f}")).await;
+    assert_eq!(combos3["items"][0]["minPrice"], 27000.0);
     std::fs::remove_dir_all(&dir).ok();
 }
 

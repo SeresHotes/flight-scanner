@@ -1,13 +1,12 @@
 //! Фоновая джоба планировщика (зеркало `api.worker`): серии билетов от коллектора
 //! (без COLLECTOR_URL — прямой GraphQL с кэшем серий), стыковка цепочек (search),
-//! наборы городов (overview), прогресс в таблице jobs, котировки — в SQLite.
+//! наборы городов (overview), прогресс джобы — в памяти (`hot`).
 //! Выполняется в потоке однопоточного исполнителя.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use crate::collect::{collect_plan, store_view, CollectError, CollectProgress, SeriesFetcher, SeriesResult};
@@ -60,7 +59,7 @@ pub fn initial_stage() -> Value {
 }
 
 struct ReporterInner {
-    conn: Connection,
+    db_path: String,
     state: Value,
     progress: i64,
     last_flush: Option<Instant>,
@@ -76,8 +75,8 @@ pub struct StageReporter {
 }
 
 impl StageReporter {
-    pub fn new(conn: Connection, job_id: &str, steps: Vec<(String, i64)>, cancel: Arc<CancelSet>) -> StageReporter {
-        StageReporter { job_id: job_id.to_string(), steps, cancel, inner: Mutex::new(ReporterInner { conn, state: initial_stage(), progress: 0, last_flush: None }) }
+    pub fn new(db_path: &str, job_id: &str, steps: Vec<(String, i64)>, cancel: Arc<CancelSet>) -> StageReporter {
+        StageReporter { job_id: job_id.to_string(), steps, cancel, inner: Mutex::new(ReporterInner { db_path: db_path.to_string(), state: initial_stage(), progress: 0, last_flush: None }) }
     }
 
     fn flush(&self, inner: &mut ReporterInner, fields: &[(&str, Value)]) -> Result<(), CollectError> {
@@ -86,7 +85,7 @@ impl StageReporter {
         }
         let mut all: Vec<(&str, Value)> = vec![("stage_json", Value::String(inner.state.to_string()))];
         all.extend(fields.iter().cloned());
-        hot::update_job(&inner.conn, &self.job_id, &all).map_err(CollectError::Failed)
+        hot::update_job(&inner.db_path, &self.job_id, &all).map_err(CollectError::Failed)
     }
 
     pub fn stage(&self, key: &str, fields: &[(&str, Value)]) -> Result<(), CollectError> {
@@ -181,10 +180,10 @@ impl<'a> SeriesFetcher for CountingFetcher<'a> {
 
 /// Источник серий для джобы и сколько серий тянуть одновременно: коллектор, если
 /// задан COLLECTOR_URL (прод), — параллельно; иначе прямой GraphQL — по одной.
-pub fn make_fetcher(db_path: &str) -> (Box<dyn SeriesFetcher>, usize) {
+pub fn make_fetcher() -> (Box<dyn SeriesFetcher>, usize) {
     match collector_url() {
         Some(url) => (Box::new(CollectorClient::new(&url).with_ttl(FETCH_CACHE_TTL_SECONDS)), COLLECTOR_FETCH_WORKERS),
-        None => (Box::new(DirectFetcher::new(db_path, FETCH_CACHE_TTL_SECONDS)), 1),
+        None => (Box::new(DirectFetcher::new(FETCH_CACHE_TTL_SECONDS)), 1),
     }
 }
 
@@ -214,44 +213,35 @@ pub fn build_view(stops: &[Stop], table: &FlightCols, pq: &PlanQuery, on_progres
     Ok(ViewResult { view, combos })
 }
 
-/// Джоба = сбор рейсов по остановкам запроса, рейсы — в plan_flights; пока они в
-/// памяти, стыковка под фильтры запроса и вид в `on_view` (кэш API) до выставления
-/// done; котировки — в SQLite уже после done.
+/// Джоба = сбор рейсов по остановкам запроса; рейсы — в памяти (`on_table`, кэш API),
+/// стыковка под фильтры запроса и вид в `on_view` до выставления done.
 pub fn run_plan_collection(db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>, on_view: &dyn Fn(&PlanQuery, ViewResult), on_table: &dyn Fn(Arc<FlightCols>)) {
-    let conn = match hot::connect(db_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[worker] plan job {job_id}: {e}");
-            return;
-        }
-    };
-    let outcome = run_inner(&conn, db_path, job_id, pq, cancel.clone(), on_view, on_table);
+    let outcome = run_inner(db_path, job_id, pq, cancel.clone(), on_view, on_table);
     match outcome {
         Ok(()) => {}
         Err(CollectError::Cancelled) => println!("[worker] plan job {job_id} сброшена как зависшая"),
         Err(e @ CollectError::RateLimited(_)) => {
             let msg = e.to_string();
-            let _ = hot::update_job(&conn, job_id, &[("status", json!("error")), ("error", json!(msg))]);
+            let _ = hot::update_job(db_path, job_id, &[("status", json!("error")), ("error", json!(msg))]);
             println!("[worker] plan job {job_id} error: {e}");
         }
         Err(CollectError::Failed(e)) => {
-            let _ = hot::update_job(&conn, job_id, &[("status", json!("error")), ("error", json!(e))]);
+            let _ = hot::update_job(db_path, job_id, &[("status", json!("error")), ("error", json!(e))]);
             println!("[worker] plan job {job_id} error: {e}");
         }
     }
     cancel.forget(job_id);
 }
 
-fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>, on_view: &dyn Fn(&PlanQuery, ViewResult), on_table: &dyn Fn(Arc<FlightCols>)) -> Result<(), CollectError> {
+fn run_inner(db_path: &str, job_id: &str, pq: &PlanQuery, cancel: Arc<CancelSet>, on_view: &dyn Fn(&PlanQuery, ViewResult), on_table: &dyn Fn(Arc<FlightCols>)) -> Result<(), CollectError> {
     let stops = parse_stops(&pq.stops);
     let total = request_count(&stops);
     let steps: Vec<(String, i64)> = estimate_plan(&stops, None).legs.iter().map(|l| (format!("{} → {}", l.from_label, l.to_label), l.requests)).collect();
     let t0 = Instant::now();
-    let rep_conn = hot::connect(db_path).map_err(CollectError::Failed)?;
-    let rep = StageReporter::new(rep_conn, job_id, steps, cancel.clone());
+    let rep = StageReporter::new(db_path, job_id, steps, cancel.clone());
     rep.stage("fetch", &[("status", json!("running")), ("total", json!(total)), ("progress", json!(0))])?;
 
-    let (inner, workers) = make_fetcher(db_path);
+    let (inner, workers) = make_fetcher();
     let on_hit = || rep.cache_hit();
     let fetcher = CountingFetcher { inner, on_hit: &on_hit };
     let store = make_store();
@@ -293,28 +283,18 @@ fn run_inner(conn: &Connection, db_path: &str, job_id: &str, pq: &PlanQuery, can
     rep.flush_state()?;
     on_table(table.clone());
     on_view(pq, result);
-    hot::update_job(conn, job_id, &[("status", json!("done"))]).map_err(CollectError::Failed)?;
+    hot::update_job(db_path, job_id, &[("status", json!("done"))]).map_err(CollectError::Failed)?;
     println!("[worker] plan job {job_id} done: {count} цепочек");
-
-    // Рейсы в Parquet — уже после done: другие фильтры берут таблицу из памяти (кэш API),
-    // файл нужен после вытеснения из кэша и рестарта.
-    let t = Instant::now();
-    if let Err(e) = hot::put_plan_flights(conn, db_path, job_id, &table) {
-        println!("[worker] plan job {job_id}: рейсы не сохранены: {e}");
-    }
-    rep.timing("save", t.elapsed().as_secs_f64());
-    let _ = rep.flush_state();
-
-    // Котировки планировщику не нужны, они копят карту аэропорт → город и статистику:
-    // пишем после done, сбой тут не портит готовую джобу. Виртуальные рейсы — не котировки.
-    // Котировки в SQLite нужны только без склада (локально): из них карта аэропорт →
-    // город. Со складом карту ведёт склад в памяти — ничего не пишем.
-    if crate::lakestore::global().is_none() {
-        let flights = table.owned_tickets();
-        let mut qconn = hot::connect(db_path).map_err(CollectError::Failed)?;
-        if let Err(e) = hot::upsert_quotes(&mut qconn, &flights, &crate::dates::now_iso()) {
-            println!("[worker] plan job {job_id}: save quotes failed: {e}");
-        }
-    }
     Ok(())
+}
+
+/// Рейсы джобы заново из склада — таблица вытеснена из памяти или был рестарт (на диск
+/// рейсы джобы не пишутся: сбор из колонок склада — доли секунды).
+pub fn recollect(db_path: &str, pq: &PlanQuery) -> Result<FlightCols, CollectError> {
+    let stops = parse_stops(&pq.stops);
+    let (fetcher, workers) = make_fetcher();
+    let store = make_store();
+    let view = store_view(store.as_deref(), &stops);
+    let mut airport_city: HashMap<String, String> = (*crate::lakestore::airport_city_map(db_path)).clone();
+    collect_plan(&stops, fetcher.as_ref(), view.as_ref(), &crate::collect::NoProgress, &mut airport_city, workers)
 }

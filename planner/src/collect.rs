@@ -14,9 +14,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use crate::flightcols::{FlightCols, FlightColsBuilder};
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use crate::flightcols::{ts_ord, FlightCols, FlightColsBuilder, FlightSrc, Fl, JobCodes, Tp, NO_CODE};
 use crate::stops::{collect_view, leg_dates, Stop, MAX_JOB_FLIGHTS, PAGES_ANY, PAGES_CITY};
 use crate::ticket::Ticket;
 use crate::tickets::{coverage_for, Coverage, TicketStore, STORE_MAX_ROWS};
@@ -150,23 +152,22 @@ fn fetch_units<U: Send + Sync, R: Send>(units: &[U], workers: usize, fetch_unit:
 
 /// Порог hidden-city по группе key(f): цена лучшего ПРЯМОГО обычного рейса, если
 /// прямой есть, иначе лучшего вообще.
-fn threshold<K: std::hash::Hash + Eq>(flights: &[&Ticket], key: &dyn Fn(&Ticket) -> K) -> HashMap<K, f64> {
+fn threshold<K: std::hash::Hash + Eq>(flights: &[Fl], key: &dyn Fn(&Fl) -> K) -> HashMap<K, f64> {
     let mut best_direct: HashMap<K, f64> = HashMap::new();
     let mut best_any: HashMap<K, f64> = HashMap::new();
     for f in flights {
-        if f.hidden_city.is_some() {
+        if f.hidden {
             continue;
         }
-        let price = f.price();
         if f.transfers == 0 {
             let e = best_direct.entry(key(f)).or_insert(f64::INFINITY);
-            if price < *e {
-                *e = price;
+            if f.price < *e {
+                *e = f.price;
             }
         }
         let e = best_any.entry(key(f)).or_insert(f64::INFINITY);
-        if price < *e {
-            *e = price;
+        if f.price < *e {
+            *e = f.price;
         }
     }
     for (k, v) in best_direct {
@@ -175,50 +176,61 @@ fn threshold<K: std::hash::Hash + Eq>(flights: &[&Ticket], key: &dyn Fn(&Ticket)
     best_any
 }
 
-/// Пополняет карту аэропорт → город из концов билетов (PKX → BJS).
-fn airport_city_learn(flights: &[Ticket], airport_city: &mut HashMap<String, String>) {
+/// Карта аэропорт → город номерами кодов джобы.
+type ApCity = FxHashMap<u32, u32>;
+
+/// Пополняет карту аэропорт → город из концов рейсов (PKX → BJS).
+fn airport_city_learn(flights: &[Fl], ac: &mut ApCity) {
     for f in flights {
-        if f.hidden_city.is_some() {
+        if f.hidden {
             continue;
         }
-        for (apt, city) in [(&f.destination_airport, &f.destination), (&f.origin_airport, &f.origin)] {
-            if let (Some(a), Some(c)) = (apt.as_deref().filter(|s| !s.is_empty()), city.as_deref().filter(|s| !s.is_empty())) {
-                airport_city.entry(a.to_uppercase()).or_insert_with(|| c.to_uppercase());
+        for (apt, city) in [(f.dest_airport, f.dest), (f.orig_airport, f.orig_city)] {
+            if apt != NO_CODE && city != NO_CODE {
+                ac.entry(apt).or_insert(city);
             }
         }
     }
 }
 
-/// Виртуальные рейсы hidden-city из билетов с пересадками: для каждой пересадки, чей
+/// Пересадки рейса: у строки склада — готовыми колонками блока, у билета серии — из билета.
+fn tps_of(f: &Fl, codes: &JobCodes) -> Vec<Tp> {
+    match &f.src {
+        FlightSrc::Store(s) if codes.store_based => crate::lakestore::store_tps(&s.block, s.row as usize, codes),
+        // словарь не от склада (тесты, склад-заглушка): пересадки — из полного билета строки
+        FlightSrc::Store(s) => crate::lakestore::materialize(&[&crate::lakestore::StoreRow { hub: None, ..s.clone() }]).ok().and_then(|v| v.into_iter().next()).map(|t| crate::lakestore::ticket_tps(&t, codes)).unwrap_or_default(),
+        FlightSrc::Owned(t) => crate::lakestore::ticket_tps(t, codes),
+    }
+}
+
+/// Виртуальные рейсы hidden-city из рейсов с пересадками: для каждой пересадки, чей
 /// аэропорт hub_city(apt) распознан как остановка, — рейс «до этой пересадки», если он
 /// дешевле порога thresholds[key(рейс)] (без порога — все). Хаб ≠ город вылета.
-pub fn hidden_city_flights<K: std::hash::Hash + Eq>(
-    tickets: &[Ticket],
-    hub_city: &dyn Fn(&str) -> Option<String>,
+fn hidden_city_flights<K: std::hash::Hash + Eq>(
+    flights: &[Fl],
+    hub_city: &dyn Fn(u32) -> Option<u32>,
     thresholds: &HashMap<K, f64>,
-    key: &dyn Fn(&Ticket) -> K,
-    seen: &mut HashSet<String>,
-) -> Vec<Ticket> {
+    key: &dyn Fn(&Fl) -> K,
+    seen: &mut HashSet<u64>,
+    codes: &JobCodes,
+) -> Vec<Fl> {
     let mut out = Vec::new();
-    for t in tickets {
-        let Some(points) = t.transfer_points.as_ref().filter(|p| !p.is_empty()) else { continue };
-        if t.legs.is_empty() || t.legs.len() < points.len() + 1 {
+    for t in flights {
+        if t.hidden {
             continue;
         }
-        for (k, tp) in points.iter().enumerate() {
-            let code = tp.code.as_deref().unwrap_or("");
-            let Some(city) = hub_city(code) else { continue };
-            if city.is_empty() || Some(city.as_str()) == t.origin.as_deref() || Some(code) == t.origin_airport.as_deref() {
+        for (k, tp) in tps_of(t, codes).into_iter().enumerate() {
+            let Some(city) = hub_city(tp.ap) else { continue };
+            if city == NO_CODE || tp.ap == NO_CODE || city == t.orig_city || tp.ap == t.orig_airport {
                 continue;
             }
-            let v = t.virtual_flight(k, &city);
+            let v = virtual_fl(t, k, &tp, city, codes);
             if let Some(thr) = thresholds.get(&key(&v)) {
-                if v.price() >= *thr {
+                if v.price >= *thr {
                     continue;
                 }
             }
-            let fk = v.flight_key();
-            if !seen.insert(fk) {
+            if !seen.insert(v.key) {
                 continue;
             }
             out.push(v);
@@ -227,29 +239,37 @@ pub fn hidden_city_flights<K: std::hash::Hash + Eq>(
     out
 }
 
-fn side_matches(f: &Ticket, dest: bool, allow: &HashSet<String>) -> bool {
-    f.side_codes(dest).iter().any(|c| allow.contains(c))
+/// Виртуальный рейс «выходим на k-й пересадке в городе city» (как `Ticket::virtual_flight`).
+fn virtual_fl(t: &Fl, k: usize, tp: &Tp, city: u32, codes: &JobCodes) -> Fl {
+    let (arr_ts, arr_ord) = ts_ord(tp.arr);
+    let src = match &t.src {
+        FlightSrc::Store(s) => FlightSrc::Store(s.with_hub(k, &codes.name(city))),
+        FlightSrc::Owned(o) => FlightSrc::Owned(std::sync::Arc::new(o.virtual_flight(k, &codes.name(city)))),
+    };
+    Fl { dest: city, dest_airport: tp.ap, transfers: k as i64, duration: tp.dur, arr_ts, arr_ord, pts_min: tp.pmin, hidden: true, key: tp.key, src, ..t.clone() }
 }
 
-/// Город серии билета: город запроса X→ANY (search_origin), иначе город вылета.
-fn series_city(t: &Ticket) -> String {
-    t.search_origin.as_deref().filter(|s| !s.is_empty()).or(t.origin_city()).unwrap_or("").to_uppercase()
+/// Город или аэропорт прилёта в allow.
+fn side_matches(f: &Fl, allow: &FxHashSet<u32>) -> bool {
+    allow.contains(&f.dest) || allow.contains(&f.dest_airport)
 }
 
-fn dep_day(t: &Ticket) -> String {
-    t.search_date.as_deref().filter(|s| s.len() >= 10).or(t.departure_at.as_deref().filter(|s| s.len() >= 10)).map(|s| s[..10].to_string()).unwrap_or_default()
+/// Коды → номера джобы (неизвестные коды — нет ни одного рейса с ними, пропускаются).
+fn id_set(codes: &JobCodes, list: &[String]) -> FxHashSet<u32> {
+    list.iter().filter_map(|c| codes.lookup(c)).collect()
 }
 
 /// Рейсы склада, разложенные по единицам сбора (день, город запроса) — в порядке units.
-fn split_units(tickets: Vec<Ticket>, units: &[(String, String)]) -> Vec<Vec<Ticket>> {
-    let mut idx: HashMap<(String, String), usize> = HashMap::new();
+fn split_units(flights: Vec<Fl>, units: &[(String, String)], codes: &JobCodes) -> Vec<Vec<Fl>> {
+    let mut idx: HashMap<(i32, u32), usize> = HashMap::new();
     for (i, (day, a)) in units.iter().enumerate() {
-        idx.insert((day.clone(), a.to_uppercase()), i);
+        let (Some(d), Some(c)) = (chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok(), codes.lookup(&a.to_uppercase())) else { continue };
+        idx.insert((crate::lakestore::day_num(d), c), i);
     }
-    let mut out: Vec<Vec<Ticket>> = (0..units.len()).map(|_| Vec::new()).collect();
-    for t in tickets {
-        if let Some(&i) = idx.get(&(dep_day(&t), series_city(&t))) {
-            out[i].push(t);
+    let mut out: Vec<Vec<Fl>> = (0..units.len()).map(|_| Vec::new()).collect();
+    for f in flights {
+        if let Some(&i) = idx.get(&(f.day, f.series)) {
+            out[i].push(f);
         }
     }
     out
@@ -313,14 +333,17 @@ pub fn collect_plan(
 ) -> Result<FlightCols, CollectError> {
     let stops = collect_view(stops);
     let legs = stops.len().saturating_sub(1);
+    // словарь кодов джобы: коды склада — теми же номерами (строки склада копируются как есть)
+    let codes = Arc::new(JobCodes::new(&store.map(|v| v.store.code_names()).unwrap_or_default()));
+    let mut ac: ApCity = airport_city.iter().map(|(a, c)| (codes.id(a), codes.id(c))).filter(|(a, c)| *a != NO_CODE && *c != NO_CODE).collect();
     // рейсы плеча сразу уходят в колонки джобы (из склада — номерами строк)
-    let mut out = FlightColsBuilder::new(legs);
+    let mut out = FlightColsBuilder::new(legs, codes.clone());
     let mut done: Vec<bool> = vec![false; legs];
     // 1. плечи с конкретным городом хотя бы с одной стороны
     for i in 0..legs {
         if stops[i].is_cities() || stops[i + 1].is_cities() {
             progress.leg(i)?;
-            out.push_leg(i, collect_leg(&stops, i, fetch, store, progress, airport_city, workers)?);
+            out.push_leg(i, collect_leg(&stops, i, fetch, store, progress, &mut ac, workers, &codes)?);
             done[i] = true;
             check_total(&out)?;
         }
@@ -348,9 +371,13 @@ pub fn collect_plan(
         origins.sort();
         let mut dests: Vec<String> = if done.get(i + 1).copied().unwrap_or(false) { out.origin_codes(i + 1) } else { Vec::new() };
         dests.sort();
-        collect_any_any(&stops, i, view, &origins, &dests, progress, airport_city, &mut out)?;
+        collect_any_any(&stops, i, view, &origins, &dests, progress, &mut ac, &mut out)?;
         done[i] = true;
         check_total(&out)?;
+    }
+    // выученное по ходу сбора — обратно в карту вызывающего
+    for (a, c) in &ac {
+        airport_city.entry(codes.name(*a)).or_insert_with(|| codes.name(*c));
     }
     Ok(out.finish())
 }
@@ -364,11 +391,11 @@ fn check_total(out: &FlightColsBuilder) -> Result<(), CollectError> {
     Ok(())
 }
 
-/// Разбор рейсов плеча: дедуп по flight_key, фильтр стороны прилёта, карта аэропортов.
+/// Разбор рейсов плеча: дедуп по ключу рейса, фильтр стороны прилёта, карта аэропортов.
 struct LegAcc {
-    regular: Vec<Ticket>,
-    virtual_: Vec<Ticket>,
-    seen: HashSet<String>,
+    regular: Vec<Fl>,
+    virtual_: Vec<Fl>,
+    seen: HashSet<u64>,
 }
 
 impl LegAcc {
@@ -376,51 +403,54 @@ impl LegAcc {
         LegAcc { regular: Vec::new(), virtual_: Vec::new(), seen: HashSet::new() }
     }
 
-    fn keep(&mut self, flights: &[Ticket], allow_dest: Option<&HashSet<String>>, airport_city: &mut HashMap<String, String>) {
-        airport_city_learn(flights, airport_city);
+    fn keep(&mut self, flights: &[Fl], allow_dest: Option<&FxHashSet<u32>>, ac: &mut ApCity) {
+        airport_city_learn(flights, ac);
         for f in flights {
-            let key = f.flight_key();
-            if self.seen.contains(&key) {
+            if self.seen.contains(&f.key) {
                 continue;
             }
             if let Some(allow) = allow_dest {
-                if !side_matches(&f, true, allow) {
+                if !side_matches(f, allow) {
                     continue;
                 }
             }
-            self.seen.insert(key);
+            self.seen.insert(f.key);
             self.regular.push(f.clone());
         }
     }
 
     /// hidden-city для серий X→ANY: по дням, хаб — любой известный город (кроме города вылета),
     /// порог — лучший обычный рейс (origin, dest) того дня; allow — только хабы из списка.
-    fn hidden_any(&mut self, day_flights: &[(String, Vec<Ticket>)], airport_city: &HashMap<String, String>, allow: Option<&HashSet<String>>) {
-        let key = |f: &Ticket| (f.origin.clone().unwrap_or_default(), f.destination.clone().unwrap_or_default());
-        for (_day, flights) in day_flights {
-            let refs: Vec<&Ticket> = flights.iter().collect();
-            let thr = threshold(&refs, &key);
-            let hub = |apt: &str| -> Option<String> {
-                let city = airport_city.get(apt).cloned().unwrap_or_else(|| apt.to_string());
+    fn hidden_any(&mut self, day_flights: &[Vec<Fl>], ac: &ApCity, allow: Option<&FxHashSet<u32>>, codes: &JobCodes) {
+        let key = |f: &Fl| (f.orig_city, f.dest);
+        for flights in day_flights {
+            let thr = threshold(flights, &key);
+            let hub = |apt: u32| -> Option<u32> {
+                let city = ac.get(&apt).copied().unwrap_or(apt);
                 match allow {
-                    Some(a) if !a.contains(&city) && !a.contains(apt) => None,
+                    Some(a) if !a.contains(&city) && !a.contains(&apt) => None,
                     _ => Some(city),
                 }
             };
-            let got = hidden_city_flights(flights, &hub, &thr, &key, &mut self.seen);
+            let got = hidden_city_flights(flights, &hub, &thr, &key, &mut self.seen, codes);
             self.virtual_.extend(got);
         }
     }
 
-    fn finish(self) -> Vec<Ticket> {
+    fn finish(self) -> Vec<Fl> {
         let mut leg = self.regular;
         leg.extend(self.virtual_);
         leg
     }
 }
 
+fn from_tickets(tickets: Vec<Ticket>, codes: &JobCodes) -> Vec<Fl> {
+    tickets.into_iter().map(|t| Fl::from_ticket(t, codes)).collect()
+}
+
 /// Плечо с конкретным городом хотя бы с одной стороны.
-fn collect_leg(stops: &[Stop], i: usize, fetch: &dyn SeriesFetcher, store: Option<&StoreView>, progress: &dyn CollectProgress, airport_city: &mut HashMap<String, String>, workers: usize) -> Result<Vec<Ticket>, CollectError> {
+#[allow(clippy::too_many_arguments)]
+fn collect_leg(stops: &[Stop], i: usize, fetch: &dyn SeriesFetcher, store: Option<&StoreView>, progress: &dyn CollectProgress, ac: &mut ApCity, workers: usize, codes: &JobCodes) -> Result<Vec<Fl>, CollectError> {
     let (from, to) = (&stops[i], &stops[i + 1]);
     let dates = leg_dates(stops, i);
     let (d0, d1) = (dates[0].clone(), dates[dates.len() - 1].clone());
@@ -430,16 +460,16 @@ fn collect_leg(stops: &[Stop], i: usize, fetch: &dyn SeriesFetcher, store: Optio
         // единицы сбора (день, город вылета): из склада — те, что в его покрытии, остальные — сериями
         let units: Vec<(String, String)> = dates.iter().flat_map(|d| from.codes.iter().map(move |a| (d.clone(), a.clone()))).collect();
         let covered: Vec<bool> = units.iter().map(|(d, a)| store.map(|s| s.coverage.has_series(a, d)).unwrap_or(false)).collect();
-        let mut per_unit: Vec<Vec<Ticket>> = (0..units.len()).map(|_| Vec::new()).collect();
+        let mut per_unit: Vec<Vec<Fl>> = (0..units.len()).map(|_| Vec::new()).collect();
         if covered.iter().any(|&c| c) {
             let view = store.unwrap();
-            let got = view.store.tickets(&from.codes, &[], &[], &d0, &d1)?;
-            let split = split_units(got, &units);
+            let got = view.store.flights(&from.codes, &[], &d0, &d1, codes)?;
+            let split = split_units(got, &units, codes);
             let unit_pages = if to.is_cities() { to.codes.len().max(1) as i64 * PAGES_CITY + PAGES_ANY } else { PAGES_ANY };
             let mut hits = 0;
-            for (k, tickets) in split.into_iter().enumerate() {
+            for (k, flights) in split.into_iter().enumerate() {
                 if covered[k] {
-                    per_unit[k] = tickets;
+                    per_unit[k] = flights;
                     hits += 1;
                     tick_n(progress, unit_pages)?;
                 }
@@ -464,55 +494,57 @@ fn collect_leg(stops: &[Stop], i: usize, fetch: &dyn SeriesFetcher, store: Optio
             let got = fetch_units(&missing, workers, &unit)?;
             for (u, tickets) in missing.iter().zip(got) {
                 let k = units.iter().position(|x| x == u).unwrap();
-                per_unit[k] = tickets;
+                per_unit[k] = from_tickets(tickets, codes);
             }
         }
         if to.is_cities() {
             // пара городов: прямые A→B из всех билетов единицы, hidden-city — через хаб B дешевле
             // лучшего прямого того дня (порог по единице)
-            let allow_to: HashSet<String> = to.codes.iter().cloned().collect();
-            for tickets in per_unit {
-                let direct: Vec<Ticket> = tickets.iter().filter(|t| t.hidden_city.is_none() && side_matches(t, true, &allow_to)).cloned().collect();
-                let refs: Vec<&Ticket> = direct.iter().collect();
-                let thr = threshold(&refs, &|_| 0u8).get(&0).copied();
-                acc.keep(&direct, Some(&allow_to), airport_city);
-                airport_city_learn(&tickets, airport_city);
+            let allow_to = id_set(codes, &to.codes);
+            for flights in per_unit {
+                let direct: Vec<Fl> = flights.iter().filter(|t| !t.hidden && side_matches(t, &allow_to)).cloned().collect();
+                let thr = threshold(&direct, &|_| 0u8).get(&0).copied();
+                acc.keep(&direct, Some(&allow_to), ac);
+                airport_city_learn(&flights, ac);
                 let thresholds: HashMap<u8, f64> = match thr {
                     Some(t) if t != 0.0 => HashMap::from([(0u8, t)]),
                     _ => HashMap::new(),
                 };
-                let ac = &*airport_city;
-                let hub = |apt: &str| -> Option<String> {
-                    if allow_to.contains(apt) {
-                        return Some(apt.to_string());
+                let acr = &*ac;
+                let hub = |apt: u32| -> Option<u32> {
+                    if allow_to.contains(&apt) {
+                        return Some(apt);
                     }
-                    ac.get(apt).filter(|c| allow_to.contains(*c)).cloned()
+                    acr.get(&apt).filter(|c| allow_to.contains(*c)).copied()
                 };
-                let got = hidden_city_flights(&tickets, &hub, &thresholds, &|_| 0u8, &mut acc.seen);
+                let got = hidden_city_flights(&flights, &hub, &thresholds, &|_| 0u8, &mut acc.seen, codes);
                 acc.virtual_.extend(got);
             }
         } else {
             // город → любой: всё из X→ANY, hidden-city по дням
-            let mut day_flights: Vec<(String, Vec<Ticket>)> = Vec::new();
-            for ((day, _a), tickets) in units.iter().zip(per_unit) {
-                acc.keep(&tickets, None, airport_city);
+            let mut day_flights: Vec<(String, Vec<Fl>)> = Vec::new();
+            for ((day, _a), flights) in units.iter().zip(per_unit) {
+                acc.keep(&flights, None, ac);
                 match day_flights.iter_mut().find(|(d, _)| d == day) {
-                    Some((_, v)) => v.extend(tickets),
-                    None => day_flights.push((day.clone(), tickets)),
+                    Some((_, v)) => v.extend(flights),
+                    None => day_flights.push((day.clone(), flights)),
                 }
             }
-            acc.hidden_any(&day_flights, airport_city, None);
+            let groups: Vec<Vec<Fl>> = day_flights.into_iter().map(|(_, v)| v).collect();
+            acc.hidden_any(&groups, ac, None, codes);
         }
     } else {
         // любой → город: из склада по городу прилёта за дни с покрытием, остальные дни — сериями
-        let allow: HashSet<String> = to.codes.iter().cloned().collect();
+        let allow = id_set(codes, &to.codes);
         let covered: Vec<bool> = dates.iter().map(|d| store.map(|s| s.coverage.has_day(d)).unwrap_or(false)).collect();
         if covered.iter().any(|&c| c) {
             let view = store.unwrap();
-            let got = view.store.tickets(&[], &to.codes, &[], &d0, &d1)?;
+            let got = view.store.flights(&[], &to.codes, &d0, &d1, codes)?;
             let hits = covered.iter().filter(|&&c| c).count();
             // дней без покрытия в складе нет по определению — всё полученное относится к покрытым
-            acc.keep(&got, Some(&allow), airport_city);
+            // (allow — после выборки: коды города прилёта могли появиться в словаре только с ней)
+            let allow = id_set(codes, &to.codes);
+            acc.keep(&got, Some(&allow), ac);
             progress.store_hit(hits * to.codes.len().max(1));
             tick_n(progress, hits as i64 * to.codes.len().max(1) as i64 * PAGES_ANY)?;
         }
@@ -520,7 +552,9 @@ fn collect_leg(stops: &[Stop], i: usize, fetch: &dyn SeriesFetcher, store: Optio
         if !missing.is_empty() {
             let unit = |u: &(String, String)| run_series(fetch, None, Some(&u.1), &u.0, PAGES_ANY, progress);
             for got in fetch_units(&missing, workers, &unit)? {
-                acc.keep(&got, Some(&allow), airport_city);
+                let got = from_tickets(got, codes);
+                let allow = if allow.is_empty() { id_set(codes, &to.codes) } else { allow.clone() };
+                acc.keep(&got, Some(&allow), ac);
             }
         }
     }
@@ -535,33 +569,34 @@ fn collect_threads() -> usize {
 /// Плечо «любой → любой» из склада: вылеты из городов прилёта предыдущего плеча (если оно
 /// собрано), прилёты — в города вылета следующего (если собрано); хотя бы одна сторона задана.
 /// hidden-city — как у X→ANY, хабы — из dests. По дням: выборка дня → отбор → рейсы сразу
-/// в колонки джобы (`out`), полные билеты дня выбрасываются — плечо целиком в памяти не лежит.
+/// в колонки джобы (`out`).
 #[allow(clippy::too_many_arguments)]
-fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String], dests: &[String], progress: &dyn CollectProgress, airport_city: &mut HashMap<String, String>, out: &mut FlightColsBuilder) -> Result<(), CollectError> {
+fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String], dests: &[String], progress: &dyn CollectProgress, ac: &mut ApCity, out: &mut FlightColsBuilder) -> Result<(), CollectError> {
     let dates = leg_dates(stops, i);
     if origins.is_empty() && dests.is_empty() {
         return Err(CollectError::Failed(format!("плечо {} «любой → любой» не ограничено ни одной стороной", i + 1)));
     }
-    let allow: Option<HashSet<String>> = if dests.is_empty() { None } else { Some(dests.iter().cloned().collect()) };
+    let codes = out.codes().clone();
+    let allow: Option<FxHashSet<u32>> = if dests.is_empty() { None } else { Some(id_set(&codes, dests)) };
     // День = выборка склада → отбор → hidden-city; дни независимы (ключ дедупа содержит дату
     // вылета) — по `collect_threads()` дней параллельно, результат — по порядку дней.
-    let day_job = |day: &String, base: &HashMap<String, String>| -> Result<(Vec<Ticket>, usize, HashMap<String, String>), CollectError> {
+    let day_job = |day: &String, base: &ApCity| -> Result<(Vec<Fl>, usize, ApCity), CollectError> {
         // Известны города вылета: берём их X→ANY целиком и режем по dests сами (hidden-city
         // через хаб из dests требует всех билетов из origins). Известны только города
         // прилёта: срез склада по ним.
-        let flights = if origins.is_empty() { view.store.tickets(&[], dests, &[], day, day)? } else { view.store.tickets(origins, &[], &[], day, day)? };
+        let flights = if origins.is_empty() { view.store.flights(&[], dests, day, day, &codes)? } else { view.store.flights(origins, &[], day, day, &codes)? };
         let n = flights.len();
         let mut ac = base.clone();
         let mut acc = LegAcc::new();
         acc.keep(&flights, allow.as_ref(), &mut ac);
-        acc.hidden_any(&[(day.clone(), flights)], &ac, allow.as_ref());
+        acc.hidden_any(&[flights], &ac, allow.as_ref(), &codes);
         Ok((acc.finish(), n, ac))
     };
     let threads = collect_threads().min(dates.len()).max(1);
     let mut leg_total = 0usize;
     for batch in dates.chunks(threads) {
-        let base = airport_city.clone();
-        let results: Vec<Result<(Vec<Ticket>, usize, HashMap<String, String>), CollectError>> = if batch.len() == 1 {
+        let base = ac.clone();
+        let results: Vec<Result<(Vec<Fl>, usize, ApCity), CollectError>> = if batch.len() == 1 {
             vec![day_job(&batch[0], &base)]
         } else {
             std::thread::scope(|s| {
@@ -577,7 +612,7 @@ fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String
                 return Err(CollectError::Failed(format!("Слишком широкий запрос: плечо {side} за {}..{} даёт больше {STORE_MAX_ROWS} рейсов. Сузьте окна дат или задайте города вместо «любых».", dates[0], dates[dates.len() - 1])));
             }
             for (a, c) in learned {
-                airport_city.entry(a).or_insert(c);
+                ac.entry(a).or_insert(c);
             }
             out.push_leg(i, kept);
             if out.len() > MAX_JOB_FLIGHTS {

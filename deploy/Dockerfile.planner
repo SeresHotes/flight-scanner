@@ -7,7 +7,7 @@
 FROM rust:1-slim-bookworm AS build
 
 WORKDIR /src
-# rusqlite (bundled) и zstd собирают C-код — нужен компилятор.
+# zstd и mimalloc собирают C-код — нужен компилятор.
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 COPY planner/Cargo.toml planner/Cargo.lock ./
@@ -29,7 +29,7 @@ COPY core/geo.json core/city_names.json ./core/
 # обновлении, поэтому состав контейнеров меняется обычным деплоем (без cloud-init).
 COPY deploy/compose.prod.yml ./deploy/compose.prod.yml
 
-# Всё горячее состояние — на смонтированном томе /app/data (SQLite + plan_flights/ +
+# Всё горячее состояние — на смонтированном томе /app/data (plan_jobs/ + plan_flights/ +
 # data/airport_network.json для автокомплита). Пути совпадают с дефолтами (cwd=/app).
 ENV FLIGHT_DB=/app/data/flights.db \
     PORT=8000

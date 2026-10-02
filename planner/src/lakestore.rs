@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use crate::collect::CollectError;
 use crate::flightcols::{bool_col, f64_col, i64_col, str_col};
 use crate::ticket::{Baggage, Leg, Ticket, TransferPoint};
+use crate::flightcols::{ts_ord, FlightSrc, Fl, JobCodes, Tp};
 use crate::tickets::{TicketStore, STORE_MAX_ROWS};
 
 // ---------------------------------------------------------------- ключи файлов озера
@@ -104,6 +105,8 @@ const INT_FIELDS: [&str; 5] = ["duration", "duration_to", "transfers", "baggage_
 const S_SEARCH_DATE: usize = 2;
 const S_ORIGIN: usize = 3;
 const S_DEST: usize = 4;
+const S_ORIGIN_AP: usize = 5;
+const S_DEST_AP: usize = 6;
 const S_DEPARTURE: usize = 7;
 
 /// Билеты в схеме озера по колонкам (ровно то, что разбирает `tickets_from_batch`).
@@ -340,16 +343,124 @@ fn decode_cold(buf: &[u8], n: usize, sel: &[usize]) -> Result<LakeCols, String> 
 // ---------------------------------------------------------------- склад
 
 /// Серия склада «город вылета × день».
+#[derive(Default)]
 pub struct Block {
     /// Момент загрузки серии (unix-секунды, из имени файла озера).
     pub fetched: i64,
-    /// Горячие колонки: город вылета и прилёта билета — номера словаря кодов, цена.
+    /// Горячие колонки — всё, что нужно сбору джобы и стыковке, числами (сбор копирует
+    /// их, не разбирая билет): город вылета и прилёта, аэропорты — номера словаря кодов;
+    /// цена; вылет и прилёт — секунды «наивного» местного времени от `EPOCH` (NONE — нет);
+    /// длительность, пересадки, багаж, мин. стыковка; хэш ключа рейса (дедуп).
     pub origin: Vec<u32>,
     pub dest: Vec<u32>,
     pub price: Vec<f64>,
+    pub orig_ap: Vec<u32>,
+    pub dest_ap: Vec<u32>,
+    pub dep: Vec<i32>,
+    pub arr: Vec<i32>,
+    pub dur: Vec<i32>,
+    pub transfers: Vec<u8>,
+    /// бит 0 — багаж включён.
+    pub flags: Vec<u8>,
+    pub pts_min: Vec<i32>,
+    pub key: Vec<u64>,
+    /// Пересадки строки r (для hidden-city) — tp_*[tp_off[r]..tp_off[r + 1]]: аэропорт,
+    /// прилёт в него, длительность до него (с поясами), мин. стыковка до него, хэш ключа
+    /// виртуального рейса «выходим здесь».
+    pub tp_off: Vec<u32>,
+    pub tp_ap: Vec<u32>,
+    pub tp_arr: Vec<i32>,
+    pub tp_dur: Vec<i32>,
+    pub tp_pmin: Vec<i32>,
+    pub tp_key: Vec<u64>,
     /// Холодная часть: все поля билета (`encode_cold`), zstd; raw_len — её размер до сжатия.
     pub cold: Box<[u8]>,
     pub raw_len: u32,
+}
+
+/// Нет значения в i32-колонках блока.
+pub const NONE_I32: i32 = i32::MIN;
+/// Начало отсчёта секунд горячих колонок: 2020-01-01T00:00:00 (наивное время).
+pub const EPOCH: i64 = 1_577_836_800;
+
+/// Пересадки строки склада для hidden-city — готовыми колонками блока.
+pub fn store_tps(b: &Block, r: usize, codes: &JobCodes) -> Vec<Tp> {
+    let (a, z) = (b.tp_off[r] as usize, b.tp_off[r + 1] as usize);
+    let store = global();
+    let name = |id: u32| store.as_ref().map(|s| s.code_name(id)).unwrap_or_default();
+    (a..z)
+        .map(|k| Tp {
+            ap: codes.from_store(b.tp_ap[k], &name),
+            arr: (b.tp_arr[k] != NONE_I32).then(|| b.tp_arr[k] as i64 + EPOCH),
+            dur: b.tp_dur[k] as i64,
+            pmin: (b.tp_pmin[k] != NONE_I32).then(|| b.tp_pmin[k] as i64),
+            key: b.tp_key[k],
+        })
+        .collect()
+}
+
+/// Пересадки полного билета (серии коллектора) — те же поля, что у строки склада.
+pub fn ticket_tps(t: &Ticket, codes: &JobCodes) -> Vec<Tp> {
+    hot_row(t)
+        .tps
+        .into_iter()
+        .map(|(ap, arr, dur, pmin, key)| Tp { ap: codes.id(&ap), arr: (arr != NONE_I32).then(|| arr as i64 + EPOCH), dur: dur as i64, pmin: (pmin != NONE_I32).then(|| pmin as i64), key })
+        .collect()
+}
+
+/// Хэш ключа рейса (`Ticket::flight_key`) — дедуп рейсов в сборе.
+pub fn key_hash(key: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(key.as_bytes());
+    h.finish()
+}
+
+fn rel_secs(iso: Option<&str>) -> i32 {
+    iso.and_then(crate::dates::parse_naive).map(|dt| (crate::dates::naive_seconds(dt) as i64 - EPOCH) as i32).unwrap_or(NONE_I32)
+}
+
+fn opt_i32(v: Option<i64>) -> i32 {
+    v.map(|x| x.clamp(i32::MIN as i64 + 1, i32::MAX as i64) as i32).unwrap_or(NONE_I32)
+}
+
+/// Горячие поля строки из билета (то же, что строка колонок джобы `flightcols::row_of`).
+struct HotRow {
+    dep: i32,
+    arr: i32,
+    dur: i32,
+    transfers: u8,
+    flags: u8,
+    pts_min: i32,
+    key: u64,
+    /// (аэропорт, прилёт, длительность, мин. стыковка, ключ) по пересадкам.
+    tps: Vec<(String, i32, i32, i32, u64)>,
+}
+
+fn hot_row(t: &Ticket) -> HotRow {
+    let dep_iso = t.departure_at.clone().filter(|s| !s.is_empty());
+    let dep = rel_secs(dep_iso.as_deref());
+    let arr = if dep_iso.is_some() { rel_secs(t.arrival().as_deref()) } else { NONE_I32 };
+    let mut tps = Vec::new();
+    let points = t.transfer_points.as_deref().unwrap_or(&[]);
+    // как hidden_city_flights: виртуальные рейсы — только при сегментах на каждую пересадку
+    if !points.is_empty() && !t.legs.is_empty() && t.legs.len() >= points.len() + 1 {
+        for (k, tp) in points.iter().enumerate() {
+            let v = t.virtual_flight(k, "");
+            let v_arr = if dep_iso.is_some() { rel_secs(v.arrival().as_deref()) } else { NONE_I32 };
+            tps.push((tp.code.clone().unwrap_or_default(), v_arr, v.duration.unwrap_or(0) as i32, opt_i32(v.min_transfer_minutes()), key_hash(&v.flight_key())));
+        }
+    }
+    HotRow {
+        dep,
+        arr,
+        dur: t.duration.unwrap_or(0) as i32,
+        transfers: t.transfers.clamp(0, 255) as u8,
+        flags: t.baggage.as_ref().map(|b| b.included).unwrap_or(false) as u8,
+        pts_min: opt_i32(t.min_transfer_minutes()),
+        key: key_hash(&t.flight_key()),
+        tps,
+    }
 }
 
 impl Block {
@@ -362,7 +473,7 @@ impl Block {
     }
 
     fn bytes(&self) -> usize {
-        self.dest.len() * 16 + self.cold.len() + 64
+        self.len() * (4 * 4 + 8 + 4 * 4 + 2 + 8 + 4) + self.tp_ap.len() * (4 * 4 + 8) + self.cold.len() + 64
     }
 
     fn rows(&self, sel: &[usize]) -> Result<LakeCols, String> {
@@ -585,20 +696,43 @@ impl LakeStore {
                 stats.skipped_days += 1;
                 continue;
             }
-            let (o, d) = {
+            let tickets: Vec<Ticket> = rows.iter().map(|&r| cols.ticket(r)).collect();
+            let hot: Vec<HotRow> = tickets.iter().map(hot_row).collect();
+            let mut b = Block { fetched, price: rows.iter().map(|&r| cols.price[r].unwrap_or(f64::INFINITY)).collect(), ..Block::default() };
+            {
                 let mut codes = self.codes.write().unwrap();
                 let up = |s: Option<&str>| s.map(|s| s.to_uppercase()).unwrap_or_default();
-                let o: Vec<u32> = rows.iter().map(|&r| codes.id(&up(cols.s(S_ORIGIN, r)))).collect();
-                let d: Vec<u32> = rows.iter().map(|&r| codes.id(&up(cols.s(S_DEST, r)))).collect();
-                (o, d)
-            };
-            let price = rows.iter().map(|&r| cols.price[r].unwrap_or(f64::INFINITY)).collect();
+                b.tp_off.push(0);
+                for (k, &r) in rows.iter().enumerate() {
+                    b.origin.push(codes.id(&up(cols.s(S_ORIGIN, r))));
+                    b.dest.push(codes.id(&up(cols.s(S_DEST, r))));
+                    b.orig_ap.push(codes.id(&up(cols.s(S_ORIGIN_AP, r))));
+                    b.dest_ap.push(codes.id(&up(cols.s(S_DEST_AP, r))));
+                    let h = &hot[k];
+                    b.dep.push(h.dep);
+                    b.arr.push(h.arr);
+                    b.dur.push(h.dur);
+                    b.transfers.push(h.transfers);
+                    b.flags.push(h.flags);
+                    b.pts_min.push(h.pts_min);
+                    b.key.push(h.key);
+                    for (ap, arr, dur, pmin, key) in &h.tps {
+                        b.tp_ap.push(codes.id(ap));
+                        b.tp_arr.push(*arr);
+                        b.tp_dur.push(*dur);
+                        b.tp_pmin.push(*pmin);
+                        b.tp_key.push(*key);
+                    }
+                    b.tp_off.push(b.tp_ap.len() as u32);
+                }
+            }
+            drop(tickets);
             let raw = encode_cold(cols, &rows);
-            let raw_len = raw.len() as u32;
-            let cold = zstd::bulk::compress(&raw, 3).map_err(|e| format!("zstd: {e}"))?.into_boxed_slice();
+            b.raw_len = raw.len() as u32;
+            b.cold = zstd::bulk::compress(&raw, 3).map_err(|e| format!("zstd: {e}"))?.into_boxed_slice();
             stats.rows += rows.len();
             stats.days += 1;
-            blocks.push((key, Arc::new(Block { fetched, origin: o, dest: d, price, cold, raw_len })));
+            blocks.push((key, Arc::new(b)));
         }
         if !blocks.is_empty() {
             let mut series = self.series.write().unwrap();
@@ -681,45 +815,12 @@ impl LakeStore {
         if (!origins.is_empty() && o_ids.is_empty()) || (!dests.is_empty() && d_ids.is_empty()) {
             return Ok(Vec::new());
         }
-        // горячий проход: блоки и строки под фильтры городов (без разбора)
-        let mut picked: Vec<(i32, Arc<Block>, Vec<usize>)> = Vec::new();
-        let mut total = 0usize;
-        {
-            let series = self.series.read().unwrap();
-            let range = series.range((day_num(from), 0)..=(day_num(to), u32::MAX));
-            for ((day, _), b) in range {
-                let sel: Vec<usize> = (0..b.len()).filter(|&r| (o_ids.is_empty() || o_ids.contains(&b.origin[r])) && (d_ids.is_empty() || d_ids.contains(&b.dest[r]))).collect();
-                if sel.is_empty() {
-                    continue;
-                }
-                total += sel.len();
-                if total >= limit {
-                    return Err(format!("больше {limit} строк"));
-                }
-                picked.push((*day, b.clone(), sel));
-            }
-        }
-        // порядок — день, город вылета, цена (как ORDER BY прежнего склада) — по горячим
-        // колонкам до разбора: сортируются номера, а не билеты
-        let rank: FxHashMap<u32, u32> = {
-            let codes = self.codes.read().unwrap();
-            let mut ids: Vec<u32> = picked.iter().flat_map(|(_, b, sel)| sel.iter().map(move |&r| b.origin[r])).collect();
-            ids.sort_unstable();
-            ids.dedup();
-            ids.sort_by(|a, b| codes.names[*a as usize].cmp(&codes.names[*b as usize]));
-            ids.into_iter().enumerate().map(|(k, id)| (id, k as u32)).collect()
-        };
-        let mut order: Vec<(i32, u32, f64, u32, u32)> = Vec::with_capacity(total);
-        for (k, (day, b, sel)) in picked.iter().enumerate() {
-            for (pos, &r) in sel.iter().enumerate() {
-                order.push((*day, rank[&b.origin[r]], b.price[r], k as u32, pos as u32));
-            }
-        }
-        order.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)));
+        let (picked, order) = self.select_rows(&o_ids, &d_ids, from, to, limit)?;
         let via_up: Vec<String> = via.iter().map(|v| v.to_uppercase()).collect();
         let mut decoded: Vec<Vec<Option<Ticket>>> = Vec::with_capacity(picked.len());
         for (_, b, sel) in &picked {
-            let cols = b.rows(sel)?;
+            let sel: Vec<usize> = sel.iter().map(|&r| r as usize).collect();
+            let cols = b.rows(&sel)?;
             decoded.push((0..cols.n).map(|r| {
                 let mut t = cols.ticket(r);
                 t.src = Some(StoreRow { block: b.clone(), row: sel[r] as u32, hub: None });
@@ -733,6 +834,103 @@ impl LakeStore {
             }).collect());
         }
         Ok(order.into_iter().filter_map(|(_, _, _, k, pos)| decoded[k as usize][pos as usize].take()).collect())
+    }
+
+    /// Горячий проход выборки: блоки и строки под фильтры городов (номера кодов склада),
+    /// без разбора; порядок — день, город вылета (по имени), цена, как ORDER BY прежнего
+    /// склада. Больше `limit` строк — ошибка до любого разбора.
+    #[allow(clippy::type_complexity)]
+    fn select_rows(&self, o_ids: &[u32], d_ids: &[u32], from: NaiveDate, to: NaiveDate, limit: usize) -> Result<(Vec<(i32, Arc<Block>, Vec<u32>)>, Vec<(i32, u32, f64, u32, u32)>), String> {
+        let mut picked: Vec<(i32, Arc<Block>, Vec<u32>)> = Vec::new();
+        let mut total = 0usize;
+        {
+            let series = self.series.read().unwrap();
+            let range = series.range((day_num(from), 0)..=(day_num(to), u32::MAX));
+            for ((day, _), b) in range {
+                let sel: Vec<u32> = (0..b.len()).filter(|&r| (o_ids.is_empty() || o_ids.contains(&b.origin[r])) && (d_ids.is_empty() || d_ids.contains(&b.dest[r]))).map(|r| r as u32).collect();
+                if sel.is_empty() {
+                    continue;
+                }
+                total += sel.len();
+                if total >= limit {
+                    return Err(format!("больше {limit} строк"));
+                }
+                picked.push((*day, b.clone(), sel));
+            }
+        }
+        let rank: FxHashMap<u32, u32> = {
+            let codes = self.codes.read().unwrap();
+            let mut ids: Vec<u32> = picked.iter().flat_map(|(_, b, sel)| sel.iter().map(move |&r| b.origin[r as usize])).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids.sort_by(|a, b| codes.names[*a as usize].cmp(&codes.names[*b as usize]));
+            ids.into_iter().enumerate().map(|(k, id)| (id, k as u32)).collect()
+        };
+        let mut order: Vec<(i32, u32, f64, u32, u32)> = Vec::with_capacity(total);
+        for (k, (day, b, sel)) in picked.iter().enumerate() {
+            for (pos, &r) in sel.iter().enumerate() {
+                order.push((*day, rank[&b.origin[r as usize]], b.price[r as usize], k as u32, pos as u32));
+            }
+        }
+        order.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)));
+        Ok((picked, order))
+    }
+
+    /// Номера кодов склада по списку кодов (неизвестные пропускаются).
+    fn ids_of(&self, list: &[String]) -> Vec<u32> {
+        let codes = self.codes.read().unwrap();
+        list.iter().filter_map(|c| codes.ix.get(&c.to_uppercase()).copied()).collect()
+    }
+
+    pub fn code_names(&self) -> Vec<String> {
+        self.codes.read().unwrap().names.clone()
+    }
+
+    fn code_name(&self, id: u32) -> String {
+        self.codes.read().unwrap().names.get(id as usize).cloned().unwrap_or_default()
+    }
+
+    /// Рейсы сбора строками склада — колонки копируются, билеты не разбираются; порядок —
+    /// как у `select`.
+    pub fn select_flights(&self, origins: &[String], dests: &[String], from: NaiveDate, to: NaiveDate, limit: usize, codes: &JobCodes) -> Result<Vec<Fl>, String> {
+        let (o_ids, d_ids) = (self.ids_of(origins), self.ids_of(dests));
+        if (!origins.is_empty() && o_ids.is_empty()) || (!dests.is_empty() && d_ids.is_empty()) {
+            return Ok(Vec::new());
+        }
+        let (picked, order) = self.select_rows(&o_ids, &d_ids, from, to, limit)?;
+        let name = |id: u32| self.code_name(id);
+        let c = |id: u32| codes.from_store(id, &name);
+        let mut out = Vec::with_capacity(order.len());
+        for (day, _, _, k, pos) in order {
+            let (_, b, sel) = &picked[k as usize];
+            let r = sel[pos as usize] as usize;
+            let secs = |v: i32| (v != NONE_I32).then(|| v as i64 + EPOCH);
+            let (dep_ts, dep_ord) = ts_ord(secs(b.dep[r]));
+            let (arr_ts, arr_ord) = ts_ord(secs(b.arr[r]));
+            out.push(Fl {
+                leg: 0,
+                orig_city: c(b.origin[r]),
+                orig_airport: c(b.orig_ap[r]),
+                dest: c(b.dest[r]),
+                dest_airport: c(b.dest_ap[r]),
+                price: if b.price[r].is_finite() { b.price[r] } else { 0.0 },
+                transfers: b.transfers[r] as i64,
+                duration: b.dur[r] as i64,
+                hidden: false,
+                bag_incl: b.flags[r] & 1 != 0,
+                pts_min: (b.pts_min[r] != NONE_I32).then(|| b.pts_min[r] as i64),
+                layover: None,
+                dep_ts,
+                arr_ts,
+                dep_ord,
+                arr_ord,
+                key: b.key[r],
+                day,
+                series: c(b.origin[r]),
+                src: FlightSrc::Store(StoreRow { block: b.clone(), row: r as u32, hub: None }),
+            });
+        }
+        Ok(out)
     }
 
     /// Серии за дни [from, to]: (город, день) → билетов; пустой список городов — все.
@@ -803,19 +1001,7 @@ impl LakeStore {
                 w.write_all(&day.to_le_bytes())?;
                 w.write_all(&origin.to_le_bytes())?;
                 w.write_all(&b.fetched.to_le_bytes())?;
-                w.write_all(&(b.len() as u32).to_le_bytes())?;
-                for v in &b.origin {
-                    w.write_all(&v.to_le_bytes())?;
-                }
-                for v in &b.dest {
-                    w.write_all(&v.to_le_bytes())?;
-                }
-                for v in &b.price {
-                    w.write_all(&v.to_le_bytes())?;
-                }
-                w.write_all(&b.raw_len.to_le_bytes())?;
-                w.write_all(&(b.cold.len() as u32).to_le_bytes())?;
-                w.write_all(&b.cold)?;
+                b.write_cols(&mut w)?;
             }
             let airports = self.airport_city();
             w.write_all(&(airports.len() as u32).to_le_bytes())?;
@@ -863,25 +1049,14 @@ impl LakeStore {
             let day = u32_(&mut r)? as i32;
             let origin = u32_(&mut r)?;
             let fetched = u64_(&mut r)? as i64;
-            let n = u32_(&mut r)? as usize;
-            let read_u32s = |r: &mut BufReader<std::fs::File>| -> std::io::Result<Vec<u32>> {
-                let mut buf = vec![0u8; n * 4];
-                r.read_exact(&mut buf)?;
-                Ok(buf.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect())
-            };
-            let o = read_u32s(&mut r)?;
-            let d = read_u32s(&mut r)?;
-            let mut buf = vec![0u8; n * 8];
-            r.read_exact(&mut buf)?;
-            let price: Vec<f64> = buf.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
-            let raw_len = u32_(&mut r)?;
-            let mut cold = vec![0u8; u32_(&mut r)? as usize];
-            r.read_exact(&mut cold)?;
-            if o.iter().chain(&d).chain(std::iter::once(&origin)).any(|&c| c as usize >= codes.names.len()) {
+            let mut b = Block::read_cols(&mut r)?;
+            b.fetched = fetched;
+            let ncodes = codes.names.len();
+            if [&b.origin, &b.dest, &b.orig_ap, &b.dest_ap, &b.tp_ap].iter().any(|v| v.iter().any(|&c| c as usize >= ncodes)) || origin as usize >= ncodes {
                 return Err(bad("номер кода вне словаря"));
             }
             if day >= cut {
-                series.insert((day, origin), Arc::new(Block { fetched, origin: o, dest: d, price, cold: cold.into_boxed_slice(), raw_len }));
+                series.insert((day, origin), Arc::new(b));
             }
         }
         let mut airports = HashMap::new();
@@ -903,7 +1078,110 @@ impl LakeStore {
     }
 }
 
-const SNAP_MAGIC: &[u8; 8] = b"FSTORE02";
+const SNAP_MAGIC: &[u8; 8] = b"FSTORE03";
+
+/// Колонки блока в снапшоте: длина + значения little-endian.
+trait Le: Sized + Copy {
+    const N: usize;
+    fn put(self, out: &mut Vec<u8>);
+    fn get(b: &[u8]) -> Self;
+}
+macro_rules! le {
+    ($($t:ty),*) => {$(
+        impl Le for $t {
+            const N: usize = std::mem::size_of::<$t>();
+            fn put(self, out: &mut Vec<u8>) {
+                out.extend_from_slice(&self.to_le_bytes());
+            }
+            fn get(b: &[u8]) -> Self {
+                <$t>::from_le_bytes(b.try_into().unwrap())
+            }
+        }
+    )*};
+}
+le!(u8, u32, i32, u64, f64);
+
+fn write_col<T: Le>(w: &mut impl Write, v: &[T]) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(8 + v.len() * T::N);
+    (v.len() as u64).put(&mut buf);
+    for &x in v {
+        x.put(&mut buf);
+    }
+    w.write_all(&buf)
+}
+
+fn read_col<T: Le>(r: &mut impl Read) -> std::io::Result<Vec<T>> {
+    let mut n = [0u8; 8];
+    r.read_exact(&mut n)?;
+    let n = u64::from_le_bytes(n) as usize;
+    if n > 1 << 30 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "колонка снапшота слишком длинная"));
+    }
+    let mut buf = vec![0u8; n * T::N];
+    r.read_exact(&mut buf)?;
+    Ok(buf.chunks_exact(T::N).map(T::get).collect())
+}
+
+impl Block {
+    fn write_cols(&self, w: &mut impl Write) -> std::io::Result<()> {
+        write_col(w, &self.origin)?;
+        write_col(w, &self.dest)?;
+        write_col(w, &self.price)?;
+        write_col(w, &self.orig_ap)?;
+        write_col(w, &self.dest_ap)?;
+        write_col(w, &self.dep)?;
+        write_col(w, &self.arr)?;
+        write_col(w, &self.dur)?;
+        write_col(w, &self.transfers)?;
+        write_col(w, &self.flags)?;
+        write_col(w, &self.pts_min)?;
+        write_col(w, &self.key)?;
+        write_col(w, &self.tp_off)?;
+        write_col(w, &self.tp_ap)?;
+        write_col(w, &self.tp_arr)?;
+        write_col(w, &self.tp_dur)?;
+        write_col(w, &self.tp_pmin)?;
+        write_col(w, &self.tp_key)?;
+        write_col(w, &[self.raw_len])?;
+        write_col(w, &self.cold)
+    }
+
+    fn read_cols(r: &mut impl Read) -> std::io::Result<Block> {
+        let mut b = Block {
+            origin: read_col(r)?,
+            dest: read_col(r)?,
+            price: read_col(r)?,
+            orig_ap: read_col(r)?,
+            dest_ap: read_col(r)?,
+            dep: read_col(r)?,
+            arr: read_col(r)?,
+            dur: read_col(r)?,
+            transfers: read_col(r)?,
+            flags: read_col(r)?,
+            pts_min: read_col(r)?,
+            key: read_col(r)?,
+            tp_off: read_col(r)?,
+            tp_ap: read_col(r)?,
+            tp_arr: read_col(r)?,
+            tp_dur: read_col(r)?,
+            tp_pmin: read_col(r)?,
+            tp_key: read_col(r)?,
+            ..Block::default()
+        };
+        b.raw_len = read_col::<u32>(r)?.first().copied().unwrap_or(0);
+        b.cold = read_col::<u8>(r)?.into_boxed_slice();
+        let n = b.origin.len();
+        let t = b.tp_ap.len();
+        let ok = [b.dest.len(), b.price.len(), b.orig_ap.len(), b.dest_ap.len(), b.dep.len(), b.arr.len(), b.dur.len(), b.transfers.len(), b.flags.len(), b.pts_min.len(), b.key.len()].iter().all(|&l| l == n)
+            && b.tp_off.len() == n + 1
+            && [b.tp_arr.len(), b.tp_dur.len(), b.tp_pmin.len(), b.tp_key.len()].iter().all(|&l| l == t)
+            && b.tp_off.last().map(|&x| x as usize == t).unwrap_or(false);
+        if !ok {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "блок снапшота: длины колонок не сходятся"));
+        }
+        Ok(b)
+    }
+}
 
 /// Склад процесса (задаётся на старте, если есть озеро).
 static GLOBAL: OnceLock<Arc<LakeStore>> = OnceLock::new();
@@ -921,7 +1199,7 @@ fn parse_day(s: &str) -> Result<NaiveDate, CollectError> {
 }
 
 /// Карта аэропорт → город: со складом — из памяти склада (строится из концов билетов при
-/// загрузке, лежит в снапшоте); без склада (локально, без озера) — из `quotes` в SQLite.
+/// загрузке, лежит в снапшоте); без склада (локально, без озера) — пустая, её дополняет сбор.
 pub fn airport_city_map(db_path: &str) -> Arc<HashMap<String, String>> {
     match global() {
         Some(store) if store.is_ready() => store.airport_city_arc(),
@@ -954,6 +1232,22 @@ impl TicketStore for SharedStore {
     fn coverage_days(&self, from: &str, to: &str) -> Result<HashMap<String, i64>, CollectError> {
         self.0.wait_ready()?;
         Ok(self.0.days_in(parse_day(from)?, parse_day(to)?))
+    }
+
+    fn flights(&self, origins: &[String], dests: &[String], from: &str, to: &str, codes: &JobCodes) -> Result<Vec<Fl>, CollectError> {
+        self.0.wait_ready()?;
+        self.0.select_flights(origins, dests, parse_day(from)?, parse_day(to)?, STORE_MAX_ROWS, codes).map_err(|e| {
+            if e.starts_with("больше") {
+                let side = if !origins.is_empty() { format!("из {} городов", origins.len()) } else { format!("в {} городов", dests.len()) };
+                CollectError::Failed(format!("Слишком широкий запрос: плечо {side} за {from}..{to} даёт больше {STORE_MAX_ROWS} рейсов. Сузьте окна дат или задайте города вместо «любых»."))
+            } else {
+                CollectError::Failed(format!("склад билетов: {e}"))
+            }
+        })
+    }
+
+    fn code_names(&self) -> Vec<String> {
+        self.0.code_names()
     }
 }
 
@@ -1177,5 +1471,156 @@ mod bench {
         let t = std::time::Instant::now();
         let got = s.select(&cities[..10], &[], &[], cutoff, cutoff + chrono::Duration::days(6), 1_000_000).unwrap();
         println!("10 городов → ANY за неделю: {} билетов за {:.1} мс", got.len(), t.elapsed().as_secs_f64() * 1e3);
+    }
+}
+
+/// Сбор из колонок склада против сбора из полных билетов: одни и те же билеты, одни и те
+/// же рейсы джобы (все поля стыковки) и маршруты.
+#[cfg(test)]
+mod equivalence {
+    use super::tests::cols;
+    use super::*;
+    use crate::collect::{collect_plan, store_view, NoProgress, SeriesFetcher, SeriesResult};
+    use crate::flightcols::FlightCols;
+    use crate::planquery::PlanQuery;
+    use crate::search::{build_ctx, search_cheapest};
+    use crate::stops::parse_stops;
+    use crate::ticket::{Baggage, Leg, TransferPoint};
+
+    /// Тот же склад, но рейсы — через полные билеты (путь по умолчанию трейта).
+    struct ViaTickets(SharedStore);
+    impl TicketStore for ViaTickets {
+        fn tickets(&self, o: &[String], d: &[String], v: &[String], from: &str, to: &str) -> Result<Vec<Ticket>, CollectError> {
+            self.0.tickets(o, d, v, from, to)
+        }
+        fn coverage(&self, o: &[String], from: &str, to: &str) -> Result<HashMap<(String, String), i64>, CollectError> {
+            self.0.coverage(o, from, to)
+        }
+        fn coverage_days(&self, from: &str, to: &str) -> Result<HashMap<String, i64>, CollectError> {
+            self.0.coverage_days(from, to)
+        }
+    }
+
+    struct NoSeries;
+    impl SeriesFetcher for NoSeries {
+        fn fetch(&self, _o: Option<&str>, _d: Option<&str>, _day: &str, _p: i64, _cb: &dyn Fn(i64, i64)) -> Result<SeriesResult, CollectError> {
+            Ok(SeriesResult { tickets: Vec::new(), pages: 1, exhausted: true, error: false, cached: true })
+        }
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n.max(1)
+        }
+    }
+
+    const CITIES: [&str; 8] = ["MOW", "IST", "SEL", "TAS", "DXB", "BKK", "ALA", "TBS"];
+
+    fn random_ticket(rng: &mut Rng, o: usize, day: &str) -> Ticket {
+        let mut d = rng.below(CITIES.len() as u64) as usize;
+        if d == o {
+            d = (d + 1) % CITIES.len();
+        }
+        let ap = |c: &str, k: u64| if k == 0 { c.to_string() } else { format!("{}{}", &c[..2], k) };
+        let hubs: Vec<usize> = (0..rng.below(3)).map(|_| rng.below(CITIES.len() as u64) as usize).filter(|&h| h != o && h != d).collect();
+        let mut chain = vec![ap(CITIES[o], rng.below(2))];
+        chain.extend(hubs.iter().map(|&h| ap(CITIES[h], rng.below(2))));
+        chain.push(ap(CITIES[d], rng.below(2)));
+        let h0 = 1 + rng.below(12);
+        let tz = ["+03:00", "+09:00", "Z", "+05:00"][rng.below(4) as usize];
+        let legs: Vec<Leg> = chain
+            .windows(2)
+            .enumerate()
+            .map(|(k, w)| Leg {
+                origin: Some(w[0].clone()),
+                destination: Some(w[1].clone()),
+                departure_at: Some(format!("{day}T{:02}:{:02}:00{tz}", h0 + 4 * k as u64, rng.below(60))),
+                arrival_at: (rng.below(10) > 0).then(|| format!("{day}T{:02}:{:02}:00{tz}", h0 + 4 * k as u64 + 2, rng.below(60))),
+                flight_number: Some(format!("{}", rng.below(50))),
+                carrier: Some("SU".into()),
+            })
+            .collect();
+        let points: Vec<TransferPoint> = hubs.iter().enumerate().map(|(k, _)| TransferPoint { code: Some(chain[k + 1].clone()), to: Some(chain[k + 1].clone()), minutes: (rng.below(5) > 0).then(|| 40 + rng.below(600) as i64), ..Default::default() }).collect();
+        let mut t = super::tests::ticket(CITIES[o], CITIES[d], day, (1000 + rng.below(30) * 500) as f64);
+        t.origin_airport = Some(chain[0].clone());
+        t.destination_airport = Some(chain[chain.len() - 1].clone());
+        t.departure_at = legs[0].departure_at.clone();
+        t.arrival_at = if rng.below(4) == 0 { None } else { legs.last().unwrap().arrival_at.clone() };
+        t.duration = Some(100 + rng.below(900) as i64);
+        t.transfers = hubs.len() as i64;
+        t.chain = chain;
+        t.legs = legs;
+        t.transfer_points = Some(points);
+        t.baggage = Some(Baggage { known: true, included: rng.below(2) == 0, pieces: None, kg: None });
+        t
+    }
+
+    fn row(c: &FlightCols, r: usize) -> String {
+        format!(
+            "{} {}/{}>{}/{} {} t{} d{} h{} b{} p{:?} l{:?} {} {} {} {}",
+            c.leg[r], c.orig_city(r), c.orig_airport(r), c.dest(r), c.dest_airport(r), c.price[r], c.transfers[r], c.duration[r], c.hidden[r], c.bag_incl[r], c.pts_min[r], c.layover[r], c.dep_ts[r], c.arr_ts[r], c.dep_ord[r], c.arr_ord[r]
+        )
+    }
+
+    #[test]
+    fn store_columns_match_tickets() {
+        let mut rng = Rng(0x2545F4914F6CDD1D);
+        let s = Arc::new(LakeStore::new());
+        let cutoff = ymd("2026-10-01").unwrap();
+        for day in ["2026-11-01", "2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"] {
+            for (o, city) in CITIES.iter().enumerate() {
+                let ts: Vec<Ticket> = (0..20 + rng.below(30)).map(|_| random_ticket(&mut rng, o, day)).collect();
+                let key = format!("tickets/fetched=2026-10-02/origin={city}/{city}-ANY__{day}__08-00-00Z.parquet");
+                s.apply(&parse_file_key(&key).unwrap(), &cols(&ts), cutoff).unwrap();
+            }
+        }
+        s.set_ready();
+        let st = |kind: &str, codes: &[&str], a: &str, b: &str| serde_json::json!({"kind": kind, "codes": codes, "window": [a, b], "radiusKm": 0});
+        let scenarios = vec![
+            vec![st("cities", &["MOW"], "", ""), st("cities", &["IST"], "2026-11-01", "2026-11-03"), st("cities", &["MOW"], "", "")],
+            vec![st("cities", &["MOW"], "", ""), st("any", &[], "2026-11-01", "2026-11-02"), st("cities", &["MOW"], "", "")],
+            vec![st("cities", &["MOW"], "", ""), st("any", &[], "2026-11-01", "2026-11-02"), st("any", &[], "2026-11-03", "2026-11-04"), st("cities", &["MOW"], "", "")],
+            vec![st("any", &[], "2026-11-01", "2026-11-01"), st("cities", &["SEL"], "2026-11-02", "2026-11-04"), st("cities", &["TAS"], "", "")],
+            vec![st("cities", &["MOW", "ALA"], "", ""), st("cities", &["IST", "TBS"], "2026-11-01", "2026-11-02"), st("cities", &["DXB"], "2026-11-04", "2026-11-05"), st("cities", &["MOW"], "", "")],
+        ];
+        for stops_json in scenarios {
+            let n = stops_json.len();
+            let q = serde_json::json!({"stops": stops_json, "cities": vec![serde_json::json!({}); n], "legs": vec![serde_json::json!({}); n - 1], "tripLength": [0, null]});
+            let pq = PlanQuery::from_value(&q).unwrap();
+            let stops = parse_stops(&pq.stops);
+            let run = |store: &dyn TicketStore| -> FlightCols {
+                let view = store_view(Some(store), &stops);
+                let mut ac = HashMap::new();
+                collect_plan(&stops, &NoSeries, view.as_ref(), &NoProgress, &mut ac, 1).unwrap()
+            };
+            let fast = run(&SharedStore(s.clone()));
+            let slow = run(&ViaTickets(SharedStore(s.clone())));
+            let mut a: Vec<String> = (0..fast.len()).map(|r| row(&fast, r)).collect();
+            let mut b: Vec<String> = (0..slow.len()).map(|r| row(&slow, r)).collect();
+            a.sort();
+            b.sort();
+            assert!(!a.is_empty(), "{q}");
+            assert_eq!(a, b, "{q}");
+            assert!(fast.hidden.iter().any(|&h| h), "есть hidden-city: {q}");
+            // полные рейсы строк из колонок — те же, что из билетов
+            for r in (0..fast.len()).step_by(7) {
+                let f = fast.flight(r);
+                assert_eq!(f.destination.as_deref().map(str::to_uppercase).unwrap_or_default(), fast.dest(r), "{q}");
+                assert_eq!(f.hidden_city.is_some(), fast.hidden[r]);
+            }
+            let price = |t: &FlightCols| -> Vec<f64> {
+                let ctx = build_ctx(&stops, t, Some(&pq));
+                let mut check = |_: usize| Ok(());
+                search_cheapest(&ctx, 300, Some(&pq), &mut check).unwrap().iter().map(|c| c.iter().map(|&fi| t.price[fi]).sum()).collect()
+            };
+            assert_eq!(price(&fast), price(&slow), "{q}");
+        }
     }
 }

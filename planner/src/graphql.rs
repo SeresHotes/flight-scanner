@@ -1,6 +1,6 @@
 //! Прямой клиент GraphQL Data API Travelpayouts (`prices_one_way`) — локальный запуск
 //! без коллектора (зеркало `core.graphql_api`): страницы по 400, 60 запросов/мин,
-//! нормализация билета в тот же словарь, что и озеро коллектора; кэш серий в SQLite
+//! нормализация билета в тот же словарь, что и озеро коллектора; кэш серий в памяти
 //! (`hot.ticket_cache`, TTL суток).
 
 use std::sync::{Mutex, OnceLock};
@@ -224,29 +224,26 @@ pub fn normalize_ticket(raw: &Value, search_origin: Option<&str>, search_destina
     })
 }
 
-/// Источник серий без коллектора: прямой GraphQL с TTL-кэшем серий в SQLite.
+/// Источник серий без коллектора: прямой GraphQL с TTL-кэшем серий в памяти (`hot`).
 pub struct DirectFetcher {
     http: reqwest::blocking::Client,
-    db_path: String,
     ttl_seconds: f64,
 }
 
 impl DirectFetcher {
-    pub fn new(db_path: &str, ttl_seconds: f64) -> DirectFetcher {
-        DirectFetcher { http: reqwest::blocking::Client::builder().build().expect("reqwest"), db_path: db_path.to_string(), ttl_seconds }
+    pub fn new(ttl_seconds: f64) -> DirectFetcher {
+        DirectFetcher { http: reqwest::blocking::Client::builder().build().expect("reqwest"), ttl_seconds }
     }
 }
 
 impl SeriesFetcher for DirectFetcher {
     fn fetch(&self, origin: Option<&str>, dest: Option<&str>, day: &str, max_pages: i64, on_page: &dyn Fn(i64, i64)) -> Result<SeriesResult, CollectError> {
-        let conn = hot::connect(&self.db_path).map_err(CollectError::Failed)?;
-        hot::init_db(&conn).map_err(CollectError::Failed)?;
-        if let Some(cached) = hot::ticket_cache_get(&conn, origin, dest, day, "", self.ttl_seconds, Some(max_pages)).map_err(CollectError::Failed)? {
+        if let Some(cached) = hot::ticket_cache_get(origin, dest, day, "", self.ttl_seconds, Some(max_pages)) {
             return Ok(cached);
         }
         let series = fetch_series(&self.http, origin, dest, day, max_pages, on_page)?;
         if !series.error {
-            hot::ticket_cache_put(&conn, origin, dest, day, "", &series).map_err(CollectError::Failed)?;
+            hot::ticket_cache_put(origin, dest, day, "", &series);
         }
         Ok(series)
     }
