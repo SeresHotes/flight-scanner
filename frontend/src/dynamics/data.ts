@@ -232,22 +232,25 @@ export function asOf(s: Series, t: number): Point | null {
 
 // Профиль «по дням вылета»: X — день вылета, линия — как выглядели цены на дату
 // (последний снимок каждого дня не позже этой даты). Даты — сегодня и назад.
-export function profileSeries(daySeries: Series[], snapshots: DynSnapshot[]): Series[] {
+export function profileSeries(daySeries: Series[], snapshots: DynSnapshot[], step = 1): Series[] {
   if (!snapshots.length) return []
-  const last = snapTime(snapshots[snapshots.length - 1])
-  const first = snapTime(snapshots[0])
-  const steps = [0, 3, 7, 14, 30, 60, 90, 180].filter((d) => last - d * 86400e3 >= first - 86400e3)
-  return steps
-    .map((back, i) => {
-      const t = last - back * 86400e3
-      const points: Point[] = daySeries.map((s, di) => {
-        const p = asOf(s, t)
-        return { t: dayTime(s.id), v: p ? p.v : null, si: p ? p.si : -1 - di, fi: p?.fi }
-      })
-      const label = back === 0 ? 'последний снимок' : `${back} ${plural(back, 'день', 'дня', 'дней')} назад`
-      return { id: `asof-${back}`, label, color: back === 0 ? PALETTE[0] : mix('#56607a', '#9aa6c0', 1 - i / Math.max(1, steps.length - 1)), points }
+  // линия на каждый (step-й) день наблюдения, считая от последнего — он всегда есть
+  const days = obsDays(snapshots)
+  const picked = days.filter((_, i) => (days.length - 1 - i) % step === 0)
+  const today = localDay(Date.now())
+  return picked.map((day, i) => {
+    const t = Math.min(localDayEnd(day), snapTime(snapshots[snapshots.length - 1]))
+    const points: Point[] = daySeries.map((s, di) => {
+      const p = asOf(s, t)
+      return { t: dayTime(s.id), v: p ? p.v : null, si: p ? p.si : -1 - di, fi: p?.fi }
     })
-    .reverse()
+    const last = i === picked.length - 1
+    const back = Math.round((dayTime(today) - dayTime(day)) / 86400e3)
+    const ago = back === 0 ? 'сегодня' : back === 1 ? 'вчера' : `${back} ${plural(back, 'день', 'дня', 'дней')} назад`
+    // старые — тусклые, свежие — светлее, последний день — акцентный
+    const color = last ? PALETTE[0] : mix('#3a4256', '#aab6d0', picked.length > 1 ? i / (picked.length - 1) : 1)
+    return { id: `asof-${day}`, label: `${dayLabel(day)} (${ago})`, color, points }
+  })
 }
 
 // В процентах от первой известной цены серии.

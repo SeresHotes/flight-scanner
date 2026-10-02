@@ -9,6 +9,7 @@ import {
   heatMatrix,
   money,
   pct,
+  plural,
   profileSeries,
   snapLabel,
   toPct,
@@ -251,14 +252,26 @@ export function HeatmapView({ series, snapshots }: { series: Series[]; snapshots
 // ---------------------------------------------------------------- профиль по дням вылета
 
 export function ProfileView({ series, snapshots, format, unit }: ViewProps & { snapshots: DynSnapshot[] }) {
-  const prof = useMemo(() => profileSeries(series, snapshots), [series, snapshots])
+  const [step, setStep] = useState(1)
+  const prof = useMemo(() => profileSeries(series, snapshots, step), [series, snapshots, step])
   if (series.length < 2) return <div className="dyn-chart-empty">Профиль нужен для нескольких дней вылета — выберите диапазон дат.</div>
   return (
     <>
-      <PriceChart series={unit === 'pct' ? toPct(prof) : prof} format={format === 'band' ? 'line' : format} unit={unit} xKind="day" />
+      <div className="dyn-cal-legend">
+        Линия на каждый день наблюдения: старые — тусклые, свежие — светлее, <i className="sw" style={{ background: PALETTE[0] }} /> последний.
+        <span className="segbtns dyn-heat-mode">
+          {[1, 3, 7].map((n) => (
+            <button key={n} className={step === n ? 'active' : ''} onClick={() => setStep(n)}>
+              {n === 1 ? 'каждый день' : `раз в ${n} дня`.replace('раз в 7 дня', 'раз в неделю')}
+            </button>
+          ))}
+        </span>
+      </div>
+      <PriceChart series={unit === 'pct' ? toPct(prof) : prof} format={format === 'band' ? 'line' : format} unit={unit} xKind="day" tipNewestFirst />
       <div className="dyn-note">
-        Ось X — день вылета. Каждая линия — как выглядели цены на дату: последний снимок каждого дня не позже неё. Видно,
-        какие дни подорожали и как сдвинулся весь «профиль» цен.
+        Ось X — день вылета. Каждая линия — как выглядели цены в этот день наблюдения: последний снимок каждого дня вылета
+        не позже его конца. Видно, какие дни подорожали и как сдвигался весь «профиль» цен. {prof.length}{' '}
+        {plural(prof.length, 'линия', 'линии', 'линий')}.
       </div>
     </>
   )

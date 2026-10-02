@@ -49,6 +49,7 @@ export function PriceChart({
   xDomain,
   yDomain,
   legend = true,
+  tipNewestFirst = false,
 }: {
   series: Series[]
   emptyText?: string
@@ -60,6 +61,8 @@ export function PriceChart({
   xDomain?: [number, number]
   yDomain?: [number, number]
   legend?: boolean
+  // подсказка: строки в порядке линий от последней к первой (а не по цене)
+  tipNewestFirst?: boolean
 }) {
   const boxRef = useRef<HTMLDivElement>(null)
   const [w, setW] = useState(mini ? 300 : 800)
@@ -154,7 +157,8 @@ export function PriceChart({
   const rows = hoverT === null ? [] : series
     .map((s) => ({ s, p: s.points.find((p) => p.t === hoverT) }))
     .filter((r) => r.p)
-    .sort((a, b) => (a.p!.v ?? Infinity) - (b.p!.v ?? Infinity))
+    .sort((a, b) => (tipNewestFirst ? 0 : (a.p!.v ?? Infinity) - (b.p!.v ?? Infinity)))
+  if (tipNewestFirst) rows.reverse()
   const tipLeft = hoverT !== null ? x(hoverT) : 0
   const base = y(Math.max(v0, unit === 'pct' ? Math.min(0, yTicks[yTicks.length - 1]) : v0))
 
