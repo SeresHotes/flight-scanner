@@ -67,7 +67,8 @@ resource "yandex_container_registry" "flights" {
 }
 
 # ---------------------------------------------------------------------------
-# SA для CI (GitHub Actions): только push образов в реестр.
+# SA для CI (GitHub Actions): push образов в реестр. Ключей у него нет — входит через
+# федерацию GitHub (github.tf).
 # ---------------------------------------------------------------------------
 resource "yandex_iam_service_account" "ci" {
   name        = "flights-ci"
@@ -78,11 +79,6 @@ resource "yandex_resourcemanager_folder_iam_member" "ci_pusher" {
   folder_id = var.folder_id
   role      = "container-registry.images.pusher"
   member    = "serviceAccount:${yandex_iam_service_account.ci.id}"
-}
-
-resource "yandex_iam_service_account_key" "ci" {
-  service_account_id = yandex_iam_service_account.ci.id
-  description        = "Authorized key для GitHub Actions"
 }
 
 # ---------------------------------------------------------------------------
