@@ -1214,14 +1214,7 @@ pub struct SharedStore(pub Arc<LakeStore>);
 impl TicketStore for SharedStore {
     fn tickets(&self, origins: &[String], dests: &[String], via: &[String], from: &str, to: &str) -> Result<Vec<Ticket>, CollectError> {
         self.0.wait_ready()?;
-        self.0.select(origins, dests, via, parse_day(from)?, parse_day(to)?, STORE_MAX_ROWS).map_err(|e| {
-            if e.starts_with("больше") {
-                let side = if !origins.is_empty() { format!("из {} городов", origins.len()) } else if !dests.is_empty() { format!("в {} городов", dests.len()) } else { "«любой → любой»".to_string() };
-                CollectError::Failed(format!("Слишком широкий запрос: плечо {side} за {from}..{to} даёт больше {STORE_MAX_ROWS} рейсов. Сузьте окна дат или задайте города вместо «любых»."))
-            } else {
-                CollectError::Failed(format!("склад билетов: {e}"))
-            }
-        })
+        self.0.select(origins, dests, via, parse_day(from)?, parse_day(to)?, STORE_MAX_ROWS).map_err(|e| CollectError::Failed(format!("склад билетов: {e}")))
     }
 
     fn coverage(&self, origins: &[String], from: &str, to: &str) -> Result<HashMap<(String, String), i64>, CollectError> {
@@ -1236,14 +1229,7 @@ impl TicketStore for SharedStore {
 
     fn flights(&self, origins: &[String], dests: &[String], from: &str, to: &str, codes: &JobCodes) -> Result<Vec<Fl>, CollectError> {
         self.0.wait_ready()?;
-        self.0.select_flights(origins, dests, parse_day(from)?, parse_day(to)?, STORE_MAX_ROWS, codes).map_err(|e| {
-            if e.starts_with("больше") {
-                let side = if !origins.is_empty() { format!("из {} городов", origins.len()) } else if !dests.is_empty() { format!("в {} городов", dests.len()) } else { "«любой → любой»".to_string() };
-                CollectError::Failed(format!("Слишком широкий запрос: плечо {side} за {from}..{to} даёт больше {STORE_MAX_ROWS} рейсов. Сузьте окна дат или задайте города вместо «любых»."))
-            } else {
-                CollectError::Failed(format!("склад билетов: {e}"))
-            }
-        })
+        self.0.select_flights(origins, dests, parse_day(from)?, parse_day(to)?, STORE_MAX_ROWS, codes).map_err(|e| CollectError::Failed(format!("склад билетов: {e}")))
     }
 
     fn code_names(&self) -> Vec<String> {

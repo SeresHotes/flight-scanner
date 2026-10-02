@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::flightcols::{ts_ord, FlightCols, FlightColsBuilder, FlightSrc, Fl, JobCodes, Tp, NO_CODE};
-use crate::stops::{collect_view, leg_dates, Stop, MAX_JOB_FLIGHTS, PAGES_ANY, PAGES_CITY};
+use crate::stops::{collect_view, leg_dates, Stop, PAGES_ANY, PAGES_CITY};
 use crate::ticket::Ticket;
 use crate::tickets::{coverage_for, Coverage, TicketStore};
 
@@ -345,7 +345,6 @@ pub fn collect_plan(
             progress.leg(i)?;
             out.push_leg(i, collect_leg(&stops, i, fetch, store, progress, &mut ac, workers, &codes)?);
             done[i] = true;
-            check_total(&out)?;
         }
     }
     // 2. «любой → любой»: от концов к середине — каждый раз берём плечо, у которого больше
@@ -373,22 +372,12 @@ pub fn collect_plan(
         dests.sort();
         collect_any_any(&stops, i, view, &origins, &dests, progress, &mut ac, &mut out)?;
         done[i] = true;
-        check_total(&out)?;
     }
     // выученное по ходу сбора — обратно в карту вызывающего
     for (a, c) in &ac {
         airport_city.entry(codes.name(*a)).or_insert_with(|| codes.name(*c));
     }
     Ok(out.finish())
-}
-
-/// Рейсов по всем плечам не больше MAX_JOB_FLIGHTS — иначе планировщику не хватит памяти.
-fn check_total(out: &FlightColsBuilder) -> Result<(), CollectError> {
-    let total = out.len();
-    if total > MAX_JOB_FLIGHTS {
-        return Err(CollectError::Failed(format!("Слишком широкий запрос: уже {total} рейсов (потолок {MAX_JOB_FLIGHTS}). Сузьте окна дат или задайте города вместо «любых».")));
-    }
-    Ok(())
 }
 
 /// Разбор рейсов плеча: дедуп по ключу рейса, фильтр стороны прилёта, карта аэропортов.
@@ -607,9 +596,6 @@ fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String
                 ac.entry(a).or_insert(c);
             }
             out.push_leg(i, kept);
-            if out.len() > MAX_JOB_FLIGHTS {
-                return Err(CollectError::Failed(format!("Слишком широкий запрос: уже {} рейсов (потолок {MAX_JOB_FLIGHTS}). Сузьте окна дат или задайте города вместо «любых».", out.len())));
-            }
         }
     }
     let covered = dates.iter().filter(|d| view.coverage.has_day(d)).count();
