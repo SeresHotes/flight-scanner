@@ -321,7 +321,7 @@ pub fn store_view<'a>(store: Option<&'a dyn TicketStore>, stops: &[Stop]) -> Opt
 /// `fetch` — только за городами и днями, которых в складе нет; без склада — всё сериями.
 /// Порядок: сначала плечи с конкретным городом, затем «любой → любой», суженные городами
 /// соседних плеч. Плечи — `leg_specs`: обычные, затем в обход пропускаемых остановок (у
-/// обходного всегда есть конкретный город с одной стороны — `skip_error`). `airport_city` — карта аэропорт → город из накопленных котировок
+/// обходного всегда есть конкретный город с одной стороны — `plan_error`). `airport_city` — карта аэропорт → город из накопленных котировок
 /// (дополняется по ходу сбора); `workers` — сколько серий плеча качать одновременно.
 /// Разбор — всегда в порядке обхода, результат не зависит от workers.
 pub fn collect_plan(
@@ -378,6 +378,21 @@ pub fn collect_plan(
         dests.sort();
         collect_any_any(&stops, i, view, &origins, &dests, progress, &mut ac, &mut out)?;
         done[i] = true;
+    }
+    // 3. внутри блоков любых городов: после плеч в блок и из блока (их города сужают выборку)
+    for (i, &l) in specs.iter().enumerate() {
+        if !l.is_inner() {
+            continue;
+        }
+        progress.leg(i)?;
+        let Some(view) = store else {
+            return Err(CollectError::Failed("блок любых городов требует склад билетов (озеро S3_* у планировщика)".into()));
+        };
+        let mut d_in = out.dest_cities(l.from - 1);
+        d_in.sort();
+        let mut o_out = out.origin_codes(l.from);
+        o_out.sort();
+        collect_block_inner(&stops, i, l, view, &d_in, &o_out, progress, &mut ac, &mut out)?;
     }
     // выученное по ходу сбора — обратно в карту вызывающего
     for (a, c) in &ac {
@@ -602,6 +617,52 @@ fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String
                 ac.entry(a).or_insert(c);
             }
             out.push_leg(i, kept);
+        }
+    }
+    let covered = dates.iter().filter(|d| view.coverage.has_day(d)).count();
+    progress.store_hit(covered);
+    tick_n(progress, dates.len() as i64 * PAGES_ANY)?;
+    Ok(())
+}
+
+/// Плечо между городами блока любых городов (одно на все его переходы, блок ≤ 3 городов):
+/// вылеты из городов прилёта плеча в блок (d_in — первый переход блока и далее куда угодно)
+/// ИЛИ прилёты в города вылета плеча из блока (o_out — последний переход). При 2–3 городах
+/// каждый переход блока задевает одно из двух. По дням, как `collect_any_any`.
+#[allow(clippy::too_many_arguments)]
+fn collect_block_inner(stops: &[Stop], leg: usize, l: LegSpec, view: &StoreView, d_in: &[String], o_out: &[String], progress: &dyn CollectProgress, ac: &mut ApCity, out: &mut FlightColsBuilder) -> Result<(), CollectError> {
+    let dates = spec_dates(stops, l);
+    let codes = out.codes().clone();
+    let allow_out: FxHashSet<u32> = id_set(&codes, o_out);
+    let day_job = |day: &String, base: &ApCity| -> Result<(Vec<Fl>, ApCity), CollectError> {
+        let from_in = if d_in.is_empty() { Vec::new() } else { view.store.flights(d_in, &[], day, day, &codes)? };
+        let to_out = if o_out.is_empty() { Vec::new() } else { view.store.flights(&[], o_out, day, day, &codes)? };
+        let allow_out = if allow_out.is_empty() { id_set(&codes, o_out) } else { allow_out.clone() };
+        let mut ac = base.clone();
+        let mut acc = LegAcc::new();
+        acc.keep(&from_in, None, &mut ac);
+        acc.keep(&to_out, Some(&allow_out), &mut ac);
+        acc.hidden_any(&[from_in], &ac, None, &codes);
+        acc.hidden_any(&[to_out], &ac, Some(&allow_out), &codes);
+        Ok((acc.finish(), ac))
+    };
+    let threads = collect_threads().min(dates.len()).max(1);
+    for batch in dates.chunks(threads) {
+        let base = ac.clone();
+        let results: Vec<Result<(Vec<Fl>, ApCity), CollectError>> = if batch.len() == 1 {
+            vec![day_job(&batch[0], &base)]
+        } else {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = batch.iter().map(|day| s.spawn(|| day_job(day, &base))).collect();
+                handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(CollectError::Failed("сбор дня упал".into())))).collect()
+            })
+        };
+        for r in results {
+            let (kept, learned) = r?;
+            for (a, c) in learned {
+                ac.entry(a).or_insert(c);
+            }
+            out.push_leg(leg, kept);
         }
     }
     let covered = dates.iter().filter(|d| view.coverage.has_day(d)).count();
@@ -841,5 +902,53 @@ pub mod tests {
         let stops = vec![Stop::new("cities", vec!["MOW"], ["", ""]), Stop::new("any", vec![], ["2026-11-01", "2026-11-01"]), Stop::new("any", vec![], ["2026-11-03", "2026-11-03"]), Stop::new("cities", vec!["SEL"], ["2026-11-05", "2026-11-05"])];
         let mut ac = HashMap::new();
         assert!(collect_plan(&stops, &f, None, &NoProgress, &mut ac, 1).is_err());
+    }
+
+    /// Блок «любые города, от 0 до 3» между Москвой и Тбилиси: плечо в блок, из блока, внутри
+    /// (из городов прилёта в блок или в города вылета из блока) и в обход; маршруты всех
+    /// вариантов (0, 1, 2 города) — одним списком по цене, наборы — с меткой варианта.
+    #[test]
+    fn any_block_from_zero_to_three() {
+        let f = MapFetcher::new();
+        let st = MapStore::new();
+        let (d1, d2, d3) = ("2026-11-01", "2026-11-02", "2026-11-03");
+        let t = |o: &str, d: &str, day: &str, price: f64| with_series(ticket(&[o, d], o, d, day, price), o);
+        st.put("MOW", d1, vec![t("MOW", "IST", d1, 5000.0), t("MOW", "EVN", d1, 3000.0), t("MOW", "TBS", d1, 20000.0)]);
+        st.put("IST", d2, vec![t("IST", "EVN", d2, 1000.0), t("IST", "TBS", d2, 4000.0)]);
+        st.put("EVN", d2, vec![t("EVN", "TBS", d2, 2000.0)]);
+        st.put("EVN", d3, vec![t("EVN", "TBS", d3, 2500.0)]);
+        st.put("BKK", d2, vec![t("BKK", "SIN", d2, 10.0)]); // ни из блока, ни в блок — не нужен
+        let pq = crate::planquery::PlanQuery::from_value(&serde_json::json!({
+            "stops": [{"kind": "cities", "codes": ["MOW"], "window": ["", ""]},
+                      {"kind": "any", "codes": [], "window": [d1, d3], "count": [0, 3]},
+                      {"kind": "cities", "codes": ["TBS"], "window": ["", ""]}],
+            "maxResults": 100,
+        }))
+        .unwrap();
+        let stops = crate::stops::parse_stops(&pq.stops);
+        assert_eq!(crate::stops::plan_error(&stops), None);
+        let view = store_view(Some(&st), &stops).unwrap();
+        let table = collect_plan(&stops, &f, Some(&view), &NoProgress, &mut HashMap::new(), 1).unwrap();
+        // плечи: 0 — MOW→ANY, 1 — ANY→TBS, 2 — MOW→TBS в обход, 3 — внутри блока
+        assert_eq!(table.rows(2).len(), 1);
+        let mut inner: Vec<String> = table.rows(3).into_iter().map(|r| format!("{}>{}", table.orig_city(r), table.dest(r))).collect();
+        inner.sort();
+        assert!(inner.contains(&"IST>EVN".to_string()) && !inner.iter().any(|x| x.starts_with("BKK")), "{inner:?}");
+
+        let mut check = |_: usize| Ok(());
+        let routes = crate::search::build_routes(&stops, &table, 100, &pq, &mut check).unwrap();
+        let page = routes.page(0, 20);
+        let got: Vec<(f64, usize)> = page.iter().map(|it| (it["total_price"].as_f64().unwrap(), it["stops"].as_array().unwrap().len())).collect();
+        assert_eq!(got, vec![(5000.0, 3), (5500.0, 3), (8500.0, 4), (9000.0, 3), (20000.0, 2)]);
+
+        // фильтр перелётов блока действует на все его перелёты: не дольше часа — таких нет (все по 2 ч)
+        let strict = pq.with_filters(&serde_json::json!({"cities": [{}, {"flights": {"travelMin": [0, 60]}}, {}]})).unwrap();
+        assert!(crate::search::build_routes(&stops, &table, 100, &strict, &mut check).unwrap().is_empty());
+
+        let ov = crate::overview::build_overview(&stops, &table, Some(&pq));
+        let keys: Vec<&str> = ov.combos.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, vec!["MOW-EVN-TBS~n1", "MOW-IST-EVN-TBS~n2", "MOW-IST-TBS~n1", "MOW-TBS~n0"]);
+        let picked = crate::search::build_combo_views(&stops, &table, &["MOW-IST-EVN-TBS~N2".to_string()], Some(&pq));
+        assert_eq!(picked.len(), 1);
     }
 }

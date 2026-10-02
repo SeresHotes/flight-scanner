@@ -59,7 +59,7 @@ fn main() {
     out.insert("top_price".into(), page["items"].get(0).map(|i| i["total_price"].clone()).unwrap_or(Value::Null));
     let mut by_count: Vec<&flights_planner::overview::Combo> = ov.combos.iter().collect();
     by_count.sort_by(|a, b| b.count.cmp(&a.count).then(a.min_price.partial_cmp(&b.min_price).unwrap()));
-    let combos: Vec<String> = by_count.iter().take(2).map(|c| flights_planner::search::combo_key(&c.codes, &c.skipped)).collect();
+    let combos: Vec<String> = by_count.iter().take(2).map(|c| c.key.clone()).collect();
     let cr = timed("combo_routes_2", repeats, &mut out, || build_combo_routes(&stops, &table, &combos, Some(&pq)));
     out.insert("combo_routes".into(), json!(cr.len()));
     let alt_view = timed("alt_filter_astar", repeats, &mut out, || {

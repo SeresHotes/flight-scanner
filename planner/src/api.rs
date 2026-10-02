@@ -30,7 +30,7 @@ use crate::hot::{self, Job};
 use crate::planquery::PlanQuery;
 use crate::search::{build_combo_views, Aborted, Routes};
 use crate::collect::store_view;
-use crate::stops::{estimate_plan, is_valid_max_results, parse_stops, skip_error, total_window_days, Estimate, Series, DEFAULT_MAX_RESULTS, MAX_REQUESTS, MAX_RESULTS, MAX_SEARCH_STEPS, MAX_TOTAL_WINDOW_DAYS};
+use crate::stops::{estimate_plan, is_valid_max_results, parse_stops, plan_error, total_window_days, Estimate, Series, DEFAULT_MAX_RESULTS, MAX_REQUESTS, MAX_RESULTS, MAX_SEARCH_STEPS, MAX_TOTAL_WINDOW_DAYS};
 use crate::worker::{self, CancelSet, ViewResult, FETCH_CACHE_TTL_SECONDS};
 
 /// Сколько джоба в running может молчать, прежде чем /jobs/rescue сочтёт её зависшей.
@@ -392,7 +392,7 @@ fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery, fresh: bool) -> Val
     if !is_valid_max_results(query.max_results) {
         return json!({"status": "invalid", "message": format!("Лимит маршрутов вне диапазона 1…{MAX_RESULTS}.")});
     }
-    if let Some(msg) = skip_error(&stops) {
+    if let Some(msg) = plan_error(&stops) {
         return json!({"status": "invalid", "message": msg});
     }
     let days = total_window_days(&stops);

@@ -5,8 +5,8 @@ import type { AirportOption } from '../../data/airports'
 import { dayW } from '../../lib/format'
 import type { PlannerStop } from '../types'
 import type { CityQuery, LegQuery, PlanQuery } from '../query'
-import { STAY_MAX, defaultBypass, fitFilters } from '../query'
-import { pointLabel, type Validation } from '../validation'
+import { STAY_MAX, defaultBypass, fitFilters, isBlock, openLeg } from '../query'
+import { MAX_BLOCK_CITIES, pointLabel, type Validation } from '../validation'
 import { RangeSlider } from './RangeSlider'
 import { TransitionFilterCard } from './TransitionFilterCard'
 import { TripLengthFilter } from './TripLengthFilter'
@@ -46,6 +46,20 @@ export function QueryEditor({
       stops: stops.map((s, k) => (k === i ? { ...s, skip } : s)),
       cities: query.cities.map((c, k) => (k === i && skip && !c.bypass ? { ...c, bypass: defaultBypass(query, i) } : c)),
     })
+  // Блок любых городов: при первом включении условия перелётов — как у перелёта в него.
+  const setCount = (i: number, count: [number, number]) => {
+    const block = count[0] !== 1 || count[1] !== 1
+    onChange({
+      ...query,
+      stops: stops.map((s, k) => (k === i ? { ...s, count: block ? count : undefined, skip: block ? false : s.skip } : s)),
+      cities: query.cities.map((c, k) => (k === i && block && !c.flights ? { ...c, flights: { ...(query.legs[i - 1] ?? openLeg()) } } : c)),
+    })
+  }
+  const patchFlights = (i: number, patch: Partial<LegQuery>) =>
+    onChange({
+      ...query,
+      cities: query.cities.map((c, k) => (k === i ? { ...c, flights: { ...(c.flights ?? query.legs[i - 1] ?? openLeg()), ...patch } } : c)),
+    })
   const patchBypass = (i: number, patch: Partial<LegQuery>) =>
     onChange({
       ...query,
@@ -64,15 +78,28 @@ export function QueryEditor({
 
       {stops.map((s, i) => {
         const endpoint = i === 0 || i === stops.length - 1
+        const block = !endpoint && isBlock(s)
+        // перелёты в блок и из блока задаёт карточка блока — обычные карточки переходов прячем
+        const legHidden = i < stops.length - 1 && (block || (i + 1 < stops.length - 1 && isBlock(stops[i + 1])))
         return (
           <Fragment key={s.id}>
-            <div className={`pl-stopcard ${validation.stopValid[i] ? '' : 'invalid'}`}>
-              <StopRow stop={s} index={i} endpoint={endpoint} canRemove={stops.length > 2} onUpdate={updateStop} onRemove={removeStop} />
+            <div className={`pl-stopcard ${validation.stopValid[i] ? '' : 'invalid'} ${block ? 'pl-blockcard' : ''}`}>
+              <StopRow stop={s} index={i} endpoint={endpoint} block={block} canRemove={stops.length > 2} onUpdate={updateStop} onRemove={removeStop} />
               {s.kind === 'cities' && (
                 <NearbyRow stop={s} index={i} last={stops.length - 1} onChange={(radiusKm) => updateStop(i, { radiusKm })} />
               )}
-              {!endpoint && <StayRow filter={query.cities[i]} onChange={(patch) => patchCity(i, patch)} />}
-              {!endpoint && <SkipRow index={i} skip={!!s.skip} onChange={(skip) => setSkip(i, skip)} />}
+              {!endpoint && s.kind === 'any' && <CountRow count={s.count ?? [1, 1]} onChange={(count) => setCount(i, count)} />}
+              {!endpoint && <StayRow filter={query.cities[i]} each={block} onChange={(patch) => patchCity(i, patch)} />}
+              {block && (
+                <div className="pl-bypass pl-blockflights">
+                  <TransitionFilterCard
+                    title={`Все перелёты: ${pointLabel(i - 1)} → 🌍 … → ${pointLabel(i + 1)}`}
+                    filter={query.cities[i].flights ?? query.legs[i - 1] ?? openLeg()}
+                    onChange={(patch) => patchFlights(i, patch)}
+                  />
+                </div>
+              )}
+              {!endpoint && s.kind === 'cities' && <SkipRow index={i} skip={!!s.skip} onChange={(skip) => setSkip(i, skip)} />}
               {!endpoint && s.skip && (
                 <div className="pl-bypass">
                   <TransitionFilterCard
@@ -83,7 +110,7 @@ export function QueryEditor({
                 </div>
               )}
             </div>
-            {i < stops.length - 1 && (
+            {i < stops.length - 1 && !legHidden && (
               <TransitionFilterCard
                 title={`${pointLabel(i)} → ${pointLabel(i + 1)}`}
                 filter={query.legs[i]}
@@ -108,6 +135,7 @@ function StopRow({
   stop: s,
   index: i,
   endpoint,
+  block,
   canRemove,
   onUpdate,
   onRemove,
@@ -115,6 +143,7 @@ function StopRow({
   stop: PlannerStop
   index: number
   endpoint: boolean
+  block: boolean
   canRemove: boolean
   onUpdate: (index: number, patch: Partial<PlannerStop>) => void
   onRemove: (index: number) => void
@@ -165,7 +194,14 @@ function StopRow({
           </div>
         ) : (
           <div className="pl-any">
-            {i === 0 ? '🌍 Откуда угодно' : endpoint ? '🌍 Куда угодно' : '🌍 Любой город'} (подберём при сборе)
+            {i === 0
+              ? '🌍 Откуда угодно'
+              : endpoint
+                ? '🌍 Куда угодно'
+                : block && s.count
+                  ? `🌍 Любые города: ${s.count[0] === s.count[1] ? s.count[0] : `от ${s.count[0]} до ${s.count[1]}`} подряд`
+                  : '🌍 Любой город'}{' '}
+            (подберём при сборе)
           </div>
         )}
       </div>
@@ -174,7 +210,7 @@ function StopRow({
         {endpoint ? (
           <div className="pl-window-derived">даты — из соседних городов</div>
         ) : (
-          <DateRangePicker label="ОК быть здесь" from={s.window[0]} to={s.window[1]} onChange={(from, to) => onUpdate(i, { window: [from, to] })} />
+          <DateRangePicker label={block ? 'Период для всех городов' : 'ОК быть здесь'} from={s.window[0]} to={s.window[1]} onChange={(from, to) => onUpdate(i, { window: [from, to] })} />
         )}
       </div>
 
@@ -224,6 +260,43 @@ function NearbyRow({
   )
 }
 
+// Сколько любых городов подряд в этой точке: «от–до» (0 — точку можно пропустить).
+// 1–1 — обычная остановка; иначе блок: общий период, пребывание в каждом городе и одни
+// условия на все перелёты.
+function CountRow({ count, onChange }: { count: [number, number]; onChange: (count: [number, number]) => void }) {
+  const opts = Array.from({ length: MAX_BLOCK_CITIES + 1 }, (_, k) => k)
+  const [lo, hi] = count
+  return (
+    <div className="pl-stayrow pl-countrow">
+      <div className="pl-ficon">🔢</div>
+      <div className="pl-fname">Сколько городов</div>
+      <div className="pl-fcell pl-countsel">
+        <span>от</span>
+        <select aria-label="Городов от" value={lo} onChange={(e) => onChange([Number(e.target.value), Math.max(Number(e.target.value), hi, 1)])}>
+          {opts.map((k) => (
+            <option key={k} value={k}>
+              {k}
+            </option>
+          ))}
+        </select>
+        <span>до</span>
+        <select aria-label="Городов до" value={hi} onChange={(e) => onChange([Math.min(lo, Number(e.target.value)), Number(e.target.value)])}>
+          {opts.slice(1).map((k) => (
+            <option key={k} value={k}>
+              {k}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="pl-fcell pl-nearby-hint">
+        {lo === 1 && hi === 1
+          ? 'Один город. Можно несколько подряд или «от 0» — тогда точку можно пропустить'
+          : `Любые города подряд, каждый — в периоде этой точки; перелёты — по условиям ниже${lo === 0 ? '; 0 — летим сразу дальше' : ''}`}
+      </div>
+    </div>
+  )
+}
+
 // Можно ли пропустить остановку: тогда маршруты без неё (перелёт в обход со своими
 // условиями) идут в выдачу вместе с остальными.
 function SkipRow({ index: i, skip, onChange }: { index: number; skip: boolean; onChange: (skip: boolean) => void }) {
@@ -247,14 +320,14 @@ function SkipRow({ index: i, skip, onChange }: { index: number; skip: boolean; o
 }
 
 // Условия пребывания в промежуточном городе — вторая строка карточки остановки.
-function StayRow({ filter, onChange }: { filter: CityQuery; onChange: (patch: Partial<CityQuery>) => void }) {
+function StayRow({ filter, each = false, onChange }: { filter: CityQuery; each?: boolean; onChange: (patch: Partial<CityQuery>) => void }) {
   const coverOn = filter.mustCover !== null
   const cover = filter.mustCover ?? ['', '']
   const hi = filter.maxStay ?? STAY_MAX
   return (
     <div className="pl-stayrow">
       <div className="pl-ficon">🏙</div>
-      <div className="pl-fname">Пребывание</div>
+      <div className="pl-fname">{each ? 'Пребывание в каждом' : 'Пребывание'}</div>
       <div className="pl-fcell">
         <div className="pl-flabel">
           Дней в городе:{' '}
@@ -274,11 +347,13 @@ function StayRow({ filter, onChange }: { filter: CityQuery; onChange: (patch: Pa
           <input type="checkbox" checked={filter.requireWeekend} onChange={(e) => onChange({ requireWeekend: e.target.checked })} />
           Оба выходных (сб + вс)
         </label>
-        <label className="pl-check">
-          <input type="checkbox" checked={coverOn} onChange={(e) => onChange({ mustCover: e.target.checked ? ['', ''] : null })} />
-          Покрыть окно дат
-        </label>
-        {coverOn && (
+        {!each && (
+          <label className="pl-check">
+            <input type="checkbox" checked={coverOn} onChange={(e) => onChange({ mustCover: e.target.checked ? ['', ''] : null })} />
+            Покрыть окно дат
+          </label>
+        )}
+        {!each && coverOn && (
           <DateRangePicker label="покрыть даты" from={cover[0]} to={cover[1]} onChange={(from, to) => onChange({ mustCover: [from, to] })} />
         )}
       </div>

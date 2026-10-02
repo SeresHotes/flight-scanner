@@ -108,7 +108,7 @@ use crate::flightcols::{FlightCols, NO_CODE};
 use crate::nearby::{distance_km, Hops, HOP_MIN_GAP_MIN};
 use crate::planquery::{trip_length_ok, CityFilter, PlanQuery, Variant};
 use crate::segments::{city_pair, make_segment, Segment};
-use crate::stops::{bypass_leg, leg_dates, leg_specs, spec_dates, Stop, COMBO_MAX_RESULTS, FINAL_STAY_DAYS};
+use crate::stops::{bypass_leg, inner_leg, leg_dates, leg_specs, spec_dates, Stop, COMBO_MAX_RESULTS, FINAL_STAY_DAYS};
 
 #[derive(Debug)]
 pub struct Aborted;
@@ -192,45 +192,97 @@ pub fn chain_start(stops: &[Stop], query: Option<&PlanQuery>) -> String {
     leg_dates(stops, 0).into_iter().next().unwrap_or_else(|| crate::stops::DEFAULT_START.to_string())
 }
 
-/// Варианты маршрута: без пропускаемых остановок — один, сам запрос; иначе — по варианту на
-/// каждое подмножество пропускаемых остановок (включая пустое): остановки варианта и запрос
-/// под него — фильтры городов пропущенных остановок выкинуты, плечо в обход остановки i
-/// берёт её фильтр `bypass` и рейсы плеча сбора «в обход i».
+/// Варианты маршрута: без пропусков и блоков — один, сам запрос; иначе — по варианту на
+/// каждое сочетание «пропускаемая остановка есть / нет» × «сколько городов в блоке любых»
+/// (от и до включительно): остановки варианта (блок развёрнут в k «любых» с его окном и
+/// фильтром пребывания) и запрос под него. Плечи варианта — плечи сбора джобы:
+/// - обычное i → i+1 — плечо i с фильтром legs[i] (у плеча в блок или из блока — фильтр
+///   перелётов блока `cities[b].flights`);
+/// - между городами блока — его внутреннее плечо (`inner_leg`), фильтр перелётов блока;
+/// - i−1 → i+1 мимо выпавшей остановки — плечо в обход (`bypass_leg`) с фильтром `bypass`
+///   (у блока «0 городов» — фильтр перелётов блока).
 pub fn variants(stops: &[Stop], pq: &PlanQuery) -> Vec<(Vec<Stop>, PlanQuery)> {
-    let skippable: Vec<usize> = (1..stops.len().saturating_sub(1)).filter(|&i| stops[i].skip).collect();
-    if skippable.is_empty() {
+    if !stops.iter().any(|s| s.skip || s.is_block()) {
         return vec![(stops.to_vec(), pq.clone())];
     }
     let specs = leg_specs(stops);
+    // сколько раз остановка входит в маршрут варианта (0 — выпала): первым — как в запросе
+    let choices: Vec<Vec<usize>> = stops
+        .iter()
+        .map(|s| if s.skip { vec![1, 0] } else if s.is_block() { (s.count.0..=s.count.1).collect() } else { vec![1] })
+        .collect();
+    let flights = |i: usize| pq.cities.get(i).and_then(|c| c.flights.clone()).unwrap_or_default();
+    let plain = |s: &Stop| Stop { skip: false, count: (1, 1), ..s.clone() };
     let mut out = Vec::new();
-    for mask in 0u32..(1 << skippable.len()) {
-        let skipped: Vec<usize> = skippable.iter().enumerate().filter(|(b, _)| mask >> b & 1 == 1).map(|(_, &i)| i).collect();
-        if skipped.windows(2).any(|w| w[1] == w[0] + 1) {
-            continue; // две подряд — плеча в обход нет (skip_error не пускает такие запросы)
-        }
-        let keep: Vec<usize> = (0..stops.len()).filter(|i| !skipped.contains(i)).collect();
+    let mut pick = vec![0usize; stops.len()]; // номер выбора по остановке (одометр)
+    loop {
+        let take: Vec<usize> = pick.iter().zip(&choices).map(|(&k, c)| c[k]).collect();
+        // (номер остановки запроса) по порядку маршрута варианта
+        let seq: Vec<usize> = (0..stops.len()).flat_map(|i| std::iter::repeat(i).take(take[i])).collect();
         let mut legs = Vec::new();
         let mut table_legs = Vec::new();
-        for w in keep.windows(2) {
+        let mut ok = true;
+        for w in seq.windows(2) {
             let (a, b) = (w[0], w[1]);
-            if b == a + 1 {
-                legs.push(pq.legs.get(a).cloned().unwrap_or_default());
-                table_legs.push(a);
+            let (leg, filter) = if a == b {
+                (inner_leg(stops, a), flights(a))
+            } else if b == a + 1 {
+                let f = if stops[a].is_block() {
+                    flights(a)
+                } else if stops[b].is_block() {
+                    flights(b)
+                } else {
+                    pq.legs.get(a).cloned().unwrap_or_default()
+                };
+                (Some(a), f)
+            } else if b == a + 2 {
+                let m = a + 1;
+                let f = if stops[m].is_block() { flights(m) } else { pq.cities.get(m).and_then(|c| c.bypass.clone()).unwrap_or_default() };
+                (bypass_leg(stops, m), f)
             } else {
-                legs.push(pq.cities.get(a + 1).and_then(|c| c.bypass.clone()).unwrap_or_default());
-                table_legs.push(bypass_leg(stops, a + 1).expect("плечо в обход пропускаемой остановки"));
-            }
+                (None, Default::default()) // выпали две подряд — плеча нет (plan_error не пускает)
+            };
+            let Some(leg) = leg else {
+                ok = false;
+                break;
+            };
+            table_legs.push(leg);
+            legs.push(filter);
         }
-        let start = spec_dates(stops, specs[table_legs[0]]).into_iter().next().unwrap_or_else(|| crate::stops::DEFAULT_START.to_string());
-        let vq = PlanQuery {
-            stops: keep.iter().map(|&i| pq.stops[i].clone()).collect(),
-            cities: keep.iter().map(|&i| pq.cities.get(i).cloned().unwrap_or_default()).collect(),
-            legs,
-            trip_length: pq.trip_length,
-            max_results: pq.max_results,
-            variant: Some(Variant { table_legs, chain_start: start, skipped }),
-        };
-        out.push((keep.iter().map(|&i| stops[i].clone()).collect(), vq));
+        if ok && !table_legs.is_empty() {
+            let skipped: Vec<usize> = (0..stops.len()).filter(|&i| stops[i].skip && take[i] == 0).collect();
+            let mut tag: Vec<String> = Vec::new();
+            if !skipped.is_empty() {
+                tag.push(format!("s{}", skipped.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(".")));
+            }
+            let blocks: Vec<String> = (0..stops.len()).filter(|&i| stops[i].is_block()).map(|i| take[i].to_string()).collect();
+            if !blocks.is_empty() {
+                tag.push(format!("n{}", blocks.join(".")));
+            }
+            let start = spec_dates(stops, specs[table_legs[0]]).into_iter().next().unwrap_or_else(|| crate::stops::DEFAULT_START.to_string());
+            let vq = PlanQuery {
+                stops: seq.iter().map(|&i| crate::planquery::StopSpec { skip: false, count: (1, 1), ..pq.stops[i].clone() }).collect(),
+                cities: seq.iter().map(|&i| crate::planquery::CityFilter { bypass: None, flights: None, ..pq.cities.get(i).cloned().unwrap_or_default() }).collect(),
+                legs,
+                trip_length: pq.trip_length,
+                max_results: pq.max_results,
+                variant: Some(Variant { table_legs, chain_start: start, skipped, tag: tag.join("~") }),
+            };
+            out.push((seq.iter().map(|&i| plain(&stops[i])).collect(), vq));
+        }
+        // следующий выбор
+        let mut i = 0;
+        while i < pick.len() {
+            pick[i] += 1;
+            if pick[i] < choices[i].len() {
+                break;
+            }
+            pick[i] = 0;
+            i += 1;
+        }
+        if i == pick.len() {
+            break;
+        }
     }
     out
 }
@@ -879,24 +931,29 @@ impl View {
     }
 }
 
-/// Ключ набора городов: коды через «-», у варианта с пропусками — «~» и номера пропущенных
-/// остановок через «.» (MOW-TBS~1: Москва → Тбилиси без остановки 1).
-pub fn combo_key(codes: &[String], skipped: &[usize]) -> String {
+/// Ключ набора городов: коды через «-», у варианта с пропусками или блоками — «~» и его
+/// метка (`Variant::tag`): MOW-TBS~s1 — Москва → Тбилиси без остановки 1, MOW-IST-TBS~n1 —
+/// с одним городом в блоке.
+pub fn combo_key(codes: &[String], tag: &str) -> String {
     let mut key = codes.join("-");
-    if !skipped.is_empty() {
+    if !tag.is_empty() {
         key.push('~');
-        key.push_str(&skipped.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("."));
+        key.push_str(tag);
     }
     key
 }
 
-/// Ключ набора → (коды, пропущенные остановки); None — ключ не разобрался.
-pub fn parse_combo_key(key: &str) -> Option<(Vec<String>, Vec<usize>)> {
-    let (codes, skipped) = match key.split_once('~') {
-        Some((c, s)) => (c, s.split('.').map(|x| x.parse::<usize>().ok()).collect::<Option<Vec<_>>>()?),
-        None => (key, Vec::new()),
+/// Ключ набора → (коды, метка варианта). Старый вид «~1.3» (номера пропусков) = «~s1.3».
+pub fn parse_combo_key(key: &str) -> Option<(Vec<String>, String)> {
+    let (codes, tag) = match key.split_once('~') {
+        Some((c, t)) if t.starts_with(|ch: char| ch.is_ascii_digit()) => (c, format!("s{t}")),
+        Some((c, t)) => (c, t.to_lowercase()),
+        None => (key, String::new()),
     };
-    Some((codes.split('-').map(|s| s.to_string()).collect(), skipped))
+    if codes.is_empty() {
+        return None;
+    }
+    Some((codes.split('-').map(|s| s.to_string()).collect(), tag))
 }
 
 /// Маршруты из нескольких компактных видов (варианты с пропусками, выбранные наборы) +
@@ -984,20 +1041,20 @@ pub fn build_combo_views(stops: &[Stop], table: &FlightCols, combos: &[String], 
     let vars = variants(stops, base);
     let mut views: Vec<(String, View)> = Vec::new();
     for key in combos {
-        let Some((codes, skipped)) = parse_combo_key(key) else { continue };
-        let Some((vstops, vq)) = vars.iter().find(|(_, q)| q.variant.as_ref().map(|v| v.skipped.as_slice()).unwrap_or(&[]) == skipped.as_slice()) else { continue };
+        let Some((codes, tag)) = parse_combo_key(key) else { continue };
+        let Some((vstops, vq)) = vars.iter().find(|(_, q)| q.variant.as_ref().map(|v| v.tag.as_str()).unwrap_or("") == tag) else { continue };
         if codes.len() != vstops.len() {
             continue;
         }
         let fixed: Vec<Stop> = codes
             .iter()
             .zip(vstops)
-            .map(|(code, stop)| Stop { kind: "cities".into(), codes: vec![code.clone()], window: stop.window.clone(), radius_km: stop.radius_km, exact: true, skip: false })
+            .map(|(code, stop)| Stop { kind: "cities".into(), codes: vec![code.clone()], window: stop.window.clone(), radius_km: stop.radius_km, exact: true, skip: false, count: (1, 1) })
             .collect();
         let mut check = |_: usize| Ok(());
         let vq = if query.is_some() || vq.variant.is_some() { Some(vq) } else { None };
         let Ok(view) = build_itineraries_compact(&fixed, table, COMBO_MAX_RESULTS as usize, vq, &mut check) else { continue };
-        views.push((combo_key(&codes, &skipped), view));
+        views.push((combo_key(&codes, &tag), view));
     }
     Routes::merge(views, usize::MAX)
 }
@@ -1288,9 +1345,9 @@ pub mod tests {
         assert_eq!(prices, sorted);
         // маршруты набора: тот же A* с зафиксированными городами
         let codes = view.chain_codes(0);
-        let routes = build_combo_routes(&stops, &table, &[combo_key(&codes, &[])], None);
+        let routes = build_combo_routes(&stops, &table, &[combo_key(&codes, "")], None);
         assert!(!routes.is_empty());
-        assert_eq!(routes[0]["combo"], combo_key(&codes, &[]));
+        assert_eq!(routes[0]["combo"], combo_key(&codes, ""));
         assert_eq!(routes[0]["total_price"], it["total_price"]);
     }
 
@@ -1396,13 +1453,15 @@ pub mod tests {
 
         // наборы городов: вариант без IST — отдельный набор с пометкой пропуска
         let ov = crate::overview::build_overview(&stops, &table, Some(&pq));
-        let keys: Vec<String> = ov.combos.iter().map(|c| combo_key(&c.codes, &c.skipped)).collect();
-        assert_eq!(keys, vec!["MOW-TBS~1", "MOW-IST-TBS"]);
+        let keys: Vec<String> = ov.combos.iter().map(|c| c.key.clone()).collect();
+        assert_eq!(keys, vec!["MOW-TBS~s1", "MOW-IST-TBS"]);
+        assert_eq!(ov.combos[0].skipped, vec![1]);
         assert_eq!(ov.combos[0].count, 2);
         assert_eq!(ov.total_count, 3);
-        let picked = build_combo_views(&stops, &table, &["MOW-TBS~1".to_string()], Some(&pq));
+        let picked = build_combo_views(&stops, &table, &["MOW-TBS~1".to_string()], Some(&pq)); // старый вид ключа
         assert_eq!(picked.len(), 2);
-        assert_eq!(picked.page(0, 1)[0]["combo"], json!("MOW-TBS~1"));
-        assert_eq!(parse_combo_key("MOW-TBS~1"), Some((vec!["MOW".to_string(), "TBS".to_string()], vec![1])));
+        assert_eq!(picked.page(0, 1)[0]["combo"], json!("MOW-TBS~s1"));
+        assert_eq!(parse_combo_key("MOW-TBS~1"), Some((vec!["MOW".to_string(), "TBS".to_string()], "s1".to_string())));
+        assert_eq!(parse_combo_key("MOW-TBS~S1~N2"), Some((vec!["MOW".to_string(), "TBS".to_string()], "s1~n2".to_string())));
     }
 }

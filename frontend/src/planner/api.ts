@@ -24,6 +24,7 @@ export interface CityCombo {
   minTransfers: number
   count: number
   skipped?: number[] // пропущенные остановки (номера в запросе); codes — только города варианта
+  key?: string // ключ набора для …/routes?combos= (коды + метка варианта: ~s1 пропуски, ~n2 города блока)
 }
 
 export interface CombosPage {

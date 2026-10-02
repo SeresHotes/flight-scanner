@@ -10,8 +10,8 @@ import { JobShell } from '../planner/components/JobShell'
 const money = makeMoney('RUB')
 const PAGE = 100
 type SortKey = 'price' | 'count' | 'transfers'
-// Ключ набора — как у бэка (search::combo_key): коды через «-», пропуски — после «~».
-const comboKey = (c: CityCombo) => c.codes.join('-') + (c.skipped?.length ? `~${c.skipped.join('.')}` : '')
+// Ключ набора — с бэка (search::combo_key: коды через «-», после «~» — метка варианта).
+const comboKey = (c: CityCombo) => c.key ?? c.codes.join('-')
 
 // Режим городов: все наборы под запрос (считает бэк). Отмечаем несколько и
 // переходим к маршрутам выбранных наборов вместе.
