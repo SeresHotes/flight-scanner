@@ -45,7 +45,7 @@ export function QueryEditor({
       <div className="pl-sk-head">
         <div className="sftitle">🧭 Маршрут и условия</div>
         <div className="sfhint">
-          В каждом пункте — несколько городов на выбор или «любой» (в середине), диапазон дат —{' '}
+          В каждом пункте — несколько городов на выбор или «любой» (и в начале, и в конце), диапазон дат —{' '}
           <b>в какие даты вам ОК быть в этом городе</b> — и условия пребывания. Между пунктами — условия перелёта.
         </div>
       </div>
@@ -56,7 +56,9 @@ export function QueryEditor({
           <Fragment key={s.id}>
             <div className={`pl-stopcard ${validation.stopValid[i] ? '' : 'invalid'}`}>
               <StopRow stop={s} index={i} endpoint={endpoint} canRemove={stops.length > 2} onUpdate={updateStop} onRemove={removeStop} />
-              <NearbyRow stop={s} index={i} last={stops.length - 1} onChange={(radiusKm) => updateStop(i, { radiusKm })} />
+              {s.kind === 'cities' && (
+                <NearbyRow stop={s} index={i} last={stops.length - 1} onChange={(radiusKm) => updateStop(i, { radiusKm })} />
+              )}
               {!endpoint && <StayRow filter={query.cities[i]} onChange={(patch) => patchCity(i, patch)} />}
             </div>
             {i < stops.length - 1 && (
@@ -113,8 +115,6 @@ function StopRow({
           <button
             type="button"
             className={s.kind === 'any' ? 'active' : ''}
-            disabled={endpoint}
-            title={endpoint ? 'Конец маршрута — только конкретные города' : ''}
             onClick={() => onUpdate(i, { kind: 'any' })}
           >
             Любой
@@ -142,7 +142,9 @@ function StopRow({
             <AirportCombobox key={`add-${s.id}-${s.airports.length}`} label="" value={BLANK} onChange={addAirport} />
           </div>
         ) : (
-          <div className="pl-any">🌍 Любой город (подберём при сборе)</div>
+          <div className="pl-any">
+            {i === 0 ? '🌍 Откуда угодно' : endpoint ? '🌍 Куда угодно' : '🌍 Любой город'} (подберём при сборе)
+          </div>
         )}
       </div>
 

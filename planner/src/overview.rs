@@ -733,8 +733,13 @@ mod tests {
     }
 
     fn random_collected(seed: u64) -> Vec<Vec<std::sync::Arc<crate::ticket::Ticket>>> {
+        random_collected_to(seed, &["MOW"])
+    }
+
+    /// `last` — города прилёта последнего плеча (у «любой» последней остановки — несколько).
+    fn random_collected_to(seed: u64, last: &[&'static str]) -> Vec<Vec<std::sync::Arc<crate::ticket::Ticket>>> {
         let mut rng = Rng(seed * 104729 + 3);
-        let cities: [Vec<&str>; 5] = [vec!["MOW"], vec!["IST", "DXB", "DOH", "AUH"], vec!["SEL"], vec!["HKG", "BKK", "SIN", "IST"], vec!["MOW"]];
+        let cities: [Vec<&str>; 5] = [vec!["MOW"], vec!["IST", "DXB", "DOH", "AUH"], vec!["SEL"], vec!["HKG", "BKK", "SIN", "IST"], last.to_vec()];
         let mut collected = Vec::new();
         for i in 0..4 {
             let mut flights = Vec::new();
@@ -779,13 +784,18 @@ mod tests {
             (4, json!({"tripLength": [3, 6]})),
             (5, json!({"cities": [{}, {"mustCover": ["2026-11-02", "2026-11-03"]}, {}, {"maxStay": 2}, {}], "tripLength": [2, null], "legs": [{}, {}, {"maxTransfers": 1}, {}]})),
         ];
-        for (seed, extra, any_first) in cases.into_iter().flat_map(|(s, e)| [(s, e.clone(), false), (s, e, true)]) {
+        let ends = [(false, false), (true, false), (false, true), (true, true)];
+        for (seed, extra, (any_first, any_last)) in cases.into_iter().flat_map(|(s, e)| ends.map(|f| (s, e.clone(), f))) {
             let mut stops = stops();
             if any_first {
                 // «любая» первая остановка: старты — все города вылета первого плеча
                 stops[0] = Stop { kind: "any".into(), codes: Vec::new(), ..stops[0].clone() };
             }
-            let collected = random_collected(seed);
+            if any_last {
+                // «любая» последняя: прилёт в любой ещё не посещённый город
+                stops[4] = Stop { kind: "any".into(), codes: Vec::new(), ..stops[4].clone() };
+            }
+            let collected = if any_last { random_collected_to(seed, &["MOW", "PAR", "TYO", "DXB"]) } else { random_collected(seed) };
             let table = FlightCols::from_collected(&collected);
             let q = query(extra.clone());
             let got = build_overview(&stops, &table, Some(&q));
@@ -793,6 +803,7 @@ mod tests {
             let ctx = build_ctx(&stops, &table, Some(&q));
             let mut check = |_: usize| Ok(());
             let chains = search_cheapest(&ctx, 100000, Some(&q), &mut check).unwrap();
+            assert!(!chains.is_empty() || !extra.as_object().unwrap().is_empty(), "seed {seed}: пусто ({any_first}, {any_last})");
             let mut expected: HashMap<Vec<String>, (i64, f64, i64, i64)> = HashMap::new();
             for c in &chains {
                 let mut codes = vec![table.orig_city(c[0]).to_string()];

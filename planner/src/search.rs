@@ -1094,6 +1094,39 @@ pub mod tests {
         }
     }
 
+    /// «Любые» концы: последняя (прилёт в любой город) и обе сразу — тот же перебор.
+    #[test]
+    fn any_endpoints_match_full_enumeration() {
+        for (first, last) in [(false, true), (true, true)] {
+            for seed in 1..=8 {
+                let (mut stops, mut collected) = random_case(seed);
+                let n = stops.len() - 1;
+                // последнее плечо эталона — только в MOW (уже посещён); «любому» концу — другие города
+                for j in 0..30usize {
+                    let (o, d) = (CITIES[j % CITIES.len()], CITIES[(j * 3 + 1 + seed as usize) % CITIES.len()]);
+                    if o != d {
+                        collected[3].push(flight(o, d, 8 + (j % 12) as u32, (j % 24) as u32, ((j * 37 + seed as usize) % 60 + 1) as f64 * 100.0));
+                    }
+                }
+                if first {
+                    stops[0] = Stop { kind: "any".into(), codes: Vec::new(), ..stops[0].clone() };
+                }
+                if last {
+                    stops[n] = Stop { kind: "any".into(), codes: Vec::new(), ..stops[n].clone() };
+                }
+                let table = FlightCols::from_collected(&collected);
+                let full = brute_force(&stops, &table);
+                assert!(!full.is_empty(), "seed {seed}: перебор пуст");
+                let ctx = build_ctx(&stops, &table, None);
+                let mut check = |_: usize| Ok(());
+                let got = search_cheapest(&ctx, full.len() + 10, None, &mut check).unwrap();
+                let prices: Vec<f64> = got.iter().map(|c| c.iter().map(|&fi| table.price[fi]).sum()).collect();
+                let want: Vec<f64> = full.iter().map(|p| p.0).collect();
+                assert_eq!(prices, want, "seed {seed}, first {first}, last {last}");
+            }
+        }
+    }
+
     #[test]
     fn aborts_on_check() {
         let (stops, collected) = random_case(3);
