@@ -32,6 +32,8 @@ resource "yandex_kms_symmetric_key_iam_member" "tfstate" {
 
 resource "yandex_storage_bucket" "tfstate" {
   bucket = var.tfstate_bucket_name
+  # Без статических ключей (IAM-токеном) провайдер не знает каталог бакета — задаём явно.
+  folder_id = var.folder_id
 
   anonymous_access_flags {
     read        = false
@@ -52,13 +54,17 @@ resource "yandex_storage_bucket" "tfstate" {
     }
   }
 
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "yandex_storage_bucket_grant" "tfstate" {
+  bucket = yandex_storage_bucket.tfstate.bucket
+
   grant {
     id          = yandex_iam_service_account.tfstate.id
     type        = "CanonicalUser"
     permissions = ["READ", "WRITE"]
-  }
-
-  lifecycle {
-    prevent_destroy = true
   }
 }
