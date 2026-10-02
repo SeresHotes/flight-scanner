@@ -1,6 +1,6 @@
 import { durFmt } from '../../lib/format'
 import type { BaggageMode, LegQuery } from '../query'
-import { TRAVEL_MAX_MIN } from '../query'
+import { DAY_MIN, TRAVEL_MAX_MIN } from '../query'
 import { RangeSlider } from './RangeSlider'
 
 const TRANSFER_OPTS: { v: number; l: string }[] = [
@@ -18,8 +18,23 @@ const BAGGAGE_OPTS: { v: BaggageMode; l: string }[] = [
 
 const LAYOVER_OPTS = [0, 60, 90, 120, 180, 240]
 
+const clock = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
+const dayLabel = ([lo, hi]: [number, number]) => (lo <= 0 && hi >= DAY_MIN ? 'любое' : `${clock(lo)} – ${clock(Math.min(hi, DAY_MIN - 1))}`)
+
+// Окно времени суток (местное): слайдер 00:00–24:00 с шагом 30 мин.
+function DayWindow({ label, value, onChange }: { label: string; value: [number, number]; onChange: (v: [number, number]) => void }) {
+  return (
+    <div>
+      <div className="pl-flabel">
+        {label}: <span className="rangeval">{dayLabel(value)}</span>
+      </div>
+      <RangeSlider min={0} max={DAY_MIN} step={30} value={value} onChange={([lo, hi]) => onChange([lo, hi])} />
+    </div>
+  )
+}
+
 // Фильтры перехода между городами: пересадки, минимальное ожидание, багаж,
-// hidden-city и длительность перелёта.
+// hidden-city, длительность перелёта и время суток вылета/прилёта (местное).
 export function TransitionFilterCard({
   title,
   filter,
@@ -83,6 +98,11 @@ export function TransitionFilterCard({
           value={[filter.travelMin[0], hi]}
           onChange={([lo, h]) => onChange({ travelMin: [lo, h >= TRAVEL_MAX_MIN ? null : h] })}
         />
+      </div>
+
+      <div className="pl-fcell pl-fchecks">
+        <DayWindow label="Вылет" value={filter.depTime} onChange={(depTime) => onChange({ depTime })} />
+        <DayWindow label="Прилёт" value={filter.arrTime} onChange={(arrTime) => onChange({ arrTime })} />
       </div>
     </div>
   )

@@ -19,6 +19,8 @@ export interface LegQuery {
   maxTransfers: number // -1 — любые
   minLayoverMin: number // минимум ожидания на каждой пересадке
   travelMin: [number, number | null] // суммарная длительность перелёта, [lo, hi|∞]
+  depTime: [number, number] // время суток вылета (местное), минуты [0, DAY_MIN]
+  arrTime: [number, number] // время суток прилёта (местное), минуты [0, DAY_MIN]
   baggage: BaggageMode
   hiddenCity: boolean
 }
@@ -35,12 +37,15 @@ export interface PlanQuery {
 export const STAY_MAX = 30 // дней в городе
 export const TRAVEL_MAX_MIN = 48 * 60 // длительность перелёта, минут
 export const TRIP_MAX = 60 // длина поездки, дней
+export const DAY_MIN = 24 * 60 // окно времени суток [0, DAY_MIN] = любое
 
 export const openCity = (): CityQuery => ({ minStay: 0, maxStay: null, mustCover: null, requireWeekend: false })
 export const openLeg = (): LegQuery => ({
   maxTransfers: -1,
   minLayoverMin: 0,
   travelMin: [0, null],
+  depTime: [0, DAY_MIN],
+  arrTime: [0, DAY_MIN],
   baggage: 'any',
   hiddenCity: true,
 })
@@ -85,6 +90,8 @@ export function toApi(q: PlanQuery) {
       maxTransfers: l.maxTransfers,
       minLayoverMin: l.minLayoverMin,
       travelMin: l.travelMin,
+      depTime: l.depTime,
+      arrTime: l.arrTime,
       baggage: l.baggage,
       hiddenCity: l.hiddenCity,
     })),
@@ -96,13 +103,21 @@ export function toApi(q: PlanQuery) {
 // Компактно, без спецсимволов ('.' и '-' URLSearchParams не кодирует).
 //   st = kind.codes(-).winA.winB.radius   — по остановке (radius — км переезда, нет — 0)
 //   cf = minStay.maxStay.coverA.coverB.wk — по остановке ('' = ∞ / нет)
-//   lf = maxTransfers.minLayover.travelLo.travelHi.baggage(a|i|n).hidden(1|0) — по переходу
+//   lf = maxTransfers.minLayover.travelLo.travelHi.baggage(a|i|n).hidden(1|0)[.depLo.depHi.arrLo.arrHi]
+//        — по переходу; окна времени суток — только если заданы ('' = край суток)
 //   tl = lo.hi   mc = бюджет поездки
 
 const F = '.'
 const L = '-'
 const BAG: Record<BaggageMode, string> = { any: 'a', included: 'i', none: 'n' }
 const BAG_BACK: Record<string, BaggageMode> = { a: 'any', i: 'included', n: 'none' }
+
+export const isOpenDay = (w: [number, number]) => w[0] <= 0 && w[1] >= DAY_MIN
+const dayEnc = (w: [number, number]) => [w[0] > 0 ? w[0] : '', w[1] < DAY_MIN ? w[1] : '']
+const dayDec = (lo: string | undefined, hi: string | undefined): [number, number] => [
+  Math.max(0, Number(lo) || 0),
+  hi ? Math.min(DAY_MIN, Number(hi)) : DAY_MIN,
+]
 
 const numOrNull = (s: string | undefined): number | null => (s === undefined || s === '' ? null : Number(s))
 
@@ -118,7 +133,9 @@ export function encodeQuery(q: PlanQuery): URLSearchParams {
     sp.append('cf', [c.minStay, c.maxStay ?? '', cover[0], cover[1], c.requireWeekend ? 1 : 0].join(F))
   }
   for (const l of q.legs) {
-    sp.append('lf', [l.maxTransfers, l.minLayoverMin, l.travelMin[0], l.travelMin[1] ?? '', BAG[l.baggage], l.hiddenCity ? 1 : 0].join(F))
+    const parts: (string | number)[] = [l.maxTransfers, l.minLayoverMin, l.travelMin[0], l.travelMin[1] ?? '', BAG[l.baggage], l.hiddenCity ? 1 : 0]
+    if (!isOpenDay(l.depTime) || !isOpenDay(l.arrTime)) parts.push(...dayEnc(l.depTime), ...dayEnc(l.arrTime))
+    sp.append('lf', parts.join(F))
   }
   sp.set('tl', `${q.tripLength[0]}${F}${q.tripLength[1] ?? ''}`)
   return sp
@@ -146,13 +163,15 @@ export function decodeQuery(sp: URLSearchParams, nextId: () => string): PlanQuer
     }
   })
   const legs = sp.getAll('lf').map((raw): LegQuery => {
-    const [mt, lay, lo, hi, bag, hid] = raw.split(F)
+    const [mt, lay, lo, hi, bag, hid, dLo, dHi, aLo, aHi] = raw.split(F)
     return {
       maxTransfers: mt === undefined ? -1 : Number(mt),
       minLayoverMin: Number(lay) || 0,
       travelMin: [Number(lo) || 0, numOrNull(hi)],
       baggage: BAG_BACK[bag ?? 'a'] ?? 'any',
       hiddenCity: hid !== '0',
+      depTime: dayDec(dLo, dHi),
+      arrTime: dayDec(aLo, aHi),
     }
   })
   const tl = sp.get('tl')?.split(F)

@@ -5,6 +5,7 @@
 //! stops[]:      {kind: cities|any, codes[], window[start, end], radiusKm?}
 //! cities[]:     {minStay, maxStay, mustCover: [a, b] | null, requireWeekend}   # == stops
 //! legs[]:       {maxTransfers, minLayoverMin, travelMin: [lo, hi],
+//!                depTime: [lo, hi], arrTime: [lo, hi],                         # минуты суток, местное
 //!                baggage: any|included|none, hiddenCity}                       # == stops - 1
 //! tripLength:   [lo, hi]      maxResults: number
 //! ```
@@ -20,6 +21,8 @@ use sha1::{Digest, Sha1};
 use crate::nearby::clamp_radius;
 
 pub const BAGGAGE_MODES: [&str; 3] = ["any", "included", "none"];
+/// Минут в сутках: окно времени вылета/прилёта `[0, DAY_MIN]` = «любое».
+pub const DAY_MIN: i64 = 24 * 60;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StopSpec {
@@ -77,13 +80,16 @@ pub struct LegFilter {
     pub max_transfers: i64,
     pub min_layover_min: i64,
     pub travel_min: (i64, Option<i64>),
+    /// Время суток вылета / прилёта (местное, минуты от полуночи), включительно.
+    pub dep_time: (i64, i64),
+    pub arr_time: (i64, i64),
     pub baggage: String,
     pub hidden_city: bool,
 }
 
 impl Default for LegFilter {
     fn default() -> Self {
-        LegFilter { max_transfers: -1, min_layover_min: 0, travel_min: (0, None), baggage: "any".into(), hidden_city: true }
+        LegFilter { max_transfers: -1, min_layover_min: 0, travel_min: (0, None), dep_time: (0, DAY_MIN), arr_time: (0, DAY_MIN), baggage: "any".into(), hidden_city: true }
     }
 }
 
@@ -103,6 +109,8 @@ impl LegFilter {
         let lo = travel.first().map(|v| int_of(Some(v))).transpose()?.flatten().unwrap_or(0);
         let hi = travel.get(1).map(|v| int_of(Some(v))).transpose()?.flatten();
         Ok(LegFilter {
+            dep_time: day_window(d.get("depTime"))?,
+            arr_time: day_window(d.get("arrTime"))?,
             max_transfers: int_of(d.get("maxTransfers"))?.unwrap_or(-1),
             min_layover_min: int_of(d.get("minLayoverMin"))?.unwrap_or(0),
             travel_min: (lo, hi),
@@ -116,6 +124,8 @@ impl LegFilter {
             && self.min_layover_min <= 0
             && self.travel_min.0 <= 0
             && self.travel_min.1.is_none()
+            && self.dep_time == (0, DAY_MIN)
+            && self.arr_time == (0, DAY_MIN)
             && self.baggage == "any"
             && self.hidden_city
     }
@@ -125,13 +135,20 @@ impl LegFilter {
             "maxTransfers": self.max_transfers,
             "minLayoverMin": self.min_layover_min,
             "travelMin": [self.travel_min.0, self.travel_min.1],
+            "depTime": [self.dep_time.0, self.dep_time.1],
+            "arrTime": [self.arr_time.0, self.arr_time.1],
             "baggage": self.baggage,
             "hiddenCity": self.hidden_city,
         })
     }
 
-    /// Проходит ли рейс фильтр плеча (по уже разобранным полям колонок).
-    pub fn accepts(&self, hidden: bool, transfers: i64, duration: i64, pts_min: Option<i64>, layover: Option<i64>, bag_incl: bool) -> bool {
+    /// Проходит ли рейс фильтр плеча (по уже разобранным полям колонок; `dep_ts`/`arr_ts` —
+    /// «наивные» секунды местного времени, NaN — неизвестно, не режем).
+    #[allow(clippy::too_many_arguments)]
+    pub fn accepts(&self, hidden: bool, transfers: i64, duration: i64, pts_min: Option<i64>, layover: Option<i64>, bag_incl: bool, dep_ts: f64, arr_ts: f64) -> bool {
+        if !in_day_window(dep_ts, self.dep_time) || !in_day_window(arr_ts, self.arr_time) {
+            return false;
+        }
         if !self.hidden_city && hidden {
             return false;
         }
@@ -174,6 +191,23 @@ pub struct PlanQuery {
     pub legs: Vec<LegFilter>,
     pub trip_length: (i64, Option<i64>),
     pub max_results: Option<i64>,
+}
+
+/// Окно времени суток `[lo, hi]` в минутах: null/нет → края суток, значения зажаты в [0, DAY_MIN].
+fn day_window(v: Option<&Value>) -> Result<(i64, i64), String> {
+    let a = v.and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let lo = a.first().map(|v| int_of(Some(v))).transpose()?.flatten().unwrap_or(0).clamp(0, DAY_MIN);
+    let hi = a.get(1).map(|v| int_of(Some(v))).transpose()?.flatten().unwrap_or(DAY_MIN).clamp(0, DAY_MIN);
+    Ok((lo, hi))
+}
+
+/// Время суток момента `ts` (наивные секунды) внутри окна; открытое окно и NaN — всегда да.
+fn in_day_window(ts: f64, (lo, hi): (i64, i64)) -> bool {
+    if (lo <= 0 && hi >= DAY_MIN) || ts.is_nan() {
+        return true;
+    }
+    let m = (ts as i64).rem_euclid(86_400) / 60;
+    m >= lo && m <= hi
 }
 
 fn str_of(v: &Value) -> String {
@@ -388,10 +422,27 @@ mod tests {
     #[test]
     fn leg_filter_accepts() {
         let f = LegFilter { max_transfers: 1, min_layover_min: 60, ..Default::default() };
-        assert!(f.accepts(false, 1, 300, Some(90), None, false));
-        assert!(!f.accepts(false, 1, 300, Some(30), None, false));
-        assert!(!f.accepts(false, 2, 300, Some(90), None, false));
-        assert!(f.accepts(false, 1, 300, None, None, false)); // ожидание неизвестно — не режем
-        assert!(!f.accepts(false, 1, 300, None, Some(30), false));
+        let n = f64::NAN;
+        assert!(f.accepts(false, 1, 300, Some(90), None, false, n, n));
+        assert!(!f.accepts(false, 1, 300, Some(30), None, false, n, n));
+        assert!(!f.accepts(false, 2, 300, Some(90), None, false, n, n));
+        assert!(f.accepts(false, 1, 300, None, None, false, n, n)); // ожидание неизвестно — не режем
+        assert!(!f.accepts(false, 1, 300, None, Some(30), false, n, n));
+    }
+
+    #[test]
+    fn leg_filter_day_windows() {
+        let f = LegFilter::from_value(Some(&json!({"depTime": [360, 720], "arrTime": [null, 1320]}))).unwrap();
+        assert_eq!((f.dep_time, f.arr_time), ((360, 720), (0, 1320)));
+        assert!(!f.is_open());
+        assert!(LegFilter::from_value(Some(&json!({"depTime": [0, null]}))).unwrap().is_open());
+        // 2026-11-01 08:30 → 2026-11-01 21:00 (наивные секунды)
+        let day = 1_793_491_200.0;
+        let at = |h: f64, m: f64| day + h * 3600.0 + m * 60.0;
+        assert!(f.accepts(false, 0, 0, None, None, false, at(8.0, 30.0), at(21.0, 0.0)));
+        assert!(f.accepts(false, 0, 0, None, None, false, at(6.0, 0.0), at(22.0, 0.0))); // края включительно
+        assert!(!f.accepts(false, 0, 0, None, None, false, at(5.0, 59.0), at(21.0, 0.0)));
+        assert!(!f.accepts(false, 0, 0, None, None, false, at(8.0, 30.0), at(23.0, 0.0)));
+        assert!(f.accepts(false, 0, 0, None, None, false, f64::NAN, at(21.0, 0.0))); // неизвестно — не режем
     }
 }
