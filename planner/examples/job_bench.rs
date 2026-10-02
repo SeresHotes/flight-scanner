@@ -152,6 +152,12 @@ fn main() {
     let h = store.health();
     println!("склад: {rows} билетов, {} серий, {} МБ блоков, RSS +{} МБ, наполнение {:.1} с", h["series"], h["memory_mb"], rss_mb().saturating_sub(rss0), t.elapsed().as_secs_f64());
 
+    // снапшот: холодные части уходят в файл, в памяти — только горячие колонки
+    let snap = std::env::temp_dir().join("job_bench.snap");
+    let t = Instant::now();
+    store.save_snapshot(&snap.to_string_lossy()).unwrap();
+    let h = store.health();
+    println!("после снапшота ({:.1} с): {} МБ в памяти, {} МБ холодных частей на диске, RSS +{} МБ", t.elapsed().as_secs_f64(), h["memory_mb"], h["cold_disk_mb"], rss_mb().saturating_sub(rss0));
     let d = |n: i64| (start + Duration::days(n)).to_string();
     let st = |kind: &str, codes: &[&str], a: &str, b: &str| json!({"kind": kind, "codes": codes, "window": [a, b], "radiusKm": 0});
     let scenarios = vec![
@@ -167,10 +173,8 @@ fn main() {
         ("MOW → ANY×4 → MOW (по 3 дн)", vec![st("cities", &["MOW"], "", ""), st("any", &[], &d(0), &d(2)), st("any", &[], &d(3), &d(5)), st("any", &[], &d(6), &d(8)), st("any", &[], &d(9), &d(11)), st("cities", &["MOW"], "", "")]),
     ];
     let shared = SharedStore(store.clone());
-    let dir = std::env::temp_dir().join("job_bench");
-    std::fs::create_dir_all(&dir).unwrap();
-    println!("| сценарий | рейсов | сбор, с | колонки, с | Parquet, с | стыковка, с | маршрутов | пик сверх склада, МБ | держит таблица, МБ |");
-    println!("|---|---|---|---|---|---|---|---|---|");
+    println!("| сценарий | рейсов | сбор, с | стыковка, с | маршрутов | пик сверх склада, МБ | держит таблица, МБ |");
+    println!("|---|---|---|---|---|---|---|");
     for (label, stops_json) in scenarios {
         let n = stops_json.len();
         let q = json!({"stops": stops_json, "cities": vec![json!({}); n], "legs": vec![json!({}); n - 1], "tripLength": [0, null], "maxResults": 1000});
@@ -184,25 +188,20 @@ fn main() {
         let collected = match collect_plan(&stops, &NoSeries, view.as_ref(), &NoProgress, &mut airport_city, 1) {
             Ok(c) => c,
             Err(e) => {
-                println!("| {label} | ошибка: {e} | | | | | | {} |", peak_mb().saturating_sub(base));
+                println!("| {label} | ошибка: {e} | | | | {} | |", peak_mb().saturating_sub(base));
                 continue;
             }
         };
         let t_collect = t.elapsed().as_secs_f64();
         let flights = collected.len();
-        let t = Instant::now();
         let table = collected;
-        let t_cols = t.elapsed().as_secs_f64();
-        let t = Instant::now();
-        table.write(&dir.join("job.parquet").to_string_lossy()).unwrap();
-        let t_pq = t.elapsed().as_secs_f64();
         let t = Instant::now();
         let mut progress = |_f: usize, _e: usize| Ok(());
         let res = build_view(&stops, &table, &pq, &mut progress, &|_| {});
         let t_build = t.elapsed().as_secs_f64();
         let count = res.map(|r| r.view.count).unwrap_or(0);
         let held = rss_mb().saturating_sub(base);
-        println!("| {label} | {flights} | {t_collect:.2} | {t_cols:.2} | {t_pq:.2} | {t_build:.2} | {count} | {} | {held} |", peak_mb().saturating_sub(base));
+        println!("| {label} | {flights} | {t_collect:.2} | {t_build:.2} | {count} | {} | {held} |", peak_mb().saturating_sub(base));
         drop(table);
     }
 }

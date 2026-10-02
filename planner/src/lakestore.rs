@@ -374,8 +374,55 @@ pub struct Block {
     pub tp_pmin: Vec<i32>,
     pub tp_key: Vec<u64>,
     /// Холодная часть: все поля билета (`encode_cold`), zstd; raw_len — её размер до сжатия.
-    pub cold: Box<[u8]>,
+    /// Нужна только для полного рейса (страница маршрутов) — после снапшота лежит в его
+    /// файле на диске, в памяти — только у серий, пришедших после последнего снапшота.
+    pub cold: RwLock<Cold>,
     pub raw_len: u32,
+}
+
+/// Где лежит холодная часть блока.
+pub enum Cold {
+    /// В памяти: свежая серия, ещё не попавшая в снапшот.
+    Mem(Box<[u8]>),
+    /// В файле снапшота (`off`, `len`): файл открыт и держится, пока на него ссылаются блоки
+    /// (снапшот перезаписан — старый файл живёт до переключения блоков на новый).
+    Disk { file: Arc<std::fs::File>, off: u64, len: u32 },
+}
+
+impl Default for Cold {
+    fn default() -> Self {
+        Cold::Mem(Box::new([]))
+    }
+}
+
+impl Cold {
+    /// Сжатые байты холодной части (с диска — чтение по смещению).
+    fn bytes(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+        match self {
+            Cold::Mem(b) => Ok(std::borrow::Cow::Borrowed(b)),
+            Cold::Disk { file, off, len } => {
+                use std::os::unix::fs::FileExt;
+                let mut buf = vec![0u8; *len as usize];
+                file.read_exact_at(&mut buf, *off)?;
+                Ok(std::borrow::Cow::Owned(buf))
+            }
+        }
+    }
+
+    /// Сколько занимает в памяти.
+    fn mem_len(&self) -> usize {
+        match self {
+            Cold::Mem(b) => b.len(),
+            Cold::Disk { .. } => 0,
+        }
+    }
+
+    fn disk_len(&self) -> usize {
+        match self {
+            Cold::Mem(_) => 0,
+            Cold::Disk { len, .. } => *len as usize,
+        }
+    }
 }
 
 /// Нет значения в i32-колонках блока.
@@ -472,15 +519,18 @@ impl Block {
         self.dest.is_empty()
     }
 
+    /// Байт в памяти (горячие колонки + холодная часть, если она ещё не на диске).
     fn bytes(&self) -> usize {
-        self.len() * (4 * 4 + 8 + 4 * 4 + 2 + 8 + 4) + self.tp_ap.len() * (4 * 4 + 8) + self.cold.len() + 64
+        self.len() * (4 * 4 + 8 + 4 * 4 + 2 + 8 + 4) + self.tp_ap.len() * (4 * 4 + 8) + self.cold.read().unwrap().mem_len() + 64
     }
 
     fn rows(&self, sel: &[usize]) -> Result<LakeCols, String> {
         if sel.is_empty() {
             return Ok(LakeCols::empty());
         }
-        let raw = zstd::bulk::decompress(&self.cold, self.raw_len as usize).map_err(|e| format!("блок склада: {e}"))?;
+        let cold = self.cold.read().unwrap();
+        let packed = cold.bytes().map_err(|e| format!("блок склада: холодная часть с диска: {e}"))?;
+        let raw = zstd::bulk::decompress(&packed, self.raw_len as usize).map_err(|e| format!("блок склада: {e}"))?;
         decode_cold(&raw, self.len(), sel)
     }
 }
@@ -729,7 +779,7 @@ impl LakeStore {
             drop(tickets);
             let raw = encode_cold(cols, &rows);
             b.raw_len = raw.len() as u32;
-            b.cold = zstd::bulk::compress(&raw, 3).map_err(|e| format!("zstd: {e}"))?.into_boxed_slice();
+            b.cold = RwLock::new(Cold::Mem(zstd::bulk::compress(&raw, 3).map_err(|e| format!("zstd: {e}"))?.into_boxed_slice()));
             stats.rows += rows.len();
             stats.days += 1;
             blocks.push((key, Arc::new(b)));
@@ -957,11 +1007,12 @@ impl LakeStore {
     pub fn health(&self) -> Value {
         // порядок блокировок везде один: словарь кодов, затем серии
         let codes = self.codes.read().unwrap().names.len();
-        let (mut tickets, mut bytes, mut fetched_max) = (0usize, 0usize, 0i64);
+        let (mut tickets, mut bytes, mut disk, mut fetched_max) = (0usize, 0usize, 0usize, 0i64);
         let series = self.series.read().unwrap();
         for b in series.values() {
             tickets += b.len();
             bytes += b.bytes();
+            disk += b.cold.read().unwrap().disk_len();
             fetched_max = fetched_max.max(b.fetched);
         }
         let cities: std::collections::HashSet<u32> = series.keys().map(|(_, o)| *o).collect();
@@ -974,6 +1025,7 @@ impl LakeStore {
             "day_max": series.keys().next_back().map(|(d, _)| num_day(*d).to_string()),
             "last_fetched_at": DateTime::<Utc>::from_timestamp(fetched_max, 0).filter(|_| fetched_max > 0).map(|d| d.to_rfc3339()),
             "memory_mb": bytes / (1 << 20),
+            "cold_disk_mb": disk / (1 << 20),
             "codes": codes,
             "sync": serde_json::to_value(self.status.lock().unwrap().clone()).unwrap_or(Value::Null),
         })
@@ -982,14 +1034,18 @@ impl LakeStore {
     // ------------------------------------------------------------ снапшот
 
     /// Снапшот склада на диск (через временный файл): словарь кодов и блоки как есть.
-    /// Под блокировкой — только копия списка блоков (Arc), запись идёт без неё.
+    /// Под блокировкой — только копия списка блоков (Arc), запись идёт без неё. После
+    /// записи холодные части всех записанных блоков переключаются на новый файл — память
+    /// под них освобождается (старый файл снапшота закрывается, когда на него никто не
+    /// ссылается).
     pub fn save_snapshot(&self, path: &str) -> std::io::Result<usize> {
         self.dirty.store(false, std::sync::atomic::Ordering::Relaxed);
         let names = self.codes.read().unwrap().names.clone();
         let blocks: Vec<((i32, u32), Arc<Block>)> = self.series.read().unwrap().iter().map(|(k, b)| (*k, b.clone())).collect();
         let tmp = format!("{path}.tmp");
+        let mut cold_at: Vec<(u64, u32)> = Vec::with_capacity(blocks.len());
         {
-            let mut w = BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?);
+            let mut w = Counting { inner: BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?), pos: 0 };
             w.write_all(SNAP_MAGIC)?;
             w.write_all(&(names.len() as u32).to_le_bytes())?;
             for n in &names {
@@ -1001,7 +1057,7 @@ impl LakeStore {
                 w.write_all(&day.to_le_bytes())?;
                 w.write_all(&origin.to_le_bytes())?;
                 w.write_all(&b.fetched.to_le_bytes())?;
-                b.write_cols(&mut w)?;
+                cold_at.push(b.write_cols(&mut w)?);
             }
             let airports = self.airport_city();
             w.write_all(&(airports.len() as u32).to_le_bytes())?;
@@ -1012,15 +1068,21 @@ impl LakeStore {
                 }
             }
             w.flush()?;
-            w.get_ref().sync_all()?;
+            w.inner.get_ref().sync_all()?;
         }
         std::fs::rename(&tmp, path)?;
+        let file = Arc::new(std::fs::File::open(path)?);
+        for ((_, b), (off, len)) in blocks.iter().zip(cold_at) {
+            *b.cold.write().unwrap() = Cold::Disk { file: file.clone(), off, len };
+        }
         Ok(blocks.len())
     }
 
     /// Снапшот с диска в пустой склад. Серии раньше `cutoff` пропускаются.
     pub fn load_snapshot(&self, path: &str, cutoff: NaiveDate) -> std::io::Result<usize> {
-        let mut r = BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
+        // холодные части в память не читаются — блоки ссылаются на них в этом файле
+        let file = Arc::new(std::fs::File::open(path)?);
+        let mut r = SnapReader { inner: BufReader::with_capacity(1 << 20, std::fs::File::open(path)?), pos: 0 };
         let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, m.to_string());
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic)?;
@@ -1049,7 +1111,7 @@ impl LakeStore {
             let day = u32_(&mut r)? as i32;
             let origin = u32_(&mut r)?;
             let fetched = u64_(&mut r)? as i64;
-            let mut b = Block::read_cols(&mut r)?;
+            let mut b = Block::read_cols(&mut r, &file)?;
             b.fetched = fetched;
             let ncodes = codes.names.len();
             if [&b.origin, &b.dest, &b.orig_ap, &b.dest_ap, &b.tp_ap].iter().any(|v| v.iter().any(|&c| c as usize >= ncodes)) || origin as usize >= ncodes {
@@ -1079,6 +1141,46 @@ impl LakeStore {
 }
 
 const SNAP_MAGIC: &[u8; 8] = b"FSTORE03";
+
+/// Чтение снапшота со счётчиком позиции; холодные части пропускаются без чтения.
+struct SnapReader {
+    inner: BufReader<std::fs::File>,
+    pos: u64,
+}
+
+impl SnapReader {
+    fn skip(&mut self, n: u64) -> std::io::Result<()> {
+        self.inner.seek_relative(n as i64)?;
+        self.pos += n;
+        Ok(())
+    }
+}
+
+impl Read for SnapReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+/// Запись со счётчиком позиции — смещения холодных частей в файле снапшота.
+struct Counting<W: Write> {
+    inner: W,
+    pos: u64,
+}
+
+impl<W: Write> Write for Counting<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 /// Колонки блока в снапшоте: длина + значения little-endian.
 trait Le: Sized + Copy {
@@ -1123,7 +1225,8 @@ fn read_col<T: Le>(r: &mut impl Read) -> std::io::Result<Vec<T>> {
 }
 
 impl Block {
-    fn write_cols(&self, w: &mut impl Write) -> std::io::Result<()> {
+    /// Колонки блока в снапшот; возвращает, где в файле легла холодная часть (смещение, длина).
+    fn write_cols<W: Write>(&self, w: &mut Counting<W>) -> std::io::Result<(u64, u32)> {
         write_col(w, &self.origin)?;
         write_col(w, &self.dest)?;
         write_col(w, &self.price)?;
@@ -1143,10 +1246,16 @@ impl Block {
         write_col(w, &self.tp_pmin)?;
         write_col(w, &self.tp_key)?;
         write_col(w, &[self.raw_len])?;
-        write_col(w, &self.cold)
+        let cold = self.cold.read().unwrap();
+        let bytes = cold.bytes()?;
+        w.write_all(&(bytes.len() as u64).to_le_bytes())?;
+        let off = w.pos;
+        w.write_all(&bytes)?;
+        Ok((off, bytes.len() as u32))
     }
 
-    fn read_cols(r: &mut impl Read) -> std::io::Result<Block> {
+    /// Блок из снапшота: горячие колонки — в память, холодная часть — ссылкой на `file`.
+    fn read_cols(r: &mut SnapReader, file: &Arc<std::fs::File>) -> std::io::Result<Block> {
         let mut b = Block {
             origin: read_col(r)?,
             dest: read_col(r)?,
@@ -1169,7 +1278,15 @@ impl Block {
             ..Block::default()
         };
         b.raw_len = read_col::<u32>(r)?.first().copied().unwrap_or(0);
-        b.cold = read_col::<u8>(r)?.into_boxed_slice();
+        let mut n = [0u8; 8];
+        r.read_exact(&mut n)?;
+        let len = u64::from_le_bytes(n);
+        if len > u32::MAX as u64 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "холодная часть снапшота слишком длинная"));
+        }
+        let off = r.pos;
+        r.skip(len)?;
+        b.cold = RwLock::new(Cold::Disk { file: file.clone(), off, len: len as u32 });
         let n = b.origin.len();
         let t = b.tp_ap.len();
         let ok = [b.dest.len(), b.price.len(), b.orig_ap.len(), b.dest_ap.len(), b.dep.len(), b.arr.len(), b.dur.len(), b.transfers.len(), b.flags.len(), b.pts_min.len(), b.key.len()].iter().all(|&l| l == n)
@@ -1393,9 +1510,22 @@ pub mod tests {
         let dir = std::env::temp_dir().join(format!("lakestore-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("store.snap").to_string_lossy().to_string();
+        let before = s.select(&["MOW".into()], &[], &[], d("2026-10-10"), d("2026-10-12"), 100).unwrap();
+        let on_disk = |st: &LakeStore| st.series.read().unwrap().values().all(|b| matches!(*b.cold.read().unwrap(), Cold::Disk { .. }));
+        assert!(!on_disk(&s));
         assert_eq!(s.save_snapshot(&path).unwrap(), 3);
+        // после снапшота холодные части — в файле, билеты разбираются оттуда
+        assert!(on_disk(&s));
+        assert_eq!(s.select(&["MOW".into()], &[], &[], d("2026-10-10"), d("2026-10-12"), 100).unwrap(), before);
+        // повторный снапшот поверх: читает холодные части из старого файла, переключает на новый
+        s.apply(&meta("tickets/fetched=2026-10-03/origin=MOW/MOW-ANY__2026-10-12__08-00-00Z.parquet"), &cols(&[ticket("MOW", "TAS", "2026-10-12", 150.0)]), cutoff).unwrap();
+        assert!(!on_disk(&s));
+        assert_eq!(s.save_snapshot(&path).unwrap(), 3);
+        assert!(on_disk(&s));
         let t = LakeStore::new();
         assert_eq!(t.load_snapshot(&path, d("2026-10-11")).unwrap(), 2);
+        assert!(on_disk(&t));
+        assert_eq!(t.select(&["MOW".into()], &[], &[], d("2026-10-12"), d("2026-10-12"), 100).unwrap().iter().map(|x| x.destination.clone().unwrap()).collect::<Vec<_>>(), vec!["TAS"]);
         let a = s.select(&["MOW".into()], &[], &[], d("2026-10-11"), d("2026-10-12"), 100).unwrap();
         let b = t.select(&["MOW".into()], &[], &[], d("2026-10-11"), d("2026-10-12"), 100).unwrap();
         assert_eq!(a, b);
