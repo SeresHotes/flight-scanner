@@ -8,8 +8,6 @@ name: Deploy
 # (infra/terraform/github.tf, job в environment prod — туда пускают только main), SSH-ключ
 # деплоя — из Lockbox flights-ops. Переменные environment prod (YC_CI_SA_ID, YC_REGISTRY_ID,
 # LOCKBOX_OPS_ID, VM_HOST, VM_SSH_KNOWN_HOSTS) заводит infra/terraform/bootstrap.sh.
-# Пока его не запускали — старый путь: секреты репозитория YC_SA_KEY_JSON / YC_FOLDER_ID /
-# YC_REGISTRY_ID (удаляются после переезда, README).
 
 on:
   push:
@@ -47,12 +45,9 @@ jobs:
         env:
           CI_SA_ID: ${{ vars.YC_CI_SA_ID }}
           LOCKBOX_OPS_ID: ${{ vars.LOCKBOX_OPS_ID }}
-          YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
         run: |
           if [ -n "$CI_SA_ID" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"; echo "mode=oidc" >> "$GITHUB_OUTPUT"
-          elif [ -n "$YC_SA_KEY_JSON" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"; echo "mode=key" >> "$GITHUB_OUTPUT"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Доступ к Yandex Cloud не настроен — деплой пропущен (infra/terraform/README.md)."
@@ -63,34 +58,19 @@ jobs:
         if: steps.check.outputs.ok == 'true'
 
       - uses: ./.github/actions/yc-oidc
-        if: steps.check.outputs.mode == 'oidc'
+        if: steps.check.outputs.ok == 'true'
         with:
           service-account-id: ${{ vars.YC_CI_SA_ID }}
 
       - name: Docker login (IAM token)
-        if: steps.check.outputs.mode == 'oidc'
+        if: steps.check.outputs.ok == 'true'
         run: printf '%s' "$YC_TOKEN" | docker login cr.yandex --username iam --password-stdin
-
-      # Старый путь — authorized-key SA flights-ci; уйдёт вместе с секретом YC_SA_KEY_JSON.
-      - name: Docker login (SA key, legacy)
-        if: steps.check.outputs.mode == 'key'
-        env:
-          YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
-          YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
-        run: |
-          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i "$HOME/yc" -n
-          printf '%s' "$YC_SA_KEY_JSON" > "$HOME/sa-key.json"
-          "$HOME/yc/bin/yc" config profile create ci 2>/dev/null || "$HOME/yc/bin/yc" config profile activate ci
-          "$HOME/yc/bin/yc" config set service-account-key "$HOME/sa-key.json"
-          "$HOME/yc/bin/yc" config set folder-id "$YC_FOLDER_ID"
-          "$HOME/yc/bin/yc" iam create-token | docker login cr.yandex --username iam --password-stdin
-          rm -f "$HOME/sa-key.json"
 
       # Четыре образа из четырёх Dockerfile; общий код core/ копируется в каждый.
       - name: Build & push images
         if: steps.check.outputs.ok == 'true'
         env:
-          REGISTRY_ID: ${{ vars.YC_REGISTRY_ID || secrets.YC_REGISTRY_ID }}
+          REGISTRY_ID: ${{ vars.YC_REGISTRY_ID }}
         run: |
           SHA="${GITHUB_SHA::7}"
           for pair in planner:deploy/Dockerfile.planner collector:deploy/Dockerfile.collector crawler:deploy/Dockerfile.crawler web:deploy/Dockerfile.web; do

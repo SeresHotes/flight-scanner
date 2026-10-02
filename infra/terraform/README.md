@@ -127,10 +127,9 @@ cd infra/terraform && git pull && ./bootstrap.sh
 `terraform.tfstate.pre-s3` → environment `prod` (только `main`) и переменные. Повторный
 запуск безопасен. Проверка: `gh workflow run terraform.yml -f command=plan` → «No changes».
 
-После первого зелёного `deploy.yml` через OIDC — убрать старый ключ: удалить ресурс
-`yandex_iam_service_account_key.ci` и выход `ci_sa_key_json`, `apply` (ключ отзывается), удалить
-секреты репозитория `YC_SA_KEY_JSON`, `YC_FOLDER_ID`, `YC_REGISTRY_ID` и legacy-шаг в
-`deploy.yml`. Локальные `terraform.tfstate.pre-s3*` (в них секреты) — удалить.
+Выполнен 02.10.2026. Затем старый authorized-key `flights-ci` удалён из Terraform (ключ
+отозван `apply`), секреты репозитория `YC_SA_KEY_JSON`, `YC_FOLDER_ID`, `YC_REGISTRY_ID` —
+удалены. Локальные `terraform.tfstate.pre-s3*` (в них секреты) — удалить.
 
 ## Эксплуатация
 

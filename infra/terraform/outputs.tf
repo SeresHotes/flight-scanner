@@ -50,18 +50,6 @@ output "s3_secret_key" {
   sensitive   = true
 }
 
-output "ci_sa_key_json" {
-  description = "Authorized-key SA для GitHub Actions (в секрет YC_SA_KEY_JSON)"
-  sensitive   = true
-  value = jsonencode({
-    id                 = yandex_iam_service_account_key.ci.id
-    service_account_id = yandex_iam_service_account_key.ci.service_account_id
-    key_algorithm      = yandex_iam_service_account_key.ci.key_algorithm
-    public_key         = yandex_iam_service_account_key.ci.public_key
-    private_key        = yandex_iam_service_account_key.ci.private_key
-  })
-}
-
 # --- Для GitHub Actions (переменные environment prod, см. README) ---
 
 output "tfstate_bucket" {
