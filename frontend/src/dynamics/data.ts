@@ -238,17 +238,24 @@ export function profileSeries(daySeries: Series[], snapshots: DynSnapshot[], ste
   const days = obsDays(snapshots)
   const picked = days.filter((_, i) => (days.length - 1 - i) % step === 0)
   const today = localDay(Date.now())
-  return picked.map((day, i) => {
-    const t = Math.min(localDayEnd(day), snapTime(snapshots[snapshots.length - 1]))
-    const points: Point[] = daySeries.map((s, di) => {
-      const p = asOf(s, t)
-      return { t: dayTime(s.id), v: p ? p.v : null, si: p ? p.si : -1 - di, fi: p?.fi }
-    })
-    const last = i === picked.length - 1
+  const lines = picked.map((day) => {
+    // только дни вылета, которые в этот день действительно смотрели (последний снимок
+    // дня); не смотрели — точки нет, цена с прошлых дней не переносится
+    const points: Point[] = []
+    for (const s of daySeries) {
+      let p: Point | null = null
+      for (const q of s.points) if (localDay(q.t) === day && (!p || q.t >= p.t)) p = q
+      if (p) points.push({ t: dayTime(s.id), v: p.v, si: p.si, fi: p.fi })
+    }
+    return { day, points }
+  })
+  const kept = lines.filter((l) => l.points.some((p) => p.v !== null))
+  return kept.map(({ day, points }, i) => {
+    const last = i === kept.length - 1
     const back = Math.round((dayTime(today) - dayTime(day)) / 86400e3)
     const ago = back === 0 ? 'сегодня' : back === 1 ? 'вчера' : `${back} ${plural(back, 'день', 'дня', 'дней')} назад`
     // старые — тусклые, свежие — светлее, последний день — акцентный
-    const color = last ? PALETTE[0] : mix('#3a4256', '#aab6d0', picked.length > 1 ? i / (picked.length - 1) : 1)
+    const color = last ? PALETTE[0] : mix('#3a4256', '#aab6d0', kept.length > 1 ? i / (kept.length - 1) : 1)
     return { id: `asof-${day}`, label: `${dayLabel(day)} (${ago})`, color, points }
   })
 }
