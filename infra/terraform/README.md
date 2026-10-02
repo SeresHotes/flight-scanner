@@ -15,11 +15,19 @@ Container Registry: cr.yandex/<reg>/flights-planner|flights-collector|flights-cr
 ## Ресурсы (Terraform)
 
 - SA `flights-app` — `storage.admin` + `container-registry.images.puller`, статический S3-ключ; это SA самой VM.
-- SA `flights-ci` — `container-registry.images.pusher`, authorized-key для GitHub Actions.
+- SA `flights-ci` — `container-registry.images.pusher`; GitHub Actions входит им через федерацию (ниже).
+- SA `flights-terraform` — `admin` на каталог, для `terraform.yml` (тоже через федерацию).
+- Федерация `flights-github` (Workload Identity, `github.tf`), Lockbox `flights-terraform` и `flights-ops`.
+- Состояние Terraform — бакет `sereshotes-flights-tfstate` (`state.tf`, `backend.tf`): приватный,
+  KMS-ключ `flights-tfstate`, версионирование, блокировка lock-файлом; пишет SA `flights-tfstate`.
 - Bucket `bucket_name` (Object Storage), Registry `flights`, сеть `flights-net` + подсеть.
 - VM `flights-app` (standard-v3, 2 vCPU / 100% / 12 ГБ, диск 100 ГБ, статический публичный IP `yandex_vpc_address.app`) + cloud-init. Память меняется на месте с остановкой VM (`allow_stopping_for_update`); размер диска на живой VM — `yc compute disk update <id> --size N` (в Terraform игнорируется).
 
 ## Разовый провижининг
+
+С нуля (бакета состояния ещё нет): первый `apply` — с локальным state (как в `bootstrap.sh`:
+`bootstrap_override.tf` с `backend "local" {}`), затем `./bootstrap.sh` переносит его в бакет.
+Ниже — исторический порядок первого развёртывания.
 
 ```sh
 cd infra/terraform
@@ -54,22 +62,79 @@ terraform output vm_external_ip
 После DNS Caddy автоматически берёт Let's Encrypt-сертификат (HTTP-01). Проверка:
 `curl -fsS https://flights.sereshotes.dev/api/health`.
 
-## Авто-деплой из GitHub
+## Состояние Terraform и локальный запуск
 
-Задать секреты репозитория (Settings → Secrets and variables → Actions):
+State лежит не на ноутбуке, а в бакете `sereshotes-flights-tfstate` (`backend.tf`). В нём
+секреты (ключи SA, S3-ключ приложения, токен в user-data VM — Terraform хранит все
+атрибуты ресурсов, `sensitive` прячет их только из вывода), поэтому бакет приватный и
+шифруется KMS. Предыдущие версии state — в версиях объекта (`yc storage s3api
+list-object-versions --bucket sereshotes-flights-tfstate`). Одновременный `apply`
+(ваш и из CI) не испортит state: второй ждёт lock-файл (`use_lockfile`, Object Storage
+поддерживает условную запись — проверено 02.10.2026).
+
+Локально — через обёртку: она берёт IAM-токен вашего `yc`, а ключ бакета и токен
+Travelpayouts — из Lockbox `flights-terraform`:
 
 ```sh
-terraform output -raw registry_id     # → секрет YC_REGISTRY_ID
-echo "$YC_FOLDER_ID"                   # → секрет YC_FOLDER_ID
-terraform output -raw ci_sa_key_json   # → секрет YC_SA_KEY_JSON
+cd infra/terraform
+./tf.sh plan
+./tf.sh apply
 ```
 
-Дальше push в `main` (пути api/core/storage/frontend/deploy) → GitHub Actions собирает
-и пушит образы → VM подхватывает их таймером `flights-update` без ручного вмешательства.
+## GitHub Actions без ключей
+
+В GitHub нет ни одного долгоживущего секрета Yandex Cloud. Job берёт у GitHub OIDC-токен
+(«workflow репо `SeresHotes/flight-scanner` в environment `prod`») и меняет его в
+`auth.yandex.cloud` на IAM-токен SA (≤ 12 ч) — `.github/actions/yc-oidc`. Федерация
+`flights-github` выдаёт токен только subject `repo:SeresHotes/flight-scanner:environment:prod`,
+а в environment `prod` GitHub пускает только ветку `main`: workflow с другой ветки
+(изменённый в PR, запущенный с `--ref`) токена не получит. Секреты для CI — в Lockbox,
+читают их те же SA по IAM-токену (`.github/scripts/lockbox.sh`):
+
+| Lockbox | ключи | кто читает |
+|---|---|---|
+| `flights-terraform` | `tfstate_access_key`, `tfstate_secret_key`, `travelpayouts_token` | `flights-terraform` |
+| `flights-ops` | `vm_ssh_key` (ключ деплоя, пара — `ci_ssh_public_key`) | `flights-ci` |
+
+В environment `prod` — только переменные (ID, не секреты): `YC_CLOUD_ID`, `YC_FOLDER_ID`,
+`YC_REGISTRY_ID`, `YC_CI_SA_ID`, `YC_TERRAFORM_SA_ID`, `LOCKBOX_TERRAFORM_ID`,
+`LOCKBOX_OPS_ID`, `VM_HOST`, `VM_SSH_KNOWN_HOSTS`, `TF_BUCKET_NAME`, `TF_SSH_PUBLIC_KEY`,
+`TF_CI_SSH_PUBLIC_KEY`.
+
+Workflow:
+
+- `deploy.yml` — push в `main` → сборка и push образов (`flights-ci`) → `systemctl start
+  flights-update` на VM по SSH (иначе таймер, ~2 мин).
+- `terraform.yml` — push в `main` с правками `infra/terraform/**` → `plan`;
+  `gh workflow run terraform.yml -f command=apply` → plan + apply смёрженного кода.
+- `ops.yml` — команда на VM по SSH: `gh workflow run ops.yml -f command='…'`, вывод —
+  `gh run view <id> --log`. Для облачных сессий Claude: у них нет SSH (только HTTP через
+  прокси) и ключей, а `gh` работает. **Репозиторий публичный — логи Actions видны всем**:
+  не печатать `.env`, `docker inspect`, переменные контейнеров и персональные данные.
+
+### Разовый переезд (02.10.2026)
+
+Из основного checkout, где лежит локальный `terraform.tfstate`, после мержа этих файлов в main:
+
+```sh
+cd infra/terraform && git pull && ./bootstrap.sh
+```
+
+Скрипт: `terraform apply` при локальном state (бакет состояния, SA, федерация, Lockbox —
+спросит подтверждение) → секреты в Lockbox (статический ключ `flights-tfstate`, токен из
+`terraform.tfvars`, новый SSH-ключ деплоя `~/.ssh/flights_ci_deploy_ed25519`) → ключ деплоя
+в `authorized_keys` VM → `terraform init -migrate-state`, локальный файл →
+`terraform.tfstate.pre-s3` → environment `prod` (только `main`) и переменные. Повторный
+запуск безопасен. Проверка: `gh workflow run terraform.yml -f command=plan` → «No changes».
+
+После первого зелёного `deploy.yml` через OIDC — убрать старый ключ: удалить ресурс
+`yandex_iam_service_account_key.ci` и выход `ci_sa_key_json`, `apply` (ключ отзывается), удалить
+секреты репозитория `YC_SA_KEY_JSON`, `YC_FOLDER_ID`, `YC_REGISTRY_ID` и legacy-шаг в
+`deploy.yml`. Локальные `terraform.tfstate.pre-s3*` (в них секреты) — удалить.
 
 ## Эксплуатация
 
-- SSH: `ssh ubuntu@<vm_external_ip>`.
+- SSH: `ssh ubuntu@<vm_external_ip>`; без SSH (облачная сессия) — `ops.yml` выше.
 - Логи стека: `sudo journalctl -u flights -f` и `cd /opt/flights && sudo docker compose logs -f`.
 - Форсировать апдейт: `sudo systemctl start flights-update`.
 - Старые образы `run.sh` удаляет сам (`docker image prune -f` до pull и после up).

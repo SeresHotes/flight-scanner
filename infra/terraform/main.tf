@@ -144,7 +144,7 @@ resource "yandex_compute_instance" "app" {
   }
 
   metadata = {
-    ssh-keys  = "ubuntu:${var.ssh_public_key}"
+    ssh-keys  = join("\n", [for k in [var.ssh_public_key, var.ci_ssh_public_key] : "ubuntu:${k}" if k != ""])
     user-data = local.cloud_init
   }
 

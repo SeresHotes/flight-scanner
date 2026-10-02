@@ -1,0 +1,95 @@
+name: Terraform
+
+# plan/apply infra/terraform из GitHub Actions — без ключей: IAM-токен SA flights-terraform
+# через федерацию (job в environment prod, туда пускают только main), ключ бакета состояния
+# и токен Travelpayouts — из Lockbox flights-terraform. Запускается из main, поэтому
+# применяется только смёрженный код.
+#   push в main (infra/terraform/**) — plan;
+#   gh workflow run terraform.yml -f command=plan|apply — руками или из облачной сессии Claude.
+# Логи публичного репо видны всем: секреты маскируются, sensitive-значения plan не печатает.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "plan или apply (apply применяет только что построенный plan)"
+        type: choice
+        options: [plan, apply]
+        default: plan
+
+concurrency:
+  group: terraform
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra/terraform
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+      TF_CLI_CONFIG_FILE: ${{ github.workspace }}/infra/terraform/terraform.rc.example
+      TF_VAR_cloud_id: ${{ vars.YC_CLOUD_ID }}
+      TF_VAR_folder_id: ${{ vars.YC_FOLDER_ID }}
+      TF_VAR_bucket_name: ${{ vars.TF_BUCKET_NAME }}
+      TF_VAR_ssh_public_key: ${{ vars.TF_SSH_PUBLIC_KEY }}
+      TF_VAR_ci_ssh_public_key: ${{ vars.TF_CI_SSH_PUBLIC_KEY }}
+    steps:
+      # Переменные environment prod появляются после infra/terraform/bootstrap.sh.
+      - name: Check environment configured
+        id: check
+        working-directory: .
+        env:
+          SA_ID: ${{ vars.YC_TERRAFORM_SA_ID }}
+        run: |
+          if [ -n "$SA_ID" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Environment prod не настроен — запустите infra/terraform/bootstrap.sh (README)."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.ok == 'true'
+
+      - uses: hashicorp/setup-terraform@v3
+        if: steps.check.outputs.ok == 'true'
+        with:
+          terraform_version: 1.16.3
+          terraform_wrapper: false
+
+      - uses: ./.github/actions/yc-oidc
+        if: steps.check.outputs.ok == 'true'
+        with:
+          service-account-id: ${{ vars.YC_TERRAFORM_SA_ID }}
+
+      - name: Secrets from Lockbox
+        if: steps.check.outputs.ok == 'true'
+        run: >
+          ../../.github/scripts/lockbox.sh ${{ vars.LOCKBOX_TERRAFORM_ID }}
+          tfstate_access_key=AWS_ACCESS_KEY_ID
+          tfstate_secret_key=AWS_SECRET_ACCESS_KEY
+          travelpayouts_token=TF_VAR_travelpayouts_token
+
+      - name: Init
+        if: steps.check.outputs.ok == 'true'
+        run: terraform init
+
+      - name: Plan
+        if: steps.check.outputs.ok == 'true'
+        run: terraform plan -lock-timeout=5m -out=tfplan -no-color
+
+      - name: Apply
+        if: steps.check.outputs.ok == 'true' && github.event_name == 'workflow_dispatch' && inputs.command == 'apply'
+        run: terraform apply -lock-timeout=5m -no-color tfplan

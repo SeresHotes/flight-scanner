@@ -9,3 +9,4 @@ crash.log
 terraform.rc
 tfplan
 *.tfplan
+*_override.tf
