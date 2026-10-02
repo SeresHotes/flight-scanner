@@ -2,7 +2,7 @@
 
 ```
 React (Vite, :5173) ──POST /api/plan/run──> planner, Rust/axum (:8000) ──> search (A*) / overview
-   /combos, /routes  ──GET  …/combos|routes─>        │  └──> SQLite data/flights.db (джобы, котировки)
+   /combos, /routes  ──GET  …/combos|routes─>        │  └──> data/plan_jobs/*.json (джобы), склад в памяти
    (Vite проксирует /api → :8000;                    └──COLLECTOR_URL──> collector (:8001) ──> GraphQL
     в проде один origin через Caddy)                    очередь app>crawl, Parquet-озеро (S3 или data/lake)
 ```
@@ -24,7 +24,7 @@ poetry run uvicorn collector.main:app --port 8001            # озеро без
 COLLECTOR_URL=http://localhost:8001 cargo run --release --manifest-path planner/Cargo.toml
 # Фоновый сборщик (по желанию; ест квоту источника): CRAWL_* — crawler/config.py
 COLLECTOR_URL=http://localhost:8001 CRAWL_HORIZON_DAYS=3 poetry run python -m crawler.main
-# Без коллектора: планировщик сам ходит в GraphQL и кэширует серии в SQLite (ticket_cache).
+# Без коллектора: планировщик сам ходит в GraphQL и кэширует серии в памяти.
 cargo run --release --manifest-path planner/Cargo.toml
 # Тесты: планировщик и коллектор/краулер
 (cd planner && cargo test)

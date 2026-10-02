@@ -921,7 +921,7 @@ fn parse_day(s: &str) -> Result<NaiveDate, CollectError> {
 }
 
 /// Карта аэропорт → город: со складом — из памяти склада (строится из концов билетов при
-/// загрузке, лежит в снапшоте); без склада (локально, без озера) — из `quotes` в SQLite.
+/// загрузке, лежит в снапшоте); без склада (локально, без озера) — пустая, её дополняет сбор.
 pub fn airport_city_map(db_path: &str) -> Arc<HashMap<String, String>> {
     match global() {
         Some(store) if store.is_ready() => store.airport_city_arc(),

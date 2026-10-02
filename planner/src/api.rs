@@ -17,7 +17,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderValue;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::compression::predicate::SizeAbove;
@@ -84,7 +83,6 @@ pub struct ViewState {
 
 pub struct AppState {
     pub db_path: String,
-    pub conn: Mutex<Connection>,
     pub cancel: Arc<CancelSet>,
     pub jobs_lock: Mutex<()>,
     pub executor: Executor,
@@ -102,11 +100,8 @@ const TABLE_CACHE_SIZE: usize = 4;
 
 impl AppState {
     pub fn new(db_path: &str) -> Result<Arc<AppState>, String> {
-        let conn = hot::connect(db_path)?;
-        hot::init_db(&conn)?;
         Ok(Arc::new(AppState {
             db_path: db_path.to_string(),
-            conn: Mutex::new(conn),
             cancel: Arc::new(CancelSet::default()),
             jobs_lock: Mutex::new(()),
             executor: Executor::new("plan-worker"),
@@ -217,11 +212,7 @@ fn build_view_task(app: Arc<AppState>, job_id: String, pq: PlanQuery, state: Arc
 
 async fn health(State(app): State<Arc<AppState>>) -> Json<Value> {
     let out = tokio::task::spawn_blocking(move || {
-        let (quotes, series) = {
-            let conn = app.conn.lock().unwrap();
-            (hot::count_quotes(&conn).unwrap_or(0), hot::count_ticket_series(&conn))
-        };
-        let mut out = json!({"status": "ok", "quotes": quotes, "ticket_series": series});
+        let mut out = json!({"status": "ok", "ticket_series": hot::count_ticket_series()});
         if let Some(client) = app.collector() {
             out["collector"] = match client.health() {
                 Ok(v) => v,
@@ -313,11 +304,10 @@ async fn dynamics(State(app): State<Arc<AppState>>, Query(p): Query<DynamicsPara
 async fn rescue_jobs(State(app): State<Arc<AppState>>) -> Json<Value> {
     let hung = tokio::task::spawn_blocking(move || {
         let _guard = app.jobs_lock.lock().unwrap();
-        let conn = app.conn.lock().unwrap();
-        let hung = hot::find_hung_jobs(&conn, HUNG_JOB_SECONDS).unwrap_or_default();
+        let hung = hot::find_hung_jobs(&app.db_path, HUNG_JOB_SECONDS);
         for job_id in &hung {
             app.cancel.request(job_id);
-            let _ = hot::update_job(&conn, job_id, &[("status", json!("error")), ("error", json!(RESCUED_JOB_ERROR))]);
+            let _ = hot::update_job(&app.db_path, job_id, &[("status", json!("error")), ("error", json!(RESCUED_JOB_ERROR))]);
         }
         if !hung.is_empty() {
             println!("[rescue] сброшены зависшие джобы: {}", hung.join(", "));
@@ -359,10 +349,7 @@ fn estimate(app: &AppState, query: &PlanQuery) -> Estimate {
         }
         match &client {
             Some(c) => c.has_series(s.origin.as_deref(), s.dest.as_deref(), &s.day, "", Some(s.pages), Some(FETCH_CACHE_TTL_SECONDS)).unwrap_or(false),
-            None => {
-                let conn = app.conn.lock().unwrap();
-                hot::ticket_cache_has(&conn, s.origin.as_deref(), s.dest.as_deref(), &s.day, "", FETCH_CACHE_TTL_SECONDS, Some(s.pages))
-            }
+            None => hot::ticket_cache_has(s.origin.as_deref(), s.dest.as_deref(), &s.day, "", FETCH_CACHE_TTL_SECONDS, Some(s.pages)),
         }
     };
     let mut est = estimate_plan(&stops, Some(&probe));
@@ -411,10 +398,7 @@ fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery, fresh: bool) -> Val
     }
     let key = query.collect_key();
     // fresh — новая джоба даже при готовой с тем же ключом (замеры, scripts/prod_bench.py)
-    let existing = if fresh { None } else {
-        let conn = app.conn.lock().unwrap();
-        hot::find_job_by_key(&conn, &key, PLAN_JOB_TTL_SECONDS).unwrap_or(None)
-    };
+    let existing = if fresh { None } else { hot::find_job_by_key(&app.db_path, &key, PLAN_JOB_TTL_SECONDS) };
     if let Some(job) = existing {
         return json!({
             "status": if job.status != "done" { "collecting" } else { "done" },
@@ -425,11 +409,8 @@ fn start_plan_job(app: &Arc<AppState>, mut query: PlanQuery, fresh: bool) -> Val
     let mut payload = query.as_value();
     payload["kind"] = json!("plan");
     payload["max_results"] = json!(query.max_results);
-    {
-        let conn = app.conn.lock().unwrap();
-        if let Err(e) = hot::create_job(&conn, &job_id, &payload, est.requests, Some(&worker::initial_stage()), Some(&key)) {
-            return json!({"status": "error", "message": e});
-        }
+    if let Err(e) = hot::create_job(&app.db_path, &job_id, &payload, est.requests, Some(&worker::initial_stage()), Some(&key)) {
+        return json!({"status": "error", "message": e});
     }
     let app2 = app.clone();
     let jid = job_id.clone();
@@ -470,10 +451,7 @@ fn job_query(job: &Job, f: Option<&str>) -> Result<PlanQuery, String> {
 
 /// Готовый вид для страниц /combos и /routes (None — ещё строится/нет джобы).
 fn job_view(app: &Arc<AppState>, job_id: &str, f: Option<&str>) -> Option<Arc<ViewEntry>> {
-    let job = {
-        let conn = app.conn.lock().unwrap();
-        hot::get_job(&conn, job_id).ok().flatten()?
-    };
+    let job = hot::get_job(&app.db_path, job_id)?;
     if job.status != "done" {
         return None;
     }
@@ -596,10 +574,7 @@ struct StatusQuery {
 /// Прогресс джобы: сбор рейсов, затем стыковка под фильтры f. По готовности — сводка.
 async fn plan_job_status(State(app): State<Arc<AppState>>, Path(job_id): Path<String>, Query(q): Query<StatusQuery>) -> Json<Value> {
     let out = tokio::task::spawn_blocking(move || {
-        let job = {
-            let conn = app.conn.lock().unwrap();
-            hot::get_job(&conn, &job_id).ok().flatten()
-        };
+        let job = hot::get_job(&app.db_path, &job_id);
         let Some(job) = job else { return json!({"status": "not_found"}) };
         let mut out = json!({"status": job.status, "progress": job.progress, "total": job.total, "error": job.error, "stage": job_stage(&job)});
         if job.status != "done" {
