@@ -92,6 +92,7 @@ React (только планировщик)                FastAPI
 stops[]:        {kind: cities|any, codes[], window[start,end]}         # как сейчас
 cities[]:       {minStay, maxStay, mustCover|null, requireWeekend}      # == stops
 legs[]:         {maxTransfers, minLayoverMin, travelMin[lo,hi],
+                 depTime[lo,hi], arrTime[lo,hi],    # время суток вылета/прилёта, местное, мин; [0,1440] = любое
                  baggage: any|included|none, hiddenCity: bool}          # == stops-1
 tripLength[lo,hi], maxResults            # maxCost (бюджет) удалён 01.10.2026
 ```

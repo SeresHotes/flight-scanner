@@ -186,7 +186,7 @@ pub fn leg_rows(table: &FlightCols, legs: usize, query: Option<&PlanQuery>) -> V
             match query.and_then(|q| q.legs.get(i)) {
                 Some(lf) if !lf.is_open() => rows
                     .into_iter()
-                    .filter(|&r| lf.accepts(table.hidden[r], table.transfers[r], table.duration[r], table.pts_min[r], table.layover[r], table.bag_incl[r]))
+                    .filter(|&r| lf.accepts(table.hidden[r], table.transfers[r], table.duration[r], table.pts_min[r], table.layover[r], table.bag_incl[r], table.dep_ts[r], table.arr_ts[r]))
                     .collect(),
                 _ => rows,
             }
