@@ -160,13 +160,17 @@ fn main() {
         ("MOW → ANY(7 дн) → MOW", vec![st("cities", &["MOW"], "", ""), st("any", &[], &d(0), &d(6)), st("cities", &["MOW"], "", "")]),
         ("MOW → ANY → ANY → MOW (по 3 дн)", vec![st("cities", &["MOW"], "", ""), st("any", &[], &d(0), &d(2)), st("any", &[], &d(3), &d(5)), st("cities", &["MOW"], "", "")]),
         ("ANY → AAB(5 дн) → AAC", vec![st("any", &[], &d(0), &d(0)), st("cities", &["AAB"], &d(1), &d(5)), st("cities", &["AAC"], &d(6), &d(10))]),
+        ("ANY → ANY (3 дн)", vec![st("any", &[], &d(0), &d(2)), st("any", &[], "", "")]),
+        ("ANY → ANY (7 дн)", vec![st("any", &[], &d(0), &d(6)), st("any", &[], "", "")]),
+        ("ANY → ANY (14 дн)", vec![st("any", &[], &d(0), &d(13)), st("any", &[], "", "")]),
+        ("ANY → ANY → ANY (по 3 дн)", vec![st("any", &[], &d(0), &d(2)), st("any", &[], &d(3), &d(5)), st("any", &[], "", "")]),
         ("MOW → ANY×4 → MOW (по 3 дн)", vec![st("cities", &["MOW"], "", ""), st("any", &[], &d(0), &d(2)), st("any", &[], &d(3), &d(5)), st("any", &[], &d(6), &d(8)), st("any", &[], &d(9), &d(11)), st("cities", &["MOW"], "", "")]),
     ];
     let shared = SharedStore(store.clone());
     let dir = std::env::temp_dir().join("job_bench");
     std::fs::create_dir_all(&dir).unwrap();
-    println!("| сценарий | рейсов | сбор, с | колонки, с | Parquet, с | стыковка, с | маршрутов | пик сверх склада, МБ |");
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("| сценарий | рейсов | сбор, с | колонки, с | Parquet, с | стыковка, с | маршрутов | пик сверх склада, МБ | держит таблица, МБ |");
+    println!("|---|---|---|---|---|---|---|---|---|");
     for (label, stops_json) in scenarios {
         let n = stops_json.len();
         let q = json!({"stops": stops_json, "cities": vec![json!({}); n], "legs": vec![json!({}); n - 1], "tripLength": [0, null], "maxResults": 1000});
@@ -197,7 +201,8 @@ fn main() {
         let res = build_view(&stops, &table, &pq, &mut progress, &|_| {});
         let t_build = t.elapsed().as_secs_f64();
         let count = res.map(|r| r.view.count).unwrap_or(0);
-        println!("| {label} | {flights} | {t_collect:.2} | {t_cols:.2} | {t_pq:.2} | {t_build:.2} | {count} | {} |", peak_mb().saturating_sub(base));
+        let held = rss_mb().saturating_sub(base);
+        println!("| {label} | {flights} | {t_collect:.2} | {t_cols:.2} | {t_pq:.2} | {t_build:.2} | {count} | {} | {held} |", peak_mb().saturating_sub(base));
         drop(table);
     }
 }

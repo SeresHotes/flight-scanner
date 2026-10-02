@@ -98,6 +98,9 @@ pub struct AppState {
 /// Сколько таблиц рейсов джоб держать в памяти (~150 Б на рейс; вытесненная — собирается
 /// заново из склада).
 const TABLE_CACHE_SIZE: usize = 6;
+/// Потолок рейсов во всех закэшированных таблицах (последняя остаётся всегда): шесть
+/// больших джоб держали бы гигабайты, а вытесненная собирается заново за доли секунды.
+const TABLE_CACHE_FLIGHTS: usize = 2_500_000;
 
 impl AppState {
     pub fn new(db_path: &str) -> Result<Arc<AppState>, String> {
@@ -121,7 +124,7 @@ impl AppState {
         let mut tables = self.tables.lock().unwrap();
         tables.retain(|(k, _)| k != job_id);
         tables.push((job_id.to_string(), table));
-        while tables.len() > TABLE_CACHE_SIZE {
+        while tables.len() > 1 && (tables.len() > TABLE_CACHE_SIZE || tables.iter().map(|(_, t)| t.len()).sum::<usize>() > TABLE_CACHE_FLIGHTS) {
             tables.remove(0);
         }
     }

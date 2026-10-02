@@ -9,9 +9,10 @@ use crate::collect::CollectError;
 use crate::flightcols::{Fl, JobCodes};
 use crate::ticket::Ticket;
 
-/// Потолок строк одного запроса к складу: больше — запрос слишком широкий, джоба падает с
-/// понятной ошибкой (вместо молчаливого усечения).
-pub const STORE_MAX_ROWS: usize = 600_000;
+/// Потолок строк одного запроса к складу — тот же, что у всей джобы (`MAX_JOB_FLIGHTS`):
+/// больше — запрос слишком широкий, джоба падает с понятной ошибкой (вместо молчаливого
+/// усечения). Отдельного лимита на плечо нет — ограничивает только память джобы.
+pub const STORE_MAX_ROWS: usize = crate::stops::MAX_JOB_FLIGHTS;
 
 /// Источник рейсов из склада (реализует `lakestore::SharedStore`; тесты — заглушки).
 pub trait TicketStore: Send + Sync {

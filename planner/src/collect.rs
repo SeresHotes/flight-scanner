@@ -21,7 +21,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::flightcols::{ts_ord, FlightCols, FlightColsBuilder, FlightSrc, Fl, JobCodes, Tp, NO_CODE};
 use crate::stops::{collect_view, leg_dates, Stop, MAX_JOB_FLIGHTS, PAGES_ANY, PAGES_CITY};
 use crate::ticket::Ticket;
-use crate::tickets::{coverage_for, Coverage, TicketStore, STORE_MAX_ROWS};
+use crate::tickets::{coverage_for, Coverage, TicketStore};
 
 pub const MAX_PAGES: i64 = 100;
 
@@ -567,15 +567,13 @@ fn collect_threads() -> usize {
 }
 
 /// Плечо «любой → любой» из склада: вылеты из городов прилёта предыдущего плеча (если оно
-/// собрано), прилёты — в города вылета следующего (если собрано); хотя бы одна сторона задана.
+/// собрано), прилёты — в города вылета следующего (если собрано); ни одна сторона не
+/// задана (все остановки «любые») — весь склад за дни плеча.
 /// hidden-city — как у X→ANY, хабы — из dests. По дням: выборка дня → отбор → рейсы сразу
 /// в колонки джобы (`out`).
 #[allow(clippy::too_many_arguments)]
 fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String], dests: &[String], progress: &dyn CollectProgress, ac: &mut ApCity, out: &mut FlightColsBuilder) -> Result<(), CollectError> {
     let dates = leg_dates(stops, i);
-    if origins.is_empty() && dests.is_empty() {
-        return Err(CollectError::Failed(format!("плечо {} «любой → любой» не ограничено ни одной стороной", i + 1)));
-    }
     let codes = out.codes().clone();
     let allow: Option<FxHashSet<u32>> = if dests.is_empty() { None } else { Some(id_set(&codes, dests)) };
     // День = выборка склада → отбор → hidden-city; дни независимы (ключ дедупа содержит дату
@@ -583,7 +581,7 @@ fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String
     let day_job = |day: &String, base: &ApCity| -> Result<(Vec<Fl>, usize, ApCity), CollectError> {
         // Известны города вылета: берём их X→ANY целиком и режем по dests сами (hidden-city
         // через хаб из dests требует всех билетов из origins). Известны только города
-        // прилёта: срез склада по ним.
+        // прилёта: срез склада по ним. Ни то ни другое — весь день склада.
         let flights = if origins.is_empty() { view.store.flights(&[], dests, day, day, &codes)? } else { view.store.flights(origins, &[], day, day, &codes)? };
         let n = flights.len();
         let mut ac = base.clone();
@@ -593,7 +591,6 @@ fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String
         Ok((acc.finish(), n, ac))
     };
     let threads = collect_threads().min(dates.len()).max(1);
-    let mut leg_total = 0usize;
     for batch in dates.chunks(threads) {
         let base = ac.clone();
         let results: Vec<Result<(Vec<Fl>, usize, ApCity), CollectError>> = if batch.len() == 1 {
@@ -605,12 +602,7 @@ fn collect_any_any(stops: &[Stop], i: usize, view: &StoreView, origins: &[String
             })
         };
         for r in results {
-            let (kept, n, learned) = r?;
-            leg_total += n;
-            if leg_total > STORE_MAX_ROWS {
-                let side = if !origins.is_empty() { format!("из {} городов", origins.len()) } else { format!("в {} городов", dests.len()) };
-                return Err(CollectError::Failed(format!("Слишком широкий запрос: плечо {side} за {}..{} даёт больше {STORE_MAX_ROWS} рейсов. Сузьте окна дат или задайте города вместо «любых».", dates[0], dates[dates.len() - 1])));
-            }
+            let (kept, _n, learned) = r?;
             for (a, c) in learned {
                 ac.entry(a).or_insert(c);
             }
@@ -821,6 +813,34 @@ pub mod tests {
         assert!(f.1.lock().unwrap().is_empty(), "в серии не ходили");
         let calls = st.calls.lock().unwrap();
         assert!(calls.iter().any(|c| c.starts_with("tickets o=DXB,IST d= via= 2026-11-01")), "{calls:?}");
+    }
+
+    /// Все остановки «любые»: плечи ни с какой стороны не сужены — весь склад за дни плеча.
+    #[test]
+    fn all_any_takes_whole_store() {
+        let f = MapFetcher::new();
+        let st = MapStore::new();
+        st.put("MOW", "2026-11-01", vec![with_series(ticket(&["SVO", "IST"], "MOW", "IST", "2026-11-01", 100.0), "MOW")]);
+        st.put("TAS", "2026-11-01", vec![with_series(ticket(&["TAS", "BKK"], "TAS", "BKK", "2026-11-01", 50.0), "TAS")]);
+        st.put("IST", "2026-11-03", vec![with_series(ticket(&["IST", "LON"], "IST", "LON", "2026-11-03", 200.0), "IST")]);
+        st.put("BKK", "2026-11-03", vec![with_series(ticket(&["BKK", "ICN"], "BKK", "SEL", "2026-11-03", 400.0), "BKK")]);
+        let stops = vec![
+            Stop::new("any", vec![], ["2026-11-01", "2026-11-01"]),
+            Stop::new("any", vec![], ["2026-11-03", "2026-11-03"]),
+            Stop::new("any", vec![], ["", ""]),
+        ];
+        let view = store_view(Some(&st), &stops).unwrap();
+        let mut ac = HashMap::new();
+        let got = by_legs(collect_plan(&stops, &f, Some(&view), &NoProgress, &mut ac, 1).unwrap());
+        let names = |l: &Vec<std::sync::Arc<Ticket>>| {
+            let mut v: Vec<String> = l.iter().filter(|t| t.hidden_city.is_none()).map(|t| format!("{}>{}", t.origin.as_deref().unwrap(), t.destination.as_deref().unwrap())).collect();
+            v.sort();
+            v
+        };
+        // плечо 1 собирается первым (весь склад 01.11), плечо 2 — из его прилётов (IST, BKK)
+        assert_eq!(names(&got[0]), vec!["MOW>IST", "TAS>BKK"]);
+        assert_eq!(names(&got[1]), vec!["BKK>SEL", "IST>LON"]);
+        assert!(f.1.lock().unwrap().is_empty(), "в серии не ходили");
     }
 
     #[test]
