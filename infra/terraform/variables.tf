@@ -99,3 +99,29 @@ variable "rate_per_minute" {
   description = "Темп запросов коллектора к GraphQL Data API (лимит источника — 60/мин)"
   default     = 60
 }
+
+# --- Состояние Terraform и GitHub Actions (state.tf, github.tf) ---
+
+variable "tfstate_bucket_name" {
+  type        = string
+  description = "Бакет состояния Terraform (имя повторено в backend.tf — backend не принимает переменные)"
+  default     = "sereshotes-flights-tfstate"
+}
+
+variable "github_repository" {
+  type        = string
+  description = "Репозиторий GitHub (владелец/имя), чьим workflow федерация выдаёт IAM-токены"
+  default     = "SeresHotes/flight-scanner"
+}
+
+variable "github_environment" {
+  type        = string
+  description = "GitHub environment, из которого выдаются токены (в него пускают только main)"
+  default     = "prod"
+}
+
+variable "ci_ssh_public_key" {
+  type        = string
+  description = "Публичный SSH-ключ деплоя для GitHub Actions (приватный — в Lockbox flights-ops); пусто — не добавлять"
+  default     = ""
+}

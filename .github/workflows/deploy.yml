@@ -1,18 +1,15 @@
 name: Deploy
 
 # Собирает образы flights-planner (Rust, planner/), flights-collector, flights-crawler и flights-web, пушит в Yandex
-# Container Registry и (опционально) мгновенно выкатывает на VM по SSH. Если
-# SSH-секреты не заданы — VM подхватит свежие образы сама (systemd-таймер
-# flights-update каждые 2 мин).
+# Container Registry и сразу выкатывает на VM по SSH (иначе VM подхватит свежие образы
+# сама — systemd-таймер flights-update каждые 2 мин).
 #
-# Обязательные секреты (Settings → Secrets and variables → Actions):
-#   YC_SA_KEY_JSON  — authorized-key SA flights-ci (terraform output ci_sa_key_json)
-#   YC_FOLDER_ID    — ID каталога
-#   YC_REGISTRY_ID  — ID реестра (terraform output registry_id)
-# Опциональные (для мгновенного деплоя; иначе выкатка таймером ~2 мин):
-#   VM_SSH_HOST     — внешний IP VM (terraform output vm_external_ip)
-#   VM_SSH_KEY      — приватный SSH-ключ (пара к var.ssh_public_key; пользователь ubuntu)
-#   VM_SSH_USER     — пользователь SSH (по умолчанию ubuntu)
+# Вход в Yandex Cloud — без ключей: IAM-токен SA flights-ci через федерацию GitHub
+# (infra/terraform/github.tf, job в environment prod — туда пускают только main), SSH-ключ
+# деплоя — из Lockbox flights-ops. Переменные environment prod (YC_CI_SA_ID, YC_REGISTRY_ID,
+# LOCKBOX_OPS_ID, VM_HOST, VM_SSH_KNOWN_HOSTS) заводит infra/terraform/bootstrap.sh.
+# Пока его не запускали — старый путь: секреты репозитория YC_SA_KEY_JSON / YC_FOLDER_ID /
+# YC_REGISTRY_ID (удаляются после переезда, README).
 
 on:
   push:
@@ -27,6 +24,7 @@ on:
       - "deploy/**"
       - "pyproject.toml"
       - ".github/workflows/deploy.yml"
+      - ".github/actions/yc-oidc/**"
   workflow_dispatch:
 
 concurrency:
@@ -36,47 +34,63 @@ concurrency:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       pushed: ${{ steps.check.outputs.ok }}
+      ssh: ${{ steps.check.outputs.ssh }}
     steps:
-      - name: Check secrets configured
+      - name: Check credentials configured
         id: check
         env:
+          CI_SA_ID: ${{ vars.YC_CI_SA_ID }}
+          LOCKBOX_OPS_ID: ${{ vars.LOCKBOX_OPS_ID }}
           YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
         run: |
-          if [ -n "$YC_SA_KEY_JSON" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
+          if [ -n "$CI_SA_ID" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"; echo "mode=oidc" >> "$GITHUB_OUTPUT"
+          elif [ -n "$YC_SA_KEY_JSON" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"; echo "mode=key" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Секреты YC не заданы — деплой пропущен (см. infra/terraform/README.md)."
+            echo "::notice::Доступ к Yandex Cloud не настроен — деплой пропущен (infra/terraform/README.md)."
           fi
+          [ -n "$CI_SA_ID" ] && [ -n "$LOCKBOX_OPS_ID" ] && echo "ssh=true" >> "$GITHUB_OUTPUT" || true
 
       - uses: actions/checkout@v4
         if: steps.check.outputs.ok == 'true'
 
-      - name: Install yc CLI
-        if: steps.check.outputs.ok == 'true'
-        run: |
-          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i "$HOME/yc" -n
-          echo "$HOME/yc/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/yc-oidc
+        if: steps.check.outputs.mode == 'oidc'
+        with:
+          service-account-id: ${{ vars.YC_CI_SA_ID }}
 
-      - name: Authenticate to Yandex Cloud
-        if: steps.check.outputs.ok == 'true'
+      - name: Docker login (IAM token)
+        if: steps.check.outputs.mode == 'oidc'
+        run: printf '%s' "$YC_TOKEN" | docker login cr.yandex --username iam --password-stdin
+
+      # Старый путь — authorized-key SA flights-ci; уйдёт вместе с секретом YC_SA_KEY_JSON.
+      - name: Docker login (SA key, legacy)
+        if: steps.check.outputs.mode == 'key'
         env:
           YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
           YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
         run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i "$HOME/yc" -n
           printf '%s' "$YC_SA_KEY_JSON" > "$HOME/sa-key.json"
-          yc config profile create ci 2>/dev/null || yc config profile activate ci
-          yc config set service-account-key "$HOME/sa-key.json"
-          yc config set folder-id "$YC_FOLDER_ID"
-          yc container registry configure-docker
+          "$HOME/yc/bin/yc" config profile create ci 2>/dev/null || "$HOME/yc/bin/yc" config profile activate ci
+          "$HOME/yc/bin/yc" config set service-account-key "$HOME/sa-key.json"
+          "$HOME/yc/bin/yc" config set folder-id "$YC_FOLDER_ID"
+          "$HOME/yc/bin/yc" iam create-token | docker login cr.yandex --username iam --password-stdin
+          rm -f "$HOME/sa-key.json"
 
-      # Три образа из трёх Dockerfile; общий код core/ и storage/ копируется в каждый.
+      # Четыре образа из четырёх Dockerfile; общий код core/ копируется в каждый.
       - name: Build & push images
         if: steps.check.outputs.ok == 'true'
         env:
-          REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+          REGISTRY_ID: ${{ vars.YC_REGISTRY_ID || secrets.YC_REGISTRY_ID }}
         run: |
           SHA="${GITHUB_SHA::7}"
           for pair in planner:deploy/Dockerfile.planner collector:deploy/Dockerfile.collector crawler:deploy/Dockerfile.crawler web:deploy/Dockerfile.web; do
@@ -87,43 +101,41 @@ jobs:
             docker push "$IMAGE:$SHA"
           done
 
-      - name: Cleanup credentials
+      - name: Docker logout
         if: always() && steps.check.outputs.ok == 'true'
-        run: rm -f "$HOME/sa-key.json"
+        run: docker logout cr.yandex || true
 
   # Мгновенная выкатка на VM по SSH (иначе — таймер flights-update на VM, ~2 мин).
   deploy:
     needs: build-push
-    if: needs.build-push.outputs.pushed == 'true'
+    if: needs.build-push.outputs.pushed == 'true' && needs.build-push.outputs.ssh == 'true'
     runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - name: Check SSH secrets
-        id: check
-        env:
-          VM_SSH_HOST: ${{ secrets.VM_SSH_HOST }}
-          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
-        run: |
-          if [ -n "$VM_SSH_HOST" ] && [ -n "$VM_SSH_KEY" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::SSH-секреты не заданы — мгновенный деплой пропущен, VM подхватит образы таймером (~2 мин)."
-          fi
+      - uses: actions/checkout@v4
 
-      - name: Deploy over SSH
-        if: steps.check.outputs.ok == 'true'
+      - uses: ./.github/actions/yc-oidc
+        with:
+          service-account-id: ${{ vars.YC_CI_SA_ID }}
+
+      - name: SSH key from Lockbox
         env:
-          VM_SSH_HOST: ${{ secrets.VM_SSH_HOST }}
-          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
-          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+          KNOWN_HOSTS: ${{ vars.VM_SSH_KNOWN_HOSTS }}
         run: |
           mkdir -p ~/.ssh
-          printf '%s' "$VM_SSH_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          USER_NAME="${VM_SSH_USER:-ubuntu}"
-          # run.sh на VM: логин в реестр IAM-токеном SA + docker compose pull + up -d.
-          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=accept-new \
-            "$USER_NAME@$VM_SSH_HOST" 'sudo systemctl start flights-update.service'
+          .github/scripts/lockbox.sh ${{ vars.LOCKBOX_OPS_ID }} vm_ssh_key=@$HOME/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      # run.sh на VM: логин в реестр IAM-токеном SA + docker compose pull + up -d.
+      - name: Deploy over SSH
+        env:
+          VM_HOST: ${{ vars.VM_HOST }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -o IdentitiesOnly=yes -o BatchMode=yes \
+            "ubuntu@$VM_HOST" 'sudo systemctl start flights-update.service'
 
       - name: Cleanup SSH key
         if: always()
