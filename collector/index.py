@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS files (
     created_at  TEXT NOT NULL
 );
 
+-- Мелкое состояние (курсор прохода сборщика и т.п.): ключ → JSON.
+CREATE TABLE IF NOT EXISTS kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS cities (
     code        TEXT PRIMARY KEY,
     first_seen  TEXT NOT NULL,
@@ -284,6 +290,19 @@ class Index:
                 added += cur.rowcount
             self._conn.commit()
         return added
+
+    # --------------------------------- kv ----------------------------------
+
+    def get_kv(self, key: str) -> Optional[Any]:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else None
+
+    def set_kv(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+                               (key, json.dumps(value, ensure_ascii=False)))
+            self._conn.commit()
 
     # ------------------------------- cities --------------------------------
 

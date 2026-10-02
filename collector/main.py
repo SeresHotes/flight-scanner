@@ -190,6 +190,16 @@ def create_app(engine: Optional[Engine] = None, settings: Optional[Settings] = N
         eng().crawler_stats = payload
         return {"ok": True}
 
+    @app.get("/v1/crawler/state")
+    def crawler_state_get() -> Dict[str, Any]:
+        """Курсор прохода сборщика (переживает рестарты обоих контейнеров)."""
+        return {"state": eng().index.get_kv("crawler_state")}
+
+    @app.post("/v1/crawler/state")
+    def crawler_state_put(payload: Dict[str, Any]) -> Dict[str, Any]:
+        eng().index.set_kv("crawler_state", payload)
+        return {"ok": True}
+
     @app.get("/v1/lake/files")
     def lake_files(since: Optional[str] = None) -> Dict[str, Any]:
         """Файлы озера по индексу (байты — /v1/lake/file). created_at — момент загрузки (ISO)."""

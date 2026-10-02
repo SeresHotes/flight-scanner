@@ -53,6 +53,10 @@ OPS_SCHEMA = pa.schema([
     # эшелон сборщика (свежие, но старше суток — обновляются), очередь фона в оценочных страницах
     ("series_age_p95_h", pa.float64()), ("horizon_pairs", pa.int64()),
     ("crawler_refresh", pa.int64()), ("crawler_queued_pages_est", pa.int64()),
+    # проход по календарю (с 02.10.2026): номер прохода, до какого дня вылета дошёл (дней от
+    # сегодня; = горизонт + 1 — проход окончен). crawler_fresh/stale с тех пор — пары,
+    # обработанные в этом проходе / ждущие (данные с прошлого прохода); crawler_refresh — null.
+    ("crawler_pass", pa.int64()), ("crawler_sweep_offset", pa.int64()),
 ])
 
 COVERAGE_SCHEMA = pa.schema([
@@ -168,13 +172,14 @@ class Metrics:
                     "series_age_p95_h": idx.get("age_p95_h"), "series_age_max_h": idx["age_max_h"],
                     "horizon_pairs": idx.get("horizon_pairs"), "cities": stats["cities"]})
         cr = stats.get("crawler") or {}
-        row.update({"crawler_pairs": cr.get("pairs"), "crawler_fresh": cr.get("fresh"),
-                    "crawler_stale": cr.get("stale"), "crawler_missing": cr.get("missing"),
+        row.update({"crawler_pairs": cr.get("pairs"), "crawler_fresh": cr.get("done", cr.get("fresh")),
+                    "crawler_stale": cr.get("update", cr.get("stale")), "crawler_missing": cr.get("missing"),
                     "crawler_errors": cr.get("errors"), "crawler_pass_progress": cr.get("pass_progress"),
                     "crawler_submitted": cr.get("submitted"),
                     "crawler_quarantined_cities": cr.get("quarantined_cities"),
                     "crawler_refresh": cr.get("refresh"),
-                    "crawler_queued_pages_est": cr.get("queued_pages_est")})
+                    "crawler_queued_pages_est": cr.get("queued_pages_est"),
+                    "crawler_pass": cr.get("pass"), "crawler_sweep_offset": cr.get("sweep_offset")})
         self._prev_counters = counters
         self.last_row = row
         self._rows.append(row)

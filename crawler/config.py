@@ -31,27 +31,17 @@ class Settings:
     horizon_days: int = field(default_factory=lambda: _int("CRAWL_HORIZON_DAYS", 180))
     # Как часто пересчитывать план и досыпать очередь; сколько серий держать в очереди crawl.
     tick_seconds: float = field(default_factory=lambda: _float("CRAWL_TICK_SECONDS", 120))
-    # Глубина очереди — в оценочных страницах (средняя плотность × дни / 400): ~10 минут
-    # работы ручки на 60/мин (оценка грубая — с запасом к тику в 2 мин). Окон — не
-    # больше queue_target (предохранитель: при неверной оценке очередь не раздувается).
-    queue_pages: int = field(default_factory=lambda: _int("CRAWL_QUEUE_PAGES", 600))
-    queue_target: int = field(default_factory=lambda: _int("CRAWL_QUEUE_TARGET", 500))
+    # Глубина очереди — в оценочных страницах (средняя плотность × дни / 400): ~30 минут
+    # работы ручки на 60/мин — переживает паузу сборщика. Окон — не больше queue_target
+    # (предохранитель: при неверной оценке очередь не раздувается).
+    queue_pages: int = field(default_factory=lambda: _int("CRAWL_QUEUE_PAGES", 1800))
+    queue_target: int = field(default_factory=lambda: _int("CRAWL_QUEUE_TARGET", 3000))
     max_pages: int = field(default_factory=lambda: _int("CRAWL_MAX_PAGES", 100))
-    # Окна дат: бюджет билетов на серию (≈ 25 страниц; окно = бюджет / плотность города)
-    # и длина окна для города без покрытия. CRAWL_WINDOW_TICKETS=0 — по одному дню.
+    # Окна дат: бюджет билетов на запрос (≈ 25 страниц; окно = бюджет / плотность города —
+    # у Москвы день, у маленького города месяц) и длина окна для города без покрытия.
+    # CRAWL_WINDOW_TICKETS=0 — по одному дню.
     window_tickets: int = field(default_factory=lambda: _int("CRAWL_WINDOW_TICKETS", 10_000))
     unknown_window_days: int = field(default_factory=lambda: _int("CRAWL_UNKNOWN_WINDOW_DAYS", 30))
-    # Целевая свежесть по дальности даты вылета (часы). Не чаще раза в трое суток:
-    # источник сам кэширует цены ~сутки, а ежедневный опрос ближних дат съедал бы
-    # квоту в ущерб первому проходу (решение пользователя 29.09.2026).
-    near_days: int = field(default_factory=lambda: _int("CRAWL_FRESH_NEAR_DAYS", 14))
-    near_hours: float = field(default_factory=lambda: _float("CRAWL_FRESH_NEAR_HOURS", 72))
-    mid_days: int = field(default_factory=lambda: _int("CRAWL_FRESH_MID_DAYS", 60))
-    mid_hours: float = field(default_factory=lambda: _float("CRAWL_FRESH_MID_HOURS", 72))
-    far_hours: float = field(default_factory=lambda: _float("CRAWL_FRESH_FAR_HOURS", 168))
-    # Серия с ошибкой источника повторяется не раньше чем через столько часов.
-    error_retry_hours: float = field(default_factory=lambda: _float("CRAWL_ERROR_RETRY_HOURS", 24))
-    # Сбор не останавливается: свежие пары старше этого возраста обновляются вторым эшелоном
-    # (самые старые относительно цели первыми). 24 ч = TTL кэша коллектора (младше — no-op).
-    # CRAWL_REFRESH_FLOOR_HOURS=0 — выключить (как раньше: свежие не трогаем).
-    refresh_floor_hours: float = field(default_factory=lambda: _float("CRAWL_REFRESH_FLOOR_HOURS", 24))
+    # Новый проход по горизонту — не раньше чем через столько часов после начала предыдущего:
+    # источник сам кэширует цены ~сутки, чаще обновлять бессмысленно.
+    min_pass_hours: float = field(default_factory=lambda: _float("CRAWL_MIN_PASS_HOURS", 24))
