@@ -63,9 +63,10 @@ export interface DynFilters {
   baggage: boolean // только тарифы с багажом
   maxDuration: number // часы в пути, 0 — без ограничения
   airlines: string[] // пусто — все
+  price: [number, number] // цена тарифа, ₽: от и до, 0 — без границы
 }
 
-export const DEFAULT_FILTERS: DynFilters = { dep: [0, 24], arr: [0, 24], maxTransfers: -1, baggage: false, maxDuration: 0, airlines: [] }
+export const DEFAULT_FILTERS: DynFilters = { dep: [0, 24], arr: [0, 24], maxTransfers: -1, baggage: false, maxDuration: 0, airlines: [], price: [0, 0] }
 
 // Часы местного времени из ISO с поясом ('2026-10-30T10:15:00+03:00' → 10.25).
 export function hourOf(iso: string | null | undefined): number | null {
@@ -87,11 +88,14 @@ export function passes(f: DynFlight, flt: DynFilters): boolean {
   return true
 }
 
-// Цена рейса по снимкам под фильтр багажа: prices[рейс] = Map<снимок, цена>.
-export function flightPrices(data: DynResponse, baggage: boolean): Map<number, number>[] {
+// Цена рейса по снимкам под фильтры багажа и цены: prices[рейс] = Map<снимок, цена>.
+// Тарифы вне коридора цены отбрасываются до минимума: дешевле «от» — берём следующий
+// тариф рейса, дороже «до» — в снимке рейса нет.
+export function flightPrices(data: DynResponse, baggage: boolean, [pLo, pHi]: [number, number] = [0, 0]): Map<number, number>[] {
   const out: Map<number, number>[] = data.flights.map(() => new Map())
   for (const [fi, si, price, bag] of data.obs) {
     if (baggage && bag !== 1) continue
+    if ((pLo > 0 && price < pLo) || (pHi > 0 && price > pHi)) continue
     const m = out[fi]
     const cur = m.get(si)
     if (cur === undefined || price < cur) m.set(si, price)

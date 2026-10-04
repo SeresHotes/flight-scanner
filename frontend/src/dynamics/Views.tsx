@@ -1,5 +1,5 @@
-import { useContext, useMemo, useState } from 'react'
-import { PriceChart, Sparkline, YFitContext, domains, type ChartFormat, type ChartUnit } from './PriceChart'
+import { useMemo, useState } from 'react'
+import { PriceChart, Sparkline, domains, type ChartFormat, type ChartUnit } from './PriceChart'
 import {
   addDays,
   dayLabel,
@@ -51,8 +51,7 @@ function Delta({ diff, first }: { diff: number | null; first: number | null }) {
 export function GridView({ series, format, unit, onPick }: ViewProps & { onPick?: (id: string) => void }) {
   // в «рядом» каждая карточка подписана — цвет один на всех
   const sc = useMemo(() => scaled(series, unit).map((s) => (series.length > PALETTE.length ? { ...s, color: PALETTE[0] } : s)), [series, unit])
-  const fit = useContext(YFitContext)
-  const dom = useMemo(() => domains(sc, format, fit), [sc, format, fit])
+  const dom = useMemo(() => domains(sc, format), [sc, format])
   return (
     <div className="dyn-grid-view">
       {sc.map((s, i) => {

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { dayLabel, money, pct, snapLabel, type Series } from './data'
 
 // График «цена во времени». Ось X — когда смотрели цену (или день вылета — в профиле),
@@ -6,16 +6,11 @@ import { dayLabel, money, pct, snapLabel, type Series } from './data'
 // билетов не было. Наведение — вертикаль на ближайшую точку и подсказка со значениями.
 // Форматы: линия, ступеньки (цена держится до следующего снимка), область, точки,
 // столбики, коридор (от минимума до медианы подходящих рейсов).
-// Ось Y: «всё» — от минимума до максимума, «без выбросов» — редкие всплески за краем
-// (линия уходит за край, на краю — стрелка, в подсказке настоящая цена). На большом
-// графике диапазон можно задать руками: протянуть мышью по оси Y, двойной клик — сброс.
+// На большом графике диапазон оси Y можно задать руками: протянуть мышью по оси, двойной
+// клик — сброс; линия уходит за край, на краю — стрелка, в подсказке настоящая цена.
 
 export type ChartFormat = 'line' | 'step' | 'area' | 'dots' | 'bars' | 'band'
 export type ChartUnit = 'rub' | 'pct'
-export type YFit = 'all' | 'robust'
-
-// Режим оси Y на всю страницу (виды не протаскивают его через пропсы).
-export const YFitContext = createContext<YFit>('all')
 
 export const FORMATS: [ChartFormat, string][] = [
   ['line', 'Линия'],
@@ -37,26 +32,12 @@ function niceStep(span: number, count: number): number {
   return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * pow
 }
 
-// Границы без выбросов: всё, что дальше 3 межквартильных размахов от квартилей
-// (но не ближе 15% медианы — ровная цена с парой скачков на 5% выбросом не считается).
-function robustRange(vals: number[]): [number, number] {
-  const v = [...vals].sort((a, b) => a - b)
-  const q = (f: number) => v[Math.min(v.length - 1, Math.max(0, Math.round(f * (v.length - 1))))]
-  const [q1, med, q3] = [q(0.25), q(0.5), q(0.75)]
-  const reach = Math.max(3 * (q3 - q1), Math.abs(med) * 0.15, 1)
-  const lo = v.find((x) => x >= q1 - reach) ?? v[0]
-  const hi = [...v].reverse().find((x) => x <= q3 + reach) ?? v[v.length - 1]
-  return [lo, hi]
-}
-
 // Общие границы осей для набора графиков (мини-графики на одной шкале).
-export function domains(series: Series[], format: ChartFormat, fit: YFit = 'all'): { x: [number, number]; y: [number, number] } | null {
+export function domains(series: Series[], format: ChartFormat): { x: [number, number]; y: [number, number] } | null {
   const ts = series.flatMap((s) => s.points.map((p) => p.t))
   const vals = series.flatMap((s) => s.points.flatMap((p) => (p.v === null ? [] : format === 'band' && p.hi !== undefined ? [p.v, p.hi] : [p.v])))
   if (!ts.length || !vals.length) return null
-  // медиану коридора в оценку выбросов не берём — по ней не видно цену
-  const fitVals = fit === 'robust' ? series.flatMap((s) => s.points.flatMap((p) => (p.v === null ? [] : [p.v]))) : vals
-  return { x: [Math.min(...ts), Math.max(...ts)], y: fit === 'robust' ? robustRange(fitVals) : [Math.min(...vals), Math.max(...vals)] }
+  return { x: [Math.min(...ts), Math.max(...ts)], y: [Math.min(...vals), Math.max(...vals)] }
 }
 
 export function PriceChart({
@@ -94,7 +75,6 @@ export function PriceChart({
   // ручной диапазон оси Y (протянули по оси) и протяжка в процессе — в пикселях
   const [zoom, setZoom] = useState<[number, number] | null>(null)
   const [drag, setDrag] = useState<[number, number] | null>(null)
-  const fit = useContext(YFitContext)
   const clipId = `dyn-clip-${useId().replace(/[^a-zA-Z0-9]/g, '')}`
   const H = height
   const pad = mini ? PAD_MINI : PAD
@@ -113,7 +93,7 @@ export function PriceChart({
 
   const geo = useMemo(() => {
     const ts = [...new Set(series.flatMap((s) => s.points.map((p) => p.t)))].sort((a, b) => a - b)
-    const d = domains(series, format, fit)
+    const d = domains(series, format)
     if (!ts.length || !d) return null
     let [t0, t1] = xDomain ?? d.x
     const slack = xKind === 'day' ? 12 * 3600e3 : 0
@@ -168,7 +148,7 @@ export function PriceChart({
     const perSeries = Math.max(...series.map((s) => s.points.length))
     const sparse = series.length <= 8 && iw / Math.max(1, perSeries) >= 9
     return { ts, x, y, yInv, yTicks, xTicks, v0, v1, barW, nS, sparse }
-  }, [series, w, format, unit, xDomain, yDomain, xKind, mini, H, pad, fit, zoom])
+  }, [series, w, format, unit, xDomain, yDomain, xKind, mini, H, pad, zoom])
 
   if (!geo) {
     return (
