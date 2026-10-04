@@ -49,7 +49,9 @@ CREATE OR REPLACE VIEW flights.ops_metrics AS
         crawler_quarantined_cities Nullable(Int64),
         series_age_p95_h Nullable(Float64), horizon_pairs Nullable(Int64),
         crawler_refresh Nullable(Int64), crawler_queued_pages_est Nullable(Int64),
-        crawler_pass Nullable(Int64), crawler_sweep_offset Nullable(Int64)')
+        crawler_pass Nullable(Int64), crawler_sweep_offset Nullable(Int64),
+        age_le_6h Nullable(Int64), age_6_24h Nullable(Int64), age_24_48h Nullable(Int64),
+        age_gt_48h Nullable(Int64)')
     SETTINGS input_format_parquet_allow_missing_columns = 1;
 
 -- Снимок покрытия «город × день вылета» (перезаписывается раз в 10 мин).
@@ -57,5 +59,5 @@ CREATE OR REPLACE VIEW flights.coverage AS
     SELECT * FROM s3(flights_coverage, structure='
         snapshot_at DateTime(''UTC''), origin String, day Date, fetched_at DateTime(''UTC''),
         age_h Float64, pages Int32, tickets Int32, exhausted Bool, error Bool,
-        error_msg Nullable(String)')
+        error_msg Nullable(String), pass_started Nullable(DateTime(''UTC''))')
     SETTINGS input_format_parquet_allow_missing_columns = 1;

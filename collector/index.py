@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+# Корзины возраста пар горизонта (часы, верхняя граница включительно) — доля данных
+# свежее суток/двух видна сразу, без перцентилей.
+AGE_BUCKETS = {"age_le_6h": 6.0, "age_6_24h": 24.0, "age_24_48h": 48.0, "age_gt_48h": float("inf")}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS series (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -199,8 +203,8 @@ class Index:
     def age_stats(self, now: Optional[datetime] = None) -> Dict[str, Any]:
         """Число серий без ошибки (все: и прошедшие дни, и запросы приложения) и возраст
         данных сборщика в часах: медиана, p95 и максимум по парам «город × день» X→ANY
-        на дни вылета от сегодня. Прошедшие дни и пары приложения не обновляются и
-        лежат до ретеншна — по всем сериям максимум рос бы бесконечно."""
+        на дни вылета от сегодня, плюс число пар в корзинах AGE_BUCKETS. Прошедшие дни и
+        пары приложения не обновляются и лежат до ретеншна — по всем сериям максимум рос бы бесконечно."""
         now = now or utcnow()
         with self._lock:
             total = self._conn.execute("SELECT COUNT(*) FROM series WHERE error=0").fetchone()[0]
@@ -209,10 +213,14 @@ class Index:
                 "AND search_date >= ?", (now.astimezone(timezone.utc).date().isoformat(),)).fetchall()
         if not rows:
             return {"series": total, "horizon_pairs": 0, "age_p50_h": None, "age_p95_h": None,
-                    "age_max_h": None}
+                    "age_max_h": None, **{k: 0 for k in AGE_BUCKETS}}
         ages = sorted((now - parse_ts(r["fetched_at"])).total_seconds() / 3600 for r in rows)
+        buckets = dict.fromkeys(AGE_BUCKETS, 0)
+        for a in ages:
+            buckets[next(k for k, limit in AGE_BUCKETS.items() if a <= limit)] += 1
         return {"series": total, "horizon_pairs": len(ages), "age_p50_h": round(ages[len(ages) // 2], 2),
-                "age_p95_h": round(ages[int(0.95 * (len(ages) - 1))], 2), "age_max_h": round(ages[-1], 2)}
+                "age_p95_h": round(ages[int(0.95 * (len(ages) - 1))], 2), "age_max_h": round(ages[-1], 2),
+                **buckets}
 
     def coverage_errors(self) -> Dict[Tuple[str, str], str]:
         """Текст последней ошибки источника по парам X→ANY (origin, day) — для снимка покрытия."""

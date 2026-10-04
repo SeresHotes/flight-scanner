@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from collector.index import parse_ts
+from collector.index import AGE_BUCKETS, parse_ts
 
 OPS_PREFIX = "ops_metrics"
 DAY_FILE = "day.parquet"
@@ -57,6 +57,9 @@ OPS_SCHEMA = pa.schema([
     # сегодня; = горизонт + 1 — проход окончен). crawler_fresh/stale с тех пор — пары,
     # обработанные в этом проходе / ждущие (данные с прошлого прохода); crawler_refresh — null.
     ("crawler_pass", pa.int64()), ("crawler_sweep_offset", pa.int64()),
+    # с 04.10.2026: пары горизонта по возрасту (collector.index.AGE_BUCKETS)
+    ("age_le_6h", pa.int64()), ("age_6_24h", pa.int64()), ("age_24_48h", pa.int64()),
+    ("age_gt_48h", pa.int64()),
 ])
 
 COVERAGE_SCHEMA = pa.schema([
@@ -64,6 +67,9 @@ COVERAGE_SCHEMA = pa.schema([
     ("origin", pa.string()), ("day", pa.date32()), ("fetched_at", pa.timestamp("s", tz="UTC")),
     ("age_h", pa.float64()), ("pages", pa.int32()), ("tickets", pa.int32()),
     ("exhausted", pa.bool_()), ("error", pa.bool_()), ("error_msg", pa.string()),
+    # начало текущего прохода сборщика (с 04.10.2026; одно на весь снимок): пара обработана
+    # в этом проходе, если fetched_at >= pass_started
+    ("pass_started", pa.timestamp("s", tz="UTC")),
 ])
 
 
@@ -171,6 +177,7 @@ class Metrics:
         row.update({"series_total": idx["series"], "series_age_p50_h": idx["age_p50_h"],
                     "series_age_p95_h": idx.get("age_p95_h"), "series_age_max_h": idx["age_max_h"],
                     "horizon_pairs": idx.get("horizon_pairs"), "cities": stats["cities"]})
+        row.update({k: idx.get(k) for k in AGE_BUCKETS})
         cr = stats.get("crawler") or {}
         row.update({"crawler_pairs": cr.get("pairs"), "crawler_fresh": cr.get("done", cr.get("fresh")),
                     "crawler_stale": cr.get("update", cr.get("stale")), "crawler_missing": cr.get("missing"),
@@ -256,12 +263,15 @@ class Metrics:
         now = self._now()
         rows = []
         messages = self.engine.index.coverage_errors()
+        state = self.engine.index.get_kv("crawler_state") or {}
+        pass_started = parse_ts(state["pass_started"]) if state.get("pass_started") else None
         for origin, day, fetched_at, pages, tickets, exhausted, error in self.engine.index.coverage():
             fetched = parse_ts(fetched_at)
             rows.append({"snapshot_at": now, "origin": origin, "day": datetime.fromisoformat(day).date(),
                          "fetched_at": fetched, "age_h": round((now - fetched).total_seconds() / 3600, 2),
                          "pages": pages, "tickets": tickets, "exhausted": bool(exhausted), "error": bool(error),
-                         "error_msg": messages.get((origin, day)) if error else None})
+                         "error_msg": messages.get((origin, day)) if error else None,
+                         "pass_started": pass_started})
         table = pa.Table.from_pylist(rows, schema=COVERAGE_SCHEMA)
         sink = io.BytesIO()
         pq.write_table(table, sink, compression="zstd")
