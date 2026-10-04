@@ -135,6 +135,10 @@ def sweep(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: da
     days = [(today + timedelta(days=o)).isoformat() for o in range(horizon_days + 1)]
     summary = {"cities": len(cities), "pairs": 0, "done": 0, "update": 0, "missing": 0,
                "errors": 0, "quarantined_cities": 0, "queued_excluded": 0}
+    # Объём работы прохода в оценочных страницах: пара стоит средняя плотность города / 400
+    # (у Москвы ~25 страниц, у маленького города — сотая доля). Доля по страницам растёт
+    # почти линейно во времени (ручка — 60 запросов в минуту), доля по парам — нет.
+    pages_done = pages_total = 0.0
     pending_by_offset = [0] * len(days)
     items: List[Item] = []
     for rank, city in enumerate(cities):
@@ -145,6 +149,7 @@ def sweep(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: da
         known = tickets_by_city.get(city)
         max_days = 1 if quarantined else _window_days(p90(known), window_tickets, unknown_window_days,
                                                       horizon_days)
+        pair_pages = (mean(known) or 0) / PAGE_TICKETS
         run: List[Tuple[int, str]] = []
 
         def flush() -> None:
@@ -156,11 +161,13 @@ def sweep(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: da
             if quarantined and offset != 0:
                 continue
             summary["pairs"] += 1
+            pages_total += pair_pages
             entry = cov.get((city, day))
             if entry is not None and entry[1]:
                 summary["errors"] += 1
             if entry is not None and entry[0] >= pass_started:
                 summary["done"] += 1
+                pages_done += pair_pages
                 flush()
                 continue
             pending_by_offset[offset] += 1
@@ -179,6 +186,8 @@ def sweep(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: da
     summary["sweep_offset"] = len(days) if cursor is None else cursor
     summary["sweep_day"] = None if cursor is None else days[cursor]
     summary["pass_progress"] = round(summary["done"] / summary["pairs"], 4) if summary["pairs"] else 1.0
+    summary["pass_progress_pages"] = round(pages_done / pages_total, 4) if pages_total else summary["pass_progress"]
+    summary["pass_pages_est"] = round(pages_total)
     summary["pass_done"] = cursor is None
     summary["due"] = sum(it.days for it in items)
     summary["windows"] = len(items)

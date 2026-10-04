@@ -60,6 +60,8 @@ OPS_SCHEMA = pa.schema([
     # с 04.10.2026: пары горизонта по возрасту (collector.index.AGE_BUCKETS)
     ("age_le_6h", pa.int64()), ("age_6_24h", pa.int64()), ("age_24_48h", pa.int64()),
     ("age_gt_48h", pa.int64()),
+    # с 04.10.2026: доля прохода по объёму работы (оценочные страницы) и объём прохода
+    ("crawler_pass_progress_pages", pa.float64()), ("crawler_pass_pages_est", pa.int64()),
 ])
 
 COVERAGE_SCHEMA = pa.schema([
@@ -186,7 +188,9 @@ class Metrics:
                     "crawler_quarantined_cities": cr.get("quarantined_cities"),
                     "crawler_refresh": cr.get("refresh"),
                     "crawler_queued_pages_est": cr.get("queued_pages_est"),
-                    "crawler_pass": cr.get("pass"), "crawler_sweep_offset": cr.get("sweep_offset")})
+                    "crawler_pass": cr.get("pass"), "crawler_sweep_offset": cr.get("sweep_offset"),
+                    "crawler_pass_progress_pages": cr.get("pass_progress_pages"),
+                    "crawler_pass_pages_est": cr.get("pass_pages_est")})
         self._prev_counters = counters
         self.last_row = row
         self._rows.append(row)
