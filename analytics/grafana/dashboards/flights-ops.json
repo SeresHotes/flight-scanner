@@ -938,7 +938,7 @@
   },
   {
    "id": 10,
-   "title": "Когда получены данные: пар «город × день» по часу получения",
+   "title": "Когда получены данные: билетов по часу получения",
    "type": "timeseries",
    "gridPos": {
     "x": 12,
@@ -957,7 +957,7 @@
       "uid": "flights-clickhouse"
      },
      "editorType": "sql",
-     "rawSql": "SELECT toStartOfHour(fetched_at) AS time, countIf(dateDiff('day', today(), day) <= 14) AS \"вылет через 0–14 дн.\", countIf(dateDiff('day', today(), day) BETWEEN 15 AND 60) AS \"15–60 дн.\", countIf(dateDiff('day', today(), day) > 60) AS \"61–180 дн.\" FROM flights.coverage WHERE day >= today() AND NOT error AND $__timeFilter(fetched_at) GROUP BY time ORDER BY time",
+     "rawSql": "SELECT toStartOfHour(fetched_at) AS time, sumIf(tickets, dateDiff('day', today(), day) <= 14) AS \"вылет через 0–14 дн.\", sumIf(tickets, dateDiff('day', today(), day) BETWEEN 15 AND 60) AS \"15–60 дн.\", sumIf(tickets, dateDiff('day', today(), day) > 60) AS \"61–180 дн.\" FROM flights.coverage WHERE day >= today() AND NOT error AND $__timeFilter(fetched_at) GROUP BY time ORDER BY time",
      "queryType": "timeseries",
      "refId": "A"
     }
@@ -982,7 +982,7 @@
      "mode": "multi"
     }
    },
-   "description": "Распределение текущих данных по времени получения: у каждой пары «город × день» на горизонте берётся последний раз, когда её скачали, и считается, сколько пар пришлось на каждый час (цвет — дальность даты вылета). Проход идёт по календарю, поэтому цвета сменяют друг друга: сначала ближние даты, потом дальние. Снимок покрытия — раз в 10 мин."
+   "description": "Сколько билетов из текущих данных скачано в каждый час (у каждой пары «город × день» — последний раз, когда её скачали; цвет — дальность даты вылета). Считаем билеты, а не пары: билеты пропорциональны работе ручки (400 на запрос), а пары — нет: маленький город закрывает 181 пару одним запросом, и час, когда шли маленькие города, был гигантским столбиком на фоне остальных. Час без столбика — данные того часа уже перезаписаны следующим проходом. Снимок покрытия — раз в 10 мин."
   },
   {
    "id": 11,
