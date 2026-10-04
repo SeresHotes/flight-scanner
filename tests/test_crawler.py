@@ -65,13 +65,21 @@ def test_small_city_window_runs_ahead_of_cursor():
 
 def test_errors_count_as_done_and_quarantine_city():
     cov = [_row("MOW", 0, 1, error=True), _row("MOW", 1, 30, error=True), _row("MOW", 2, 30)]
-    cov += [_row("XXX", o, 30, error=True, tickets=0) for o in (0, 1, 2)]
+    cov += [_row("XXX", o, 30 + o, error=True, tickets=0) for o in (0, 1, 2)]
     items, s = sweep(["MOW", "XXX"], cov, today=TODAY, horizon_days=2, pass_started=PASS, window_tickets=None)
     mow = [i.offset for i in items if i.origin == "MOW"]
     assert mow == [1, 2]                                      # ошибка в этом проходе — до следующего
     xxx = [(i.offset, i.reason) for i in items if i.origin == "XXX"]
     assert xxx == [(0, "quarantine")]                         # карантин: одна проба (сегодня)
     assert s["quarantined_cities"] == 1 and s["errors"] == 3 and s["pairs"] == 3 + 1
+
+
+def test_one_failed_window_does_not_quarantine_city():
+    # окно на весь горизонт упало одним запросом (сбой источника на одном билете): ошибка на
+    # всех днях с одним fetched_at — это один сбой, город не в карантине
+    cov = [_row("GDL", o, 30, error=True, tickets=0) for o in range(5)]
+    items, s = sweep(["GDL"], cov, today=TODAY, horizon_days=4, pass_started=PASS, window_tickets=None)
+    assert s["quarantined_cities"] == 0 and [i.offset for i in items] == [0, 1, 2, 3, 4]
 
 
 def test_exclude_queued():

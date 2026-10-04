@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +27,12 @@ from core import graphql_api
 
 PRIORITY = {"app": 0, "crawl": 1}
 MAX_NETWORK_RETRIES = 3
+# Ошибки источника из-за одного билета в ответе (не из-за запроса): «cannot get arrival at:
+# failed to get a location for a city» — источник не находит город прилёта какого-то
+# билета и роняет весь запрос. Окно дат с такой ошибкой делится пополам, пока сбойный
+# день не останется один, — иначе все дни окна (у маленького города — весь горизонт)
+# помечались ошибкой и не обновлялись.
+SPLITTABLE_ERRORS = ("cannot get arrival",)
 GIB = 1024 ** 3
 
 
@@ -378,6 +384,9 @@ class Engine:
                     self._finish(job)
                 return
             self.counters.inc("source_errors")
+            if job.req.day_to is not None and any(m in str(e) for m in SPLITTABLE_ERRORS):
+                self._split(job)
+                return
             self._finish(job, error=str(e)[:500])
             return
         except (requests.RequestException, ValueError) as e:
@@ -400,6 +409,22 @@ class Engine:
             job.exhausted = True
         if job.exhausted or job.pages >= job.req.max_pages:
             self._finish(job)
+
+    def _split(self, job: Job) -> None:
+        """Окно дат → две половины в конец очереди (тот же клиент и приоритет); само
+        задание закрывается без записи в индекс: дни окна останутся за половинами."""
+        req, days = job.req, job.req.days
+        mid = len(days) // 2
+        halves = [replace(req, day=days[0], day_to=days[mid - 1]),
+                  replace(req, day=days[mid], day_to=days[-1])]
+        with self._cv:
+            if self._by_key.get(req.key) is job:
+                self._by_key.pop(req.key, None)
+            job.done, job.tickets, job.finished = True, [], self._clock()
+        self.counters.inc("window_splits")
+        for half in halves:
+            self.submit(half, client=job.client, ttl_seconds=0)
+        job.event.set()
 
     def _finish(self, job: Job, error: Optional[str] = None) -> None:
         now = self._now()

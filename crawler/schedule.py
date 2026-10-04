@@ -15,8 +15,11 @@
 не хранится — это первый день вылета, где есть необработанная пара (`sweep_day`); новый
 город, появившийся посреди прохода, догоняется с начала горизонта.
 
-Город, у которого одни ошибки (неизвестный источнику код), — в карантине: за проход
-проверяется одна дата (сегодня), остальные не тратят запросы.
+Город, у которого одни ошибки (неизвестный источнику код) хотя бы от QUARANTINE_ERRORS
+разных запросов, — в карантине: за проход проверяется одна дата (сегодня), остальные не
+тратят запросы. Считаются запросы (разные fetched_at), а не дни: упавшее окно пишет
+ошибку на все свои дни, и один сбой источника на окне в полгода отправлял бы живой город
+в карантин.
 
 Скорость упирается в страницы по 400 билетов: крупные окна (~25 страниц) теряют на
 неполной последней странице ~2 %, окно маленького города на месяц — одна страница
@@ -116,14 +119,14 @@ def sweep(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: da
     Возвращает (окна к подаче по календарю: по дню начала, на одном дне — города по
     порядку cities; сводка прохода для метрик)."""
     cov: Dict[Tuple[str, str], Tuple[datetime, bool]] = {}
-    errors_by_city: Dict[str, int] = {}
+    error_requests: Dict[str, Set[str]] = {}  # город → моменты упавших запросов
     ok_by_city: Dict[str, int] = {}
     tickets_by_city: Dict[str, List[int]] = {}
     for row in coverage:
         origin, day, fetched_at, _pages, tickets, _exhausted, error = row[:7]
         cov[(origin, day)] = (_parse_ts(fetched_at), bool(error))
         if error:
-            errors_by_city[origin] = errors_by_city.get(origin, 0) + 1
+            error_requests.setdefault(origin, set()).add(fetched_at)
         else:
             ok_by_city[origin] = ok_by_city.get(origin, 0) + 1
             tickets_by_city.setdefault(origin, []).append(int(tickets or 0))
@@ -135,7 +138,8 @@ def sweep(cities: Sequence[str], coverage: Iterable[Sequence[Any]], *, today: da
     pending_by_offset = [0] * len(days)
     items: List[Item] = []
     for rank, city in enumerate(cities):
-        quarantined = errors_by_city.get(city, 0) >= QUARANTINE_ERRORS and not ok_by_city.get(city)
+        quarantined = (len(error_requests.get(city, ())) >= QUARANTINE_ERRORS
+                       and not ok_by_city.get(city))
         if quarantined:
             summary["quarantined_cities"] += 1
         known = tickets_by_city.get(city)
