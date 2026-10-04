@@ -6,7 +6,7 @@ import { resolveAirport, type AirportOption } from '../data/airports'
 import { addDaysISO, daysBetweenISO, todayISO } from '../lib/dates'
 import { durFmt, plural } from '../lib/format'
 import { RangeSlider } from '../planner/components/RangeSlider'
-import { FORMATS, PriceChart, YFitContext, type ChartFormat, type ChartUnit, type YFit } from '../dynamics/PriceChart'
+import { FORMATS, PriceChart, type ChartFormat, type ChartUnit } from '../dynamics/PriceChart'
 import { CalendarView, GridView, HeatmapView, ProfileView, SingleView, TableView, WeekView } from '../dynamics/Views'
 import {
   DEFAULT_FILTERS,
@@ -75,6 +75,29 @@ const FLIGHT_VIEWS: View[] = ['overlay', 'grid', 'table']
 const isView = (v: string | null): v is View => VIEWS.some(([k]) => k === v)
 const isFormat = (v: string | null): v is ChartFormat => FORMATS.some(([k]) => k === v)
 
+// Граница цены: применяется по Enter или уходу из поля (а не на каждую цифру —
+// «3» на полпути к «30000» отрезала бы всё). Пусто или 0 — без границы.
+function PriceInput({ value, placeholder, onChange }: { value: number; placeholder: string; onChange: (v: number) => void }) {
+  const [text, setText] = useState(value ? String(value) : '')
+  useEffect(() => setText(value ? String(value) : ''), [value])
+  const commit = () => {
+    const v = Math.max(0, Math.round(Number(text.replace(/\s/g, '')) || 0))
+    if (v !== value) onChange(v)
+    else setText(v ? String(v) : '')
+  }
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={text}
+      placeholder={placeholder}
+      onChange={(e) => setText(e.target.value.replace(/[^\d\s]/g, ''))}
+      onBlur={commit}
+      onKeyDown={(e) => e.key === 'Enter' && commit()}
+    />
+  )
+}
+
 function filtersFromUrl(sp: URLSearchParams): DynFilters {
   const range = (k: string): [number, number] => {
     const v = sp.get(k)?.split('-').map(Number)
@@ -87,6 +110,7 @@ function filtersFromUrl(sp: URLSearchParams): DynFilters {
     baggage: sp.get('bag') === '1',
     maxDuration: Number(sp.get('dur') ?? 0) || 0,
     airlines: sp.get('al')?.split(',').filter(Boolean) ?? [],
+    price: [Number(sp.get('pmin')) || 0, Number(sp.get('pmax')) || 0],
   }
 }
 
@@ -98,6 +122,8 @@ function filtersToUrl(f: DynFilters, sp: URLSearchParams) {
   set('bag', f.baggage ? '1' : null)
   set('dur', f.maxDuration > 0 ? String(f.maxDuration) : null)
   set('al', f.airlines.length ? f.airlines.join(',') : null)
+  set('pmin', f.price[0] > 0 ? String(f.price[0]) : null)
+  set('pmax', f.price[1] > 0 ? String(f.price[1]) : null)
 }
 
 export function DynamicsPage() {
@@ -111,7 +137,6 @@ export function DynamicsPage() {
   const [view, setView] = useState<View>(() => (isView(sp.get('v')) ? (sp.get('v') as View) : 'overlay'))
   const [format, setFormat] = useState<ChartFormat>(() => (isFormat(sp.get('fmt')) ? (sp.get('fmt') as ChartFormat) : 'line'))
   const [unit, setUnit] = useState<ChartUnit>(sp.get('u') === 'pct' ? 'pct' : 'rub')
-  const [yfit, setYfit] = useState<YFit>(sp.get('y') === 'robust' ? 'robust' : 'all')
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [filters, setFilters] = useState<DynFilters>(() => filtersFromUrl(sp))
   const [data, setData] = useState<DynResponse | null>(null)
@@ -140,10 +165,9 @@ export function DynamicsPage() {
     if (view !== 'overlay') p.set('v', view)
     if (format !== 'line') p.set('fmt', format)
     if (unit === 'pct') p.set('u', 'pct')
-    if (yfit === 'robust') p.set('y', 'robust')
     filtersToUrl(filters, p)
     setSp(p, { replace: true })
-  }, [origin.code, dest.code, from, to, history, mode, view, format, unit, yfit, filters, setSp])
+  }, [origin.code, dest.code, from, to, history, mode, view, format, unit, filters, setSp])
 
   const toEff = to || from
   const span = from ? daysBetweenISO(from, toEff) + 1 : 0
@@ -276,7 +300,6 @@ export function DynamicsPage() {
       </div>
 
       {data && (
-        <YFitContext.Provider value={yfit}>
         <Result
           data={data}
           mode={mode}
@@ -287,8 +310,6 @@ export function DynamicsPage() {
           setFormat={setFormat}
           unit={unit}
           setUnit={setUnit}
-          yfit={yfit}
-          setYfit={setYfit}
           filters={filters}
           setF={setF}
           resetFilters={() => setFilters(DEFAULT_FILTERS)}
@@ -297,7 +318,6 @@ export function DynamicsPage() {
           showAll={showAll}
           setShowAll={setShowAll}
         />
-        </YFitContext.Provider>
       )}
     </>
   )
@@ -313,8 +333,6 @@ function Result({
   setFormat,
   unit,
   setUnit,
-  yfit,
-  setYfit,
   filters,
   setF,
   resetFilters,
@@ -332,8 +350,6 @@ function Result({
   setFormat: (f: ChartFormat) => void
   unit: ChartUnit
   setUnit: (u: ChartUnit) => void
-  yfit: YFit
-  setYfit: (f: YFit) => void
   filters: DynFilters
   setF: (p: Partial<DynFilters>) => void
   resetFilters: () => void
@@ -344,7 +360,7 @@ function Result({
 }) {
   const days = useMemo(() => dayRange(data.from, data.to), [data])
   const [focusDay, setFocusDay] = useState<string | null>(null)
-  const prices = useMemo(() => flightPrices(data, filters.baggage), [data, filters.baggage])
+  const prices = useMemo(() => flightPrices(data, filters.baggage, filters.price), [data, filters.baggage, filters.price])
   const ok = useMemo(() => data.flights.map((f) => passes(f, filters)), [data, filters])
   const airlines = useMemo(() => {
     const cnt = new Map<string, number>()
@@ -517,6 +533,14 @@ function Result({
                 ))}
               </select>
             </div>
+            <div className="ctl">
+              <label>Цена, ₽</label>
+              <div className="dyn-price">
+                <PriceInput value={filters.price[0]} placeholder="от" onChange={(v) => setF({ price: [v, filters.price[1]] })} />
+                <span>–</span>
+                <PriceInput value={filters.price[1]} placeholder="до" onChange={(v) => setF({ price: [filters.price[0], v] })} />
+              </div>
+            </div>
             {airlines.length > 1 && (
               <div className="ctl ctl-windows">
                 <label>
@@ -573,19 +597,6 @@ function Result({
                 </button>
               </div>
             </div>
-            {!chartless && (
-              <div className="dyn-vb-group">
-                <span className="dyn-vb-l">Ось цены</span>
-                <div className="segbtns">
-                  <button className={yfit === 'all' ? 'active' : ''} onClick={() => setYfit('all')} title="От самой низкой до самой высокой цены">
-                    Всё
-                  </button>
-                  <button className={yfit === 'robust' ? 'active' : ''} onClick={() => setYfit('robust')} title="Редкие всплески цены — за краем графика (стрелка на краю), остальное крупнее. Свой диапазон — протяните мышью по оси цены.">
-                    Без выбросов
-                  </button>
-                </div>
-              </div>
-            )}
             <div className="dyn-vb-group wide">
               <span className="dyn-vb-l">Вид</span>
               <div className="dyn-views">
