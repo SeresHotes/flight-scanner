@@ -6,7 +6,7 @@ import { resolveAirport, type AirportOption } from '../data/airports'
 import { addDaysISO, daysBetweenISO, todayISO } from '../lib/dates'
 import { durFmt, plural } from '../lib/format'
 import { RangeSlider } from '../planner/components/RangeSlider'
-import { FORMATS, PriceChart, type ChartFormat, type ChartUnit } from '../dynamics/PriceChart'
+import { FORMATS, PriceChart, YFitContext, type ChartFormat, type ChartUnit, type YFit } from '../dynamics/PriceChart'
 import { CalendarView, GridView, HeatmapView, ProfileView, SingleView, TableView, WeekView } from '../dynamics/Views'
 import {
   DEFAULT_FILTERS,
@@ -111,6 +111,7 @@ export function DynamicsPage() {
   const [view, setView] = useState<View>(() => (isView(sp.get('v')) ? (sp.get('v') as View) : 'overlay'))
   const [format, setFormat] = useState<ChartFormat>(() => (isFormat(sp.get('fmt')) ? (sp.get('fmt') as ChartFormat) : 'line'))
   const [unit, setUnit] = useState<ChartUnit>(sp.get('u') === 'pct' ? 'pct' : 'rub')
+  const [yfit, setYfit] = useState<YFit>(sp.get('y') === 'robust' ? 'robust' : 'all')
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [filters, setFilters] = useState<DynFilters>(() => filtersFromUrl(sp))
   const [data, setData] = useState<DynResponse | null>(null)
@@ -139,9 +140,10 @@ export function DynamicsPage() {
     if (view !== 'overlay') p.set('v', view)
     if (format !== 'line') p.set('fmt', format)
     if (unit === 'pct') p.set('u', 'pct')
+    if (yfit === 'robust') p.set('y', 'robust')
     filtersToUrl(filters, p)
     setSp(p, { replace: true })
-  }, [origin.code, dest.code, from, to, history, mode, view, format, unit, filters, setSp])
+  }, [origin.code, dest.code, from, to, history, mode, view, format, unit, yfit, filters, setSp])
 
   const toEff = to || from
   const span = from ? daysBetweenISO(from, toEff) + 1 : 0
@@ -274,6 +276,7 @@ export function DynamicsPage() {
       </div>
 
       {data && (
+        <YFitContext.Provider value={yfit}>
         <Result
           data={data}
           mode={mode}
@@ -284,6 +287,8 @@ export function DynamicsPage() {
           setFormat={setFormat}
           unit={unit}
           setUnit={setUnit}
+          yfit={yfit}
+          setYfit={setYfit}
           filters={filters}
           setF={setF}
           resetFilters={() => setFilters(DEFAULT_FILTERS)}
@@ -292,6 +297,7 @@ export function DynamicsPage() {
           showAll={showAll}
           setShowAll={setShowAll}
         />
+        </YFitContext.Provider>
       )}
     </>
   )
@@ -307,6 +313,8 @@ function Result({
   setFormat,
   unit,
   setUnit,
+  yfit,
+  setYfit,
   filters,
   setF,
   resetFilters,
@@ -324,6 +332,8 @@ function Result({
   setFormat: (f: ChartFormat) => void
   unit: ChartUnit
   setUnit: (u: ChartUnit) => void
+  yfit: YFit
+  setYfit: (f: YFit) => void
   filters: DynFilters
   setF: (p: Partial<DynFilters>) => void
   resetFilters: () => void
@@ -563,6 +573,19 @@ function Result({
                 </button>
               </div>
             </div>
+            {!chartless && (
+              <div className="dyn-vb-group">
+                <span className="dyn-vb-l">Ось цены</span>
+                <div className="segbtns">
+                  <button className={yfit === 'all' ? 'active' : ''} onClick={() => setYfit('all')} title="От самой низкой до самой высокой цены">
+                    Всё
+                  </button>
+                  <button className={yfit === 'robust' ? 'active' : ''} onClick={() => setYfit('robust')} title="Редкие всплески цены — за краем графика (стрелка на краю), остальное крупнее. Свой диапазон — протяните мышью по оси цены.">
+                    Без выбросов
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="dyn-vb-group wide">
               <span className="dyn-vb-l">Вид</span>
               <div className="dyn-views">
@@ -617,6 +640,7 @@ function Result({
             или не продавались). {filters.baggage ? 'Цена — тарифы с багажом.' : 'Цена — самый дешёвый тариф (багаж любой).'}
             {format === 'band' && mode === 'min' && ' Коридор — от самой низкой цены до медианы подходящих рейсов в снимке.'}
             {format === 'step' && ' Ступеньки: цена держится до следующего снимка.'}
+            {' Свой диапазон цен — протяните мышью по оси слева, двойной клик по оси — сброс.'}
           </div>}
 
           {mode === 'flight' && (
