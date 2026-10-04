@@ -42,6 +42,7 @@ class Settings:
     # CRAWL_WINDOW_TICKETS=0 — по одному дню.
     window_tickets: int = field(default_factory=lambda: _int("CRAWL_WINDOW_TICKETS", 10_000))
     unknown_window_days: int = field(default_factory=lambda: _int("CRAWL_UNKNOWN_WINDOW_DAYS", 30))
-    # Новый проход по горизонту — не раньше чем через столько часов после начала предыдущего:
-    # источник сам кэширует цены ~сутки, чаще обновлять бессмысленно.
-    min_pass_hours: float = field(default_factory=lambda: _float("CRAWL_MIN_PASS_HOURS", 24))
+    # Новый проход по горизонту — не раньше чем через столько часов после начала предыдущего.
+    # По умолчанию 0: дошли до конца — сразу снова с сегодняшнего дня (с 04.10.2026; при 24
+    # проход за ~полсуток оставлял ручку простаивать до конца суток, данные не обновлялись).
+    min_pass_hours: float = field(default_factory=lambda: _float("CRAWL_MIN_PASS_HOURS", 0))

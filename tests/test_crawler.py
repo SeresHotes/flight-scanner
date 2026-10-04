@@ -119,6 +119,26 @@ def test_tick_sweeps_and_starts_next_pass(tmp_path):
         assert s4["previous_pass_hours"] == 25.0
 
 
+def test_tick_starts_next_pass_right_away_by_default(tmp_path):
+    csettings = CollectorSettings(db_path=":memory:", lake_local_root=str(tmp_path / "lake"),
+                                  s3_bucket=None, rate_per_minute=100_000)
+    source = Source({("MOW", ""): [3]})
+    engine = Engine(csettings, LocalStore(csettings.lake_local_root), Index(":memory:"), page_fn=source)
+    settings = Settings(collector_url="http://testserver", seeds=["MOW", "SEL"], horizon_days=0,
+                        queue_target=3, max_pages=5, window_tickets=0)
+    assert settings.min_pass_hours == 0
+    with TestClient(create_app(engine)) as c:
+        client = CollectorClient("http://testserver", http=c, poll_wait=1)
+        start = datetime.now(timezone.utc) - timedelta(minutes=10)
+        s = crawler_main.tick(client, settings, today=TODAY, now=start)
+        assert s["pass"] == 1 and s["submitted"] == 2
+        _wait_series(c, 2)
+        # проход окончен — следующий начинается на том же тике, без суточной паузы
+        later = datetime.now(timezone.utc) + timedelta(minutes=1)  # позже записи серий
+        s2 = crawler_main.tick(client, settings, today=TODAY, now=later)
+        assert s2["pass"] == 2 and s2["sweep_offset"] == 0 and s2["submitted"] == 2
+
+
 def test_new_city_mid_pass_is_caught_up_from_start():
     cov = [_row("MOW", o, 5) for o in range(3)] + [_row("MOW", 3, 30)]
     items, s = sweep(["MOW", "NEW"], cov, today=TODAY, horizon_days=3, pass_started=PASS, window_tickets=None)
