@@ -1,29 +1,25 @@
 # Аналитика: дашборд коллектора в общей Grafana
 
-Данные flights показываются на аналитической VM проекта market-data-fetcher
-(ClickHouse читает Parquet прямо из Object Storage, Grafana на `:3000`). Сама VM
-и её провижининг живут в том репозитории (до фазы 4 — отдельного репо аналитики);
-здесь только то, что принадлежит flights:
+Данные flights показываются в [observatory](https://github.com/SeresHotes/observatory) —
+общей VM с ClickHouse (читает Parquet прямо из Object Storage) и Grafana на
+https://grafana.sereshotes.dev. VM раз в 2 минуты берёт с `main` этого репо:
 
-- `clickhouse/named_collections_flights.xml.tmpl` — креды и URL бакета flights
-  (`tickets/`, `ops_metrics/`, `coverage/`), рендерится из terraform output.
-- `clickhouse/users_flights.xml.tmpl` — пользователь ClickHouse `flights_grafana`
-  для источника данных Grafana (только `flights.*`).
-- `clickhouse/init-flights.sql` — база `flights`: вьюхи `tickets`, `ops_metrics`, `coverage`.
+- `observatory.yaml` — база `flights`, named collections бакета (`tickets/`,
+  `ops_metrics/`, `coverage/`; креды и пользователей ClickHouse подставляет observatory),
+  SQL и каталог дашбордов, datasource `flights-clickhouse`;
+- `clickhouse/init-flights.sql` — вьюхи `tickets`, `ops_metrics`, `coverage`
+  (применяется от `flights_admin` при изменении);
 - `grafana/build_dashboard.py` → `grafana/dashboards/flights-ops.json` — дашборд
   «Flights · Коллектор»: свежесть данных и покрытие сборщика, ручка GraphQL и очередь,
   нагрузка VM, озеро и бакет.
-- `setup.sh` — кладёт конфиги на VM, применяет SQL, создаёт источник данных
-  «ClickHouse Flights», папку «Flights» и заливает дашборды. Идемпотентно.
 
 ```sh
-python analytics/grafana/build_dashboard.py     # после правки панелей
-analytics/setup.sh ubuntu@89.169.140.225        # SSH_OPTS, GRAFANA_ADMIN_PASSWORD — см. шапку скрипта
+python analytics/grafana/build_dashboard.py                  # после правки панелей
+python3 ../observatory/vm/observatory.py check analytics     # та же проверка, что на VM
 ```
 
-Файлы Market Data на VM (`named_collections.xml`, `users.d/grafana.xml`, папка
-«Market Data») не трогаются: у flights свои файлы в тех же каталогах, свой
-пользователь и свой источник данных.
+Коммит, не прошедший проверку, VM не возьмёт — останется на прошлом рабочем. В UI
+дашборд не сохраняется: правка — в генераторе, затем PR.
 
 Что пишет коллектор (`collector/metrics.py`): раз в минуту строка в файл часа
 `ops_metrics/date=YYYY-MM-DD/<HH>-00-00.parquet` (перезапись каждые 2 мин; прошедшие дни

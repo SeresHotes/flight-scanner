@@ -37,7 +37,7 @@ poetry.lock
 !/core/geo.json
 # имена городов для выдачи планировщика (scripts/build_city_names.py)
 !/core/city_names.json
-# дашборды Grafana (analytics/grafana/build_dashboard.py → setup.sh заливает в Grafana)
+# дашборды Grafana (analytics/grafana/build_dashboard.py; провижнит observatory)
 !/analytics/grafana/dashboards/*.json
 *.csv
 # генерируется build_web_data.py
