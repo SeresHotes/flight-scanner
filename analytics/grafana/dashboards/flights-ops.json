@@ -95,7 +95,7 @@
   },
   {
    "id": 3,
-   "title": "Дошёл до дня вылета, +дней",
+   "title": "Все города дошли до дня, +дней",
    "type": "stat",
    "gridPos": {
     "x": 4,
@@ -157,7 +157,7 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "description": "Все даты вылета левее этой (от сегодня) у всех городов обработаны в текущем проходе. 181 — проход окончен, ждёт начала следующего."
+   "description": "Первый день вылета (от сегодня), где хоть у одного города пара ещё не обработана в текущем проходе. Почти весь проход стоит на 0: у каждого города первое окно начинается с сегодня, а окна маленьких городов (месяц и больше одним запросом) идут в очереди после сегодняшних дней крупных. Двигается только в конце прохода, когда остаются крупные города (окно — день). Ход прохода — «Обработано в проходе» и «Проход по календарю»."
   },
   {
    "id": 4,
@@ -458,7 +458,7 @@
       "uid": "flights-clickhouse"
      },
      "editorType": "sql",
-     "rawSql": "SELECT ts AS time, crawler_fresh AS \"обработаны в этом проходе\", crawler_pairs AS \"всего пар\", crawler_stale AS \"ждут (данные с прошлого прохода)\", crawler_missing AS \"нет данных\", crawler_errors AS \"ошибка источника\", crawler_pass_progress AS \"проход\", crawler_pass AS \"номер прохода\", crawler_sweep_offset AS \"дошёл до дня вылета (дней от сегодня)\", cities AS \"городов\", series_age_p50_h AS \"медиана\", series_age_p95_h AS \"p95\", series_age_max_h AS \"максимум\", pages_app_1m + pages_crawl_1m AS \"всего запросов\", pages_app_1m AS \"запросы приложения\", pages_crawl_1m AS \"запросы фона\", rate_per_minute AS \"лимит в минуту\", queued_crawl AS \"фон, окон дат\", queued_app AS \"приложение, заданий\", crawler_queued_pages_est AS \"фон, оценка страниц\", http_429_1m AS \"429\", source_errors_1m AS \"ошибка в ответе GraphQL\", network_errors_1m AS \"сеть / HTTP 5xx\", lake_write_errors_1m AS \"запись в озеро\", series_app_1m + series_crawl_1m AS \"выборок\", tickets_1m AS \"билетов\", cpu_pct AS \"CPU\", mem_pct AS \"RAM\", disk_used_pct AS \"диск\", lake_bytes / 1073741824 AS \"озеро (tickets/)\", bucket_bytes / 1073741824 AS \"весь бакет\", lake_max_bytes / 1073741824 AS \"порог ретеншна\", lake_files AS \"файлов\", files_deleted_1m AS \"удалено за минуту\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
+     "rawSql": "SELECT ts AS time, crawler_fresh AS \"обработаны в этом проходе\", crawler_pairs AS \"всего пар\", crawler_stale AS \"ждут (данные с прошлого прохода)\", crawler_missing AS \"нет данных\", crawler_errors AS \"ошибка источника\", crawler_pass_progress AS \"проход\", crawler_pass AS \"номер прохода\", crawler_sweep_offset AS \"дошёл до дня вылета (дней от сегодня)\", cities AS \"городов\", series_age_p50_h AS \"медиана\", age_le_6h AS \"до 6 ч\", age_6_24h AS \"6–24 ч\", age_24_48h AS \"1–2 суток\", age_gt_48h AS \"старше 2 суток\", pages_app_1m + pages_crawl_1m AS \"всего запросов\", pages_app_1m AS \"запросы приложения\", pages_crawl_1m AS \"запросы фона\", rate_per_minute AS \"лимит в минуту\", queued_crawl AS \"фон, окон дат\", queued_app AS \"приложение, заданий\", crawler_queued_pages_est AS \"фон, оценка страниц\", http_429_1m AS \"429\", source_errors_1m AS \"ошибка в ответе GraphQL\", network_errors_1m AS \"сеть / HTTP 5xx\", lake_write_errors_1m AS \"запись в озеро\", series_app_1m + series_crawl_1m AS \"выборок\", tickets_1m AS \"билетов\", cpu_pct AS \"CPU\", mem_pct AS \"RAM\", disk_used_pct AS \"диск\", lake_bytes / 1073741824 AS \"озеро (tickets/)\", bucket_bytes / 1073741824 AS \"весь бакет\", lake_max_bytes / 1073741824 AS \"порог ретеншна\", lake_files AS \"файлов\", files_deleted_1m AS \"удалено за минуту\" FROM flights.ops_metrics WHERE $__timeFilter(ts) ORDER BY ts",
      "queryType": "timeseries",
      "refId": "A"
     }
@@ -620,11 +620,11 @@
      "placement": "bottom"
     }
    },
-   "description": "Каждая линия — отдельное число, без стека. За проход сборщик скачивает каждую пару горизонта один раз, по календарю от ближних дат к дальним, и начинает сначала: «обработаны» растут от нуля до «всего пар», «ждут» — убывают. Правая ось (пунктир): пар без данных вообще и пар, где последняя попытка — ошибка источника (тексты — в таблице «Ошибки источника»)."
+   "description": "Каждая линия — отдельное число, без стека. За проход сборщик скачивает каждую пару горизонта один раз (как идёт по дням — «Проход по календарю») и начинает сначала: «обработаны» растут от нуля до «всего пар», «ждут» — убывают. Правая ось (пунктир): пар без данных вообще и пар, где последняя попытка — ошибка источника (тексты — в таблице «Ошибки источника»)."
   },
   {
    "id": 8,
-   "title": "Возраст данных сборщика, ч (пары X→ANY на дни вылета от сегодня)",
+   "title": "Возраст данных сборщика: доля пар горизонта",
    "type": "timeseries",
    "gridPos": {
     "x": 12,
@@ -653,9 +653,10 @@
       "include": {
        "names": [
         "time",
-        "медиана",
-        "p95",
-        "максимум"
+        "до 6 ч",
+        "6–24 ч",
+        "1–2 суток",
+        "старше 2 суток"
        ]
       }
      }
@@ -664,34 +665,80 @@
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 0,
-      "lineWidth": 2,
+      "fillOpacity": 70,
+      "lineWidth": 0,
       "showPoints": "never",
       "axisSoftMin": 0,
-      "thresholdsStyle": {
-       "mode": "dashed"
-      }
+      "stacking": {
+       "mode": "percent",
+       "group": "A"
+      },
+      "axisSoftMax": 1
      },
-     "unit": "h",
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
+     "unit": "percentunit"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "до 6 ч"
+      },
+      "properties": [
        {
-        "color": "transparent",
-        "value": null
-       },
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "6–24 ч"
+      },
+      "properties": [
        {
-        "color": "#3d7fd9",
-        "value": 24
-       },
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3d7fd9"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "1–2 суток"
+      },
+      "properties": [
        {
-        "color": "orange",
-        "value": 72
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "старше 2 суток"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
        }
       ]
      }
-    },
-    "overrides": []
+    ]
    },
    "options": {
     "tooltip": {
@@ -703,12 +750,12 @@
      "placement": "bottom"
     }
    },
-   "description": "Сколько часов назад получены данные пары «город × день вылета» — по всем парам на горизонте (сегодня … +180 дней): медиана, p95 и самая старая. Прошедшие дни вылета и пары, запрошенные приложением (A→B), не обновляются и лежат до ретеншна — их здесь нет (до 02.10.2026 считалось по ним, и максимум рос бесконечно). Каждая пара обновляется раз за проход, поэтому максимум ≈ длина прохода (не меньше суток). Пунктир: 24 ч — самый короткий проход (источник сам кэширует цены ~сутки), 72 ч — проход затянулся."
+   "description": "Какая доля пар «город × день вылета» на горизонте (сегодня … +180 дней) получена не позже 6 ч назад, 6–24 ч, 1–2 суток и раньше. Стек до 100 %. Проход короче суток — почти всё зелёное и голубое; оранжевое и красное растут — сборщик не успевает (или стоит). Прошедшие дни вылета и пары приложения (A→B) не учитываются."
   },
   {
    "id": 9,
-   "title": "Проход по календарю: до какого дня вылета дошёл сборщик",
-   "type": "timeseries",
+   "title": "Проход по календарю: города по дням вылета (сейчас)",
+   "type": "barchart",
    "gridPos": {
     "x": 0,
     "y": 13,
@@ -716,48 +763,103 @@
     "h": 8
    },
    "datasource": {
-    "type": "datasource",
-    "uid": "-- Dashboard --"
+    "type": "grafana-clickhouse-datasource",
+    "uid": "flights-clickhouse"
    },
    "targets": [
     {
      "datasource": {
-      "type": "datasource",
-      "uid": "-- Dashboard --"
+      "type": "grafana-clickhouse-datasource",
+      "uid": "flights-clickhouse"
      },
-     "panelId": 100,
+     "editorType": "sql",
+     "rawSql": "WITH (SELECT max(pass_started) FROM flights.coverage) AS ps SELECT formatDateTime(g.day, '%d.%m') AS \"день\", countIf(cv.error = 0 AND cv.fetched_at >= ps) AS \"обработаны в этом проходе\", countIf(cv.error = 0 AND NOT ifNull(cv.fetched_at >= ps, 0)) AS \"ждут (с прошлого прохода)\", countIf(cv.error = 1) AS \"ошибка источника\", countIf(cv.origin IS NULL) AS \"нет данных\" FROM (SELECT o.origin AS origin, today() + n.number AS day FROM (SELECT DISTINCT origin FROM flights.coverage WHERE NOT error) AS o CROSS JOIN numbers(181) AS n) AS g LEFT JOIN (SELECT origin, day, fetched_at, error FROM flights.coverage WHERE day >= today()) AS cv ON cv.origin = g.origin AND cv.day = g.day GROUP BY g.day ORDER BY g.day SETTINGS join_use_nulls = 1",
+     "queryType": "table",
      "refId": "A"
-    }
-   ],
-   "transformations": [
-    {
-     "id": "filterFieldsByName",
-     "options": {
-      "include": {
-       "names": [
-        "time",
-        "дошёл до дня вылета (дней от сегодня)"
-       ]
-      }
-     }
     }
    ],
    "fieldConfig": {
     "defaults": {
      "custom": {
-      "fillOpacity": 15,
-      "lineWidth": 2,
-      "showPoints": "never",
-      "axisSoftMin": 0,
-      "axisLabel": "дней от сегодня"
+      "fillOpacity": 90,
+      "lineWidth": 0,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
      },
-     "min": 0,
-     "max": 181,
      "decimals": 0
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "обработаны в этом проходе"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "ждут (с прошлого прохода)"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3d7fd9"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "ошибка источника"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "нет данных"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
+    "orientation": "vertical",
+    "xField": "день",
+    "showValue": "never",
+    "stacking": "normal",
+    "xTickLabelSpacing": 100,
+    "barWidth": 0.9,
     "tooltip": {
      "mode": "multi"
     },
@@ -767,7 +869,7 @@
      "placement": "bottom"
     }
    },
-   "description": "Курсор прохода: все даты вылета от сегодня до этой у всех городов уже скачаны в текущем проходе. Растёт от 0 до 181 (конец горизонта), потом падает в 0 — начался новый проход. Наклон — скорость: крутой участок — даты, где у городов мало билетов (одним запросом месяц вперёд), пологий — ближние даты крупных городов (запрос на день)."
+   "description": "Снимок покрытия (раз в 10 мин): на каждый день вылета от сегодня до +180 — сколько городов уже скачаны в текущем проходе (зелёное), сколько ждут (данные с прошлого прохода), у скольких последняя попытка — ошибка источника и у скольких данных нет вообще. Проход идёт не одной линией по календарю: маленькие города берутся окнами на месяц и больше (их дни зеленеют сразу по всему горизонту), крупные — по дню, от ближних дат к дальним (зелёное наползает слева). Проход окончен — всё зелёное, новый начинается — всё синее."
   },
   {
    "id": 10,
@@ -936,7 +1038,7 @@
   },
   {
    "id": 14,
-   "title": "Запас свежести по дням вылета на 180 дней: p50 / p95 / p100 городов (7 − возраст в сутках)",
+   "title": "Возраст данных по дням вылета, ч: p50 / p95 / худший город",
    "type": "barchart",
    "gridPos": {
     "x": 0,
@@ -955,13 +1057,14 @@
       "uid": "flights-clickhouse"
      },
      "editorType": "sql",
-     "rawSql": "SELECT formatDateTime(g.day, '%d.%m') AS \"день\", greatest(round(7 - quantile(0.5)(ifNull(cv.age_h, 1e6)) / 24, 2), -1) AS \"p50\", greatest(round(7 - quantile(0.95)(ifNull(cv.age_h, 1e6)) / 24, 2), -1) AS \"p95\", greatest(round(7 - max(ifNull(cv.age_h, 1e6)) / 24, 2), -1) AS \"p100\", countIf(cv.age_h IS NOT NULL) AS \"городов с данными\", count() AS \"всего городов\" FROM (SELECT o.origin AS origin, today() + n.number AS day FROM (SELECT DISTINCT origin FROM flights.coverage WHERE NOT error) AS o CROSS JOIN numbers(180) AS n) AS g LEFT JOIN (SELECT origin, day, age_h FROM flights.coverage WHERE day >= today() AND NOT error) AS cv ON cv.origin = g.origin AND cv.day = g.day GROUP BY g.day ORDER BY g.day SETTINGS join_use_nulls = 1",
+     "rawSql": "SELECT formatDateTime(g.day, '%d.%m') AS \"день\", least(round(quantile(0.5)(ifNull(cv.age_h, 1e6)), 1), 48) AS \"p50\", least(round(quantile(0.95)(ifNull(cv.age_h, 1e6)), 1), 48) AS \"p95\", least(round(max(ifNull(cv.age_h, 1e6)), 1), 48) AS \"максимум\", countIf(cv.age_h IS NOT NULL) AS \"городов с данными\", count() AS \"всего городов\" FROM (SELECT o.origin AS origin, today() + n.number AS day FROM (SELECT DISTINCT origin FROM flights.coverage WHERE NOT error) AS o CROSS JOIN numbers(181) AS n) AS g LEFT JOIN (SELECT origin, day, age_h FROM flights.coverage WHERE day >= today() AND NOT error) AS cv ON cv.origin = g.origin AND cv.day = g.day GROUP BY g.day ORDER BY g.day SETTINGS join_use_nulls = 1",
      "queryType": "table",
      "refId": "A"
     }
    ],
    "fieldConfig": {
     "defaults": {
+     "unit": "h",
      "custom": {
       "fillOpacity": 90,
       "lineWidth": 0,
@@ -969,8 +1072,8 @@
        "mode": "dashed"
       }
      },
-     "min": -1,
-     "max": 7,
+     "min": 0,
+     "max": 48,
      "decimals": 1,
      "thresholds": {
       "mode": "absolute",
@@ -981,11 +1084,7 @@
        },
        {
         "color": "orange",
-        "value": 0
-       },
-       {
-        "color": "green",
-        "value": 4
+        "value": 24
        }
       ]
      }
@@ -1024,7 +1123,7 @@
      {
       "matcher": {
        "id": "byName",
-       "options": "p100"
+       "options": "максимум"
       },
       "properties": [
        {
@@ -1053,6 +1152,10 @@
        {
         "id": "decimals",
         "value": 0
+       },
+       {
+        "id": "unit",
+        "value": "none"
        }
       ]
      },
@@ -1073,6 +1176,10 @@
        {
         "id": "decimals",
         "value": 0
+       },
+       {
+        "id": "unit",
+        "value": "none"
        }
       ]
      }
@@ -1094,7 +1201,7 @@
      "placement": "bottom"
     }
    },
-   "description": "Перцентили возраста данных по городам дня вылета: p50 — половина городов свежее, p95 — все, кроме 5 % самых отстающих, p100 — худший город. Город без данных на этот день считается самым старым: если не собрано больше 5 % городов, p95 на дне (−1), больше половины — и p50. Горизонт сборщика — 180 дней от сегодня. 7 — только что обновлено, минус 1 за каждые сутки, −1 — нет данных или старше 8 суток. Пунктир: 4 — 72 ч (цель до 60 дней вперёд), 0 — неделя. Проход идёт по календарю, поэтому столбики — лесенка: даты левее курсора прохода свежие, правее — с прошлого прохода. Города, у которых только ошибки источника, не учитываются."
+   "description": "Сколько часов назад получены данные на каждый день вылета (снимок покрытия, раз в 10 мин), по городам дня: p50 — половина городов свежее, p95 — все, кроме 5 % отстающих, максимум — худший город. Ниже — свежее. Город без данных на день считается самым старым; 48 — нет данных или старше. Пунктир — сутки. Пока идёт проход, дни, где крупные города уже обновлены, ниже; проход окончен — всё ниже длины прохода. Города, у которых только ошибки источника, не учитываются."
   },
   {
    "id": 15,

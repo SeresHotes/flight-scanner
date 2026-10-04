@@ -111,6 +111,20 @@ def test_age_stats_only_crawler_horizon(env):  # noqa: F811
     st = env.index.age_stats(now=now)
     assert st["series"] == 4 and st["horizon_pairs"] == 2
     assert 19.9 < st["age_max_h"] < 20.1 and st["age_p95_h"] is not None
+    assert (st["age_le_6h"], st["age_6_24h"], st["age_24_48h"], st["age_gt_48h"]) == (0, 2, 0, 0)
+
+
+def test_coverage_snapshot_carries_pass_started(env, tmp_path):  # noqa: F811
+    env.submit(SeriesRequest("MOW", None, "2026-10-15"), client="crawl")
+    _run(env)
+    m = Metrics(env, host=HostStats(proc=str(tmp_path / "no-proc"), disk_path=str(tmp_path)))
+    m.write_coverage()  # сборщик ещё не стартовал — начала прохода нет
+    assert pq.read_table(str(env.store.root / COVERAGE_KEY)).to_pylist()[0]["pass_started"] is None
+    env.index.set_kv("crawler_state", {"pass": 2, "pass_started": "2026-10-04T10:34:05+00:00"})
+    m.write_coverage()
+    row = pq.read_table(str(env.store.root / COVERAGE_KEY)).to_pylist()[0]
+    assert row["pass_started"] == datetime(2026, 10, 4, 10, 34, 5, tzinfo=timezone.utc)
+    assert m.sample()["age_le_6h"] is not None
 
 
 def test_coverage_snapshot_carries_error_text(env, tmp_path):  # noqa: F811
