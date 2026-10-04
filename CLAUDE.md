@@ -34,9 +34,9 @@
   удалён 01.10.2026. VM: 2 vCPU, 8 ГБ, диск 100 ГБ, статический IP.
   Прод-compose `deploy/compose.prod.yml` едет в образе planner; на уже созданной
   VM один раз запускается `deploy/vm-migrate.sh`.
-- Дашборд «Flights · Коллектор» — в общей Grafana аналитической VM Market Data
-  (`http://89.169.140.225:3000`, папка «Flights»); конфиги ClickHouse, генератор
-  дашборда и скрипт заливки — `analytics/` (`analytics/README.md`).
+- Дашборд «Flights · Коллектор» — в общей Grafana observatory
+  (https://grafana.sereshotes.dev, папка «Flights»). VM observatory сама берёт с main
+  `analytics/observatory.yaml`, SQL и дашборды (`analytics/README.md`); руками ничего не заливается.
 - Все ручки Travelpayouts/Aviasales (GraphQL-схема, REST Data API, Search API, справочники, лимиты) — `docs/travelpayouts/README.md`.
 - Инфраструктура прод-деплоя (Terraform + cloud-init + registry) — `infra/terraform/`.
   State — в бакете `sereshotes-flights-tfstate` (локально `./tf.sh plan|apply`). GitHub Actions

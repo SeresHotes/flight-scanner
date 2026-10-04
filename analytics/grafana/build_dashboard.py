@@ -3,7 +3,7 @@
 
     python analytics/grafana/build_dashboard.py
 
-JSON держим в репозитории (его заливает analytics/setup.sh), генератор — чтобы
+JSON держим в репозитории (его провижнит observatory с main), генератор — чтобы
 панели правились в одном месте без ручного редактирования JSON."""
 import json
 from pathlib import Path

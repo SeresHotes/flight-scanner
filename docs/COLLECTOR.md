@@ -165,10 +165,10 @@ crawler (crawler/) ──POST /v1/batch (crawl)───────────
 `series.error_msg` индекса).
 `METRICS_ENABLED=0` выключает.
 
-Дашборд «Flights · Коллектор» живёт в общей Grafana аналитической VM Market Data
-(ClickHouse читает Parquet из бакета по named collections): `analytics/README.md`,
-`analytics/setup.sh`. У flights свои файлы конфигов, пользователь ClickHouse, источник
-данных и папка Grafana — конфиги Market Data не трогаются.
+Дашборд «Flights · Коллектор» живёт в общей Grafana observatory
+(https://grafana.sereshotes.dev; ClickHouse читает Parquet из бакета по named collections):
+`analytics/README.md`, `analytics/observatory.yaml`. У flights своя база, пользователи
+ClickHouse, источник данных и папка Grafana — другие проекты не трогаются.
 
 ## Планировщик
 

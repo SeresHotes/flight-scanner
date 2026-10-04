@@ -1,6 +1,6 @@
--- База `flights` в ClickHouse аналитической VM: вьюхи поверх Parquet в бакете
--- flights через named collections (config.d/named_collections_flights.xml, без
--- секретов в SQL). Применяет analytics/setup.sh через clickhouse-client; идемпотентно.
+-- База `flights` в ClickHouse observatory: вьюхи поверх Parquet в бакете flights через
+-- named collections flights_* (analytics/observatory.yaml; креды подставляет observatory,
+-- в SQL секретов нет). VM observatory применяет его от flights_admin при изменении; идемпотентно.
 --
 -- Структура задана явно (схемы — collector/lake.py и collector/metrics.py): вьюхи
 -- создаются и до появления файлов, а запросы не тратят время на вывод схемы по
