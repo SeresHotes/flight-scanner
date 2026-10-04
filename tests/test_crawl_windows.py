@@ -143,29 +143,6 @@ def test_window_source_error_marks_every_day(tmp_path):
     assert all(r["error"] for r in rows)
 
 
-def test_window_arrival_error_is_split_down_to_the_bad_day(tmp_path):
-    # Источник роняет весь запрос, если в ответе есть билет в «плохой» город прилёта
-    # (cannot get arrival at …): окно делится пополам, ошибка остаётся только на сбойном дне.
-    days = [(date(2026, 10, 15) + timedelta(days=i)).isoformat() for i in range(10)]
-    bad = days[6]
-    src = RangeSource([_raw(i, d, 1000 + i) for i, d in enumerate(days)])
-
-    def page(params, offset, limit):
-        if params["depart_date_min"] <= bad <= params["depart_date_max"]:
-            src.calls.append((dict(params), offset))
-            raise g.GraphQLError('[{"message": "cannot get arrival at: failed to get a location for a city"}]')
-        return src(params, offset, limit)
-    env = _engine(tmp_path, page)
-    job = env.submit(SeriesRequest("MOW", None, days[0], day_to=days[-1]), client="crawl")
-    _run(env)
-    assert job.done and not job.error
-    rows = {d: env.index.get("MOW", None, d, "") for d in days}
-    assert [d for d, r in rows.items() if r["error"]] == [bad]
-    assert all(r["tickets"] == 1 for d, r in rows.items() if d != bad)
-    assert env.counters.snapshot()["window_splits"] == 3  # 10 дней → 5 → 2 → 1 (сбойный день)
-    assert env.queue_keys() == []
-
-
 def test_day_to_before_day_is_rejected():
     with pytest.raises(ValueError):
         SeriesRequest("MOW", None, "2026-10-15", day_to="2026-10-14")

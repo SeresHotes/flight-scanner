@@ -152,3 +152,13 @@ def test_new_city_mid_pass_is_caught_up_from_start():
     items, s = sweep(["MOW", "NEW"], cov, today=TODAY, horizon_days=3, pass_started=PASS, window_tickets=None)
     assert [(i.origin, i.offset) for i in items] == [("NEW", 0), ("NEW", 1), ("NEW", 2), ("MOW", 3), ("NEW", 3)]
     assert s["sweep_offset"] == 0
+
+
+def test_pass_progress_by_estimated_pages():
+    # Москва (8000 билетов в день = 20 страниц на пару) обработала 1 день из 2, маленький
+    # город (4 билета в день) — оба дня: по парам 3/4, по объёму работы ~1/2
+    cov = [_row("MOW", 0, 5, tickets=8000), _row("MOW", 1, 30, tickets=8000)]
+    cov += [_row("VDY", o, 5, tickets=4) for o in (0, 1)]
+    _, s = sweep(["MOW", "VDY"], cov, today=TODAY, horizon_days=1, pass_started=PASS)
+    assert s["pass_progress"] == 0.75
+    assert 0.5 < s["pass_progress_pages"] < 0.51 and s["pass_pages_est"] == 40
