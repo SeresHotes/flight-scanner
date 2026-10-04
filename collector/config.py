@@ -33,7 +33,7 @@ class Settings:
     rate_per_minute: float = field(default_factory=lambda: _float("RATE_PER_MINUTE", 60.0))
     # Свежесть серии по умолчанию: источник сам кэширует цены ~сутки.
     ttl_seconds: int = field(default_factory=lambda: _int("SERIES_TTL_SECONDS", 24 * 3600))
-    # Предохранитель страниц на серию (память задания). За потолком offset (~14 800,
+    # Предохранитель страниц на серию (память задания). За потолком offset (offset + limit ≤ 15 000,
     # 37 × 400) серия продолжается запросом с value_min = цена последнего билета.
     max_pages: int = field(default_factory=lambda: _int("COLLECTOR_MAX_PAGES", 100))
     # Ретеншн озера: потолок объёма tickets/ (ниже жёсткого max_size бакета 200 ГБ).

@@ -16,7 +16,7 @@ use crate::ticket::{Baggage, Leg, Ticket, TransferPoint};
 pub const GRAPHQL_URL: &str = "https://api.travelpayouts.com/graphql/v1/query";
 pub const PAGE_LIMIT: i64 = 400;
 pub const MAX_PAGES: i64 = 100;
-pub const MAX_OFFSET: i64 = 14_800;
+pub const MAX_OFFSET: i64 = 14_600;
 pub const MIN_INTERVAL_SECONDS: f64 = 1.0;
 pub const REQUEST_TIMEOUT: u64 = 30;
 pub const SOURCE: &str = "graphql";
