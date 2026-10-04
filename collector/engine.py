@@ -341,7 +341,7 @@ class Engine:
         return graphql_api.query_page(params, offset, limit, session=self._session, throttle=False)
 
     def _continue_by_price(self, job: Job) -> bool:
-        """Упёрлись в потолок offset (~14 800): продолжаем тот же запрос с value_min =
+        """Упёрлись в потолок offset (offset + limit ≤ 15 000): продолжаем тот же запрос с value_min =
         цена последнего билета (сортировка VALUE_ASC). False — продолжать нечем."""
         prices = [t["price"] for t in job.tickets if t.get("price") is not None]
         if not prices:
@@ -370,6 +370,13 @@ class Engine:
             print(f"[collector] 429 на {job.req.label}, пауза {pause:.0f} с")
             return
         except graphql_api.GraphQLError as e:
+            if "paging depth" in str(e) and job.pages > job.seg_start:
+                # Потолок глубины оказался ниже расчётного: не выбрасываем собранное —
+                # продолжаем по цене (или закрываем серию, как на потолке MAX_OFFSET).
+                self.counters.inc("paging_depth_hits")
+                if not self._continue_by_price(job):
+                    self._finish(job)
+                return
             self.counters.inc("source_errors")
             self._finish(job, error=str(e)[:500])
             return

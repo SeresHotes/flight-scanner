@@ -11,7 +11,7 @@
 - `params: ParamsOneWay`: origin/destination — ровно одно значение (список —
   ошибка), `*_type` AIRPORT/CITY/COUNTRY. Без destination — «город → ANY», без
   origin — «ANY → город»; без обоих — ошибка.
-- `paging.limit` ≤ 400; `offset` ограничен (~14 800: «too high paging depth»).
+- `paging.limit` ≤ 400; `offset + limit` ≤ 15 000 (иначе «too high paging depth»).
 - Сортировка VALUE_ASC: без ценового коридора первые страницы ANY-запроса —
   дешёвая ближняя Россия/СНГ; `value_min`/`value_max` режут объём в разы.
 - `trip_duration` приходит 0 — длительность считаем по `flight_legs`.
@@ -38,7 +38,8 @@ load_dotenv()
 GRAPHQL_URL = "https://api.travelpayouts.com/graphql/v1/query"
 PAGE_LIMIT = 400              # больше источник не отдаёт
 MAX_PAGES = 100               # предохранитель на серию (40 000 билетов); за потолком offset коллектор продолжает по цене
-MAX_OFFSET = 14_800           # «too high paging depth» выше
+MAX_OFFSET = 14_600           # offset последней страницы: источник требует offset + limit ≤ 15 000
+                              # («too high paging depth»; проверено 04.10.2026), при limit 400 — 37 страниц
 MIN_INTERVAL_SECONDS = 1.0    # 60 запросов/мин
 REQUEST_TIMEOUT = 30
 SOURCE = "graphql"

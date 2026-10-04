@@ -111,6 +111,28 @@ def test_window_past_offset_ceiling_continues_by_price(tmp_path, monkeypatch):
     assert len(links) == len(set(links)) == 2000
 
 
+def test_window_paging_depth_error_continues_by_price(tmp_path):
+    # Источник отказывает в глубине раньше MAX_OFFSET («too high paging depth» на
+    # offset + limit > 1 200): собранное не выбрасывается, серия продолжается по цене.
+    days = ["2026-10-15", "2026-10-16"]
+    inner = RangeSource([_raw(i, days[i % 2], 1000 + i // 4) for i in range(2000)])
+
+    def source(params, offset, limit):
+        if offset + limit > 1200:
+            inner.calls.append((dict(params), offset))
+            raise g.GraphQLError('[{"message": "too high paging depth (limit/offset parameters) '
+                                 'for the request: invalid params"}]')
+        return inner(params, offset, limit)
+
+    env = _engine(tmp_path, source)
+    job = env.submit(SeriesRequest("MOW", None, days[0], day_to=days[1], max_pages=100), client="crawl")
+    _run(env)
+    assert job.done and not job.error and job.exhausted
+    assert env.counters.snapshot()["paging_depth_hits"] >= 1
+    rows = [env.index.get("MOW", None, d, "") for d in days]
+    assert not any(r["error"] for r in rows) and sum(r["tickets"] for r in rows) == 2000
+
+
 def test_window_source_error_marks_every_day(tmp_path):
     def boom(params, offset, limit):
         raise g.GraphQLError("city XXX not found")

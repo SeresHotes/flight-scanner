@@ -61,7 +61,7 @@ grouping: NONE, sorting: VALUE_ASC)`. 60 запросов/мин. ~0.6–1.5 с 
   таймзонами, `baggage_code` (`0PC`, `1PC20`, `1PC`…), `with_baggage`,
   `ticket_link` (тот же `t=`, префикс `https://www.aviasales.ru/search`).
 - `trip_duration` приходит **0** — длительность считать по `flight_legs`.
-- Пагинация: `offset` ограничен (~14 800 → «too high paging depth», ≈37 страниц).
+- Пагинация: `offset + limit` ≤ 15 000 (иначе «too high paging depth»; 37 страниц по 400).
 - Объёмы за один день (15.10.2026):
 
 | Запрос | Страниц | Билетов | Замечание |

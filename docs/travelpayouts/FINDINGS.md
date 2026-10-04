@@ -22,7 +22,8 @@
   `special_offers_round_trip`, `weekend_prices_round_trip`. Мутаций нет.
 - `origin`/`destination` — одно значение (город, аэропорт или страна; `*_type` определяется сам).
   Без `destination` — A→ANY, без `origin` — ANY→B, без обоих — ошибка.
-- `paging.limit` ≤ 400; `offset` выше ~14 800 → ошибка «too high paging depth». Значит, один набор
+- `paging.limit` ≤ 400; `offset + limit` > 15 000 → ошибка «too high paging depth» (уточнено 04.10.2026:
+  offset 14 600 + 400 — можно, 14 601 + 400 и 14 800 + 400 — нет). Значит, один набор
   параметров даёт не больше ~15 000 билетов.
 - Какие концы можно опускать (проверено 28.09, дата 15.10.2026, `grouping: NONE`) — **хотя бы один
   конец обязан быть городом (или аэропортом)**, иначе HTTP 400 `GRAPHQL_VALIDATION_FAILED`
