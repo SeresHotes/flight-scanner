@@ -1,0 +1,13 @@
+# Аналитика Flights в observatory (https://github.com/SeresHotes/observatory):
+# VM observatory берёт отсюда SQL и дашборды с main раз в пару минут. Креды бакета и
+# пользователей ClickHouse подставляет observatory — здесь только пути внутри бакета.
+database: flights
+title: Flights
+datasource_uid: flights-clickhouse
+collections:
+  flights_tickets: tickets/*/origin=*/*.parquet
+  flights_ops_metrics: ops_metrics/date=*/*.parquet
+  flights_coverage: coverage/latest.parquet
+sql:
+  - clickhouse/init-flights.sql
+dashboards: grafana/dashboards
