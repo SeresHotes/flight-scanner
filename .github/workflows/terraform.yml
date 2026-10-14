@@ -81,6 +81,7 @@ jobs:
           tfstate_access_key=AWS_ACCESS_KEY_ID
           tfstate_secret_key=AWS_SECRET_ACCESS_KEY
           travelpayouts_token=TF_VAR_travelpayouts_token
+          cloudflare_api_token=TF_VAR_cloudflare_api_token
 
       - name: Init
         if: steps.check.outputs.ok == 'true'

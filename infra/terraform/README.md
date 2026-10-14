@@ -21,7 +21,7 @@ Container Registry: cr.yandex/<reg>/flights-planner|flights-collector|flights-cr
 - Состояние Terraform — бакет `sereshotes-flights-tfstate` (`state.tf`, `backend.tf`): приватный,
   KMS-ключ `flights-tfstate`, версионирование, блокировка lock-файлом; пишет SA `flights-tfstate`.
 - Bucket `bucket_name` (Object Storage), Registry `flights`, сеть `flights-net` + подсеть.
-- VM `flights-app` (standard-v3, 2 vCPU / 100% / 12 ГБ, диск 100 ГБ, статический публичный IP `yandex_vpc_address.app`) + cloud-init. Память меняется на месте с остановкой VM (`allow_stopping_for_update`); размер диска на живой VM — `yc compute disk update <id> --size N` (в Terraform игнорируется).
+- VM `flights-app-d` (ru-central1-d с 2026-10-14, standard-v3, 2 vCPU / 100% / 12 ГБ, диск 100 ГБ, эфемерный публичный IP; A-запись — `cloudflare_dns_record.site`, см. комментарий о переезде в `main.tf`) + cloud-init. Память меняется на месте с остановкой VM (`allow_stopping_for_update`); размер диска на живой VM — `yc compute disk update <id> --size N` (в Terraform игнорируется).
 
 ## Разовый провижининг
 
