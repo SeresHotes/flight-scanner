@@ -11,13 +11,13 @@ variable "folder_id" {
 variable "zone" {
   type        = string
   description = "Зона доступности"
-  default     = "ru-central1-a"
+  default     = "ru-central1-d" # ru-central1-a недоступна с 2026-10-13
 }
 
 variable "subnet_id" {
   type        = string
   description = "ID существующей подсети в var.zone (переиспользуем — квота на сети занята)"
-  default     = "e9bc77jr01u7rgjpp5k8" # default-ru-central1-a
+  default     = "fl84982ta1p74ihem9hh" # default-ru-central1-d
 }
 
 variable "bucket_name" {
@@ -124,4 +124,16 @@ variable "ci_ssh_public_key" {
   type        = string
   description = "Публичный SSH-ключ деплоя для GitHub Actions (приватный — в Lockbox flights-ops); пусто — не добавлять"
   default     = ""
+}
+
+variable "cloudflare_api_token" {
+  type        = string
+  sensitive   = true
+  description = "Токен Cloudflare (Zone DNS Edit, sereshotes.dev) — Lockbox flights-terraform, ключ cloudflare_api_token"
+}
+
+variable "cloudflare_zone_id" {
+  type        = string
+  description = "Зона sereshotes.dev в Cloudflare"
+  default     = "056b44c3105c2b106f3b4a1d5d89e212"
 }

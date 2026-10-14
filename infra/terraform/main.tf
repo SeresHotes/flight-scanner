@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.7" # removed {}
   required_providers {
     yandex = {
       source  = "yandex-cloud/yandex"
@@ -8,6 +8,10 @@ terraform {
     random = {
       source  = "hashicorp/random"
       version = ">= 3.5"
+    }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = ">= 5.0"
     }
   }
 }
@@ -18,6 +22,11 @@ provider "yandex" {
   cloud_id  = var.cloud_id
   folder_id = var.folder_id
   zone      = var.zone
+}
+
+# DNS sereshotes.dev: A-запись site_domain следует за IP VM (токен — Lockbox flights-terraform).
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
 }
 
 # ---------------------------------------------------------------------------
@@ -94,15 +103,23 @@ data "yandex_compute_image" "ubuntu" {
 }
 
 # ---------------------------------------------------------------------------
-# Статический публичный IP VM: на него смотрит A-запись site_domain. Без него
-# адрес эфемерный и меняется при каждой остановке VM (смена памяти/диска).
-# На проде адрес 93.77.186.45 (ранее эфемерный) зарезервирован 01.10.2026 через
-# `yc vpc address update --reserved` и импортирован: terraform import yandex_vpc_address.app <id>.
+# Переезд в ru-central1-d (2026-10-14): зона ru-central1-a с 13.10 недоступна, VM и её
+# статический IP 93.77.186.45 (зональный) остались там. Старые ресурсы убраны из state
+# без удаления (`removed`), новая VM — flights-app-d с эфемерным IP (квота на статические
+# адреса исчерпана), A-запись site_domain ведёт cloudflare_dns_record.site. Когда зона вернётся —
+# удалить старые VM flights-app и адрес flights-app-ip через yc.
 # ---------------------------------------------------------------------------
-resource "yandex_vpc_address" "app" {
-  name = "flights-app-ip"
-  external_ipv4_address {
-    zone_id = var.zone
+removed {
+  from = yandex_vpc_address.app
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = yandex_compute_instance.app
+  lifecycle {
+    destroy = false
   }
 }
 
@@ -113,8 +130,8 @@ resource "yandex_vpc_address" "app" {
 # allow_stopping_for_update; данные на диске сохраняются, root-раздел cloud-init
 # (growpart/resizefs) расширяет при загрузке.
 # ---------------------------------------------------------------------------
-resource "yandex_compute_instance" "app" {
-  name                      = "flights-app"
+resource "yandex_compute_instance" "vm" {
+  name                      = "flights-app-d"
   platform_id               = "standard-v3"
   zone                      = var.zone
   service_account_id        = yandex_iam_service_account.app.id
@@ -134,9 +151,8 @@ resource "yandex_compute_instance" "app" {
   }
 
   network_interface {
-    subnet_id      = data.yandex_vpc_subnet.subnet.id
-    nat            = true
-    nat_ip_address = yandex_vpc_address.app.external_ipv4_address[0].address
+    subnet_id = data.yandex_vpc_subnet.subnet.id
+    nat       = true
   }
 
   metadata = {
@@ -155,6 +171,22 @@ resource "yandex_compute_instance" "app" {
   lifecycle {
     ignore_changes = [boot_disk[0].initialize_params[0].image_id, boot_disk[0].initialize_params[0].size]
   }
+}
+
+# A-запись сайта: после пересоздания VM (новый эфемерный IP) обновляется тем же apply.
+# DNS only: Caddy на VM сам выпускает сертификат Let's Encrypt (HTTP-01).
+import {
+  to = cloudflare_dns_record.site
+  id = "${var.cloudflare_zone_id}/9722d4b41e5db0a1d4702272b35a4609"
+}
+
+resource "cloudflare_dns_record" "site" {
+  zone_id = var.cloudflare_zone_id
+  name    = var.site_domain
+  type    = "A"
+  content = yandex_compute_instance.vm.network_interface[0].nat_ip_address
+  ttl     = 60
+  proxied = false
 }
 
 locals {

@@ -1,6 +1,6 @@
 output "vm_external_ip" {
   description = "Внешний IP VM. Заведите A-запись site_domain -> этот IP в Cloudflare"
-  value       = yandex_compute_instance.app.network_interface[0].nat_ip_address
+  value       = yandex_compute_instance.vm.network_interface[0].nat_ip_address
 }
 
 output "site_url" {

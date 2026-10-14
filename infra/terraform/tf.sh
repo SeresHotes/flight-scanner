@@ -16,7 +16,8 @@ lockbox() { yc lockbox payload get --name flights-terraform --key "$1"; }
 AWS_ACCESS_KEY_ID=$(lockbox tfstate_access_key)
 AWS_SECRET_ACCESS_KEY=$(lockbox tfstate_secret_key)
 TF_VAR_travelpayouts_token=$(lockbox travelpayouts_token)
-export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_VAR_travelpayouts_token
+TF_VAR_cloudflare_api_token=$(lockbox cloudflare_api_token)
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_VAR_travelpayouts_token TF_VAR_cloudflare_api_token
 
 [ -d .terraform ] || terraform init -input=false
 exec terraform "$@"
