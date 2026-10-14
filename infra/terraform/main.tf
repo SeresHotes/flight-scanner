@@ -216,6 +216,7 @@ locals {
   ])
 
   cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
-    env_b64 = base64encode(local.env_file)
+    ssh_keys = compact([var.ssh_public_key, var.ci_ssh_public_key])
+    env_b64  = base64encode(local.env_file)
   })
 }
