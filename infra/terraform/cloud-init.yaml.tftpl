@@ -6,6 +6,12 @@
 # deploy/compose.prod.yml едет внутри образа planner, run.sh копирует его в
 # /opt/flights/docker-compose.yml при каждом обновлении. cloud-init выполняется один
 # раз при создании VM, поэтому всё, что должно меняться деплоем, живёт в образах.
+# Ключи SSH (личный и деплоя CI): из метаданных ssh-keys Яндекс отдаёт cloud-init только
+# первую строку, поэтому все ключи пользователя ubuntu — здесь.
+ssh_authorized_keys:
+%{ for k in ssh_keys ~}
+  - ${k}
+%{ endfor ~}
 write_files:
   # Секреты и параметры: env_file для контейнеров и переменные подстановки compose.
   - path: /opt/flights/.env
